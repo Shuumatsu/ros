@@ -1,0 +1,34 @@
+[package]
+authors = ["curry <VanishingDante@gmail.com>"]
+edition = "2018"
+name = "ros"
+version = "0.1.0"
+
+# [lib]
+# crate-type = ["staticlib"]
+# name = "kernel"
+# path = "src/lib.rs"
+
+[dependencies]
+# cc = "1.0.62"
+# bit_field = "0.10.1"
+bitflags = "1.2.1"
+riscv = {git = "https://github.com/rust-embedded/riscv"}
+spin = "0.7.0"
+volatile = "0.4.2"
+
+[dependencies.lazy_static]
+features = ["spin_no_std"]
+version = "1.4.0"
+
+[dependencies.bitvec]
+default-features = false
+version = "0.19.4"
+
+[profile.dev]
+# abort on panic instead, disables the generation of unwinding symbol information
+panic = "abort"
+
+[profile.release]
+# abort on panic instead, disables the generation of unwinding symbol information
+panic = "abort"
