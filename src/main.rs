@@ -1,29 +1,37 @@
 #![no_std]
 #![no_main]
-#![feature(panic_info_message, global_asm, llvm_asm, asm, lang_items)]
+#![feature(const_panic, panic_info_message)]
+#![feature(lang_items)]
+#![feature(global_asm, llvm_asm, asm)]
+#![feature(alloc_error_handler)]
+#![feature(naked_functions)]
+// https://doc.rust-lang.org/alloc/prelude/index.html
+#![feature(alloc_prelude)]
+extern crate alloc;
+use alloc::prelude::v1::*;
+#[macro_use]
+extern crate static_assertions;
 
+mod allocator;
 mod arch;
 mod assembly;
+mod collections;
+mod common;
 mod echo;
+mod interrupt;
+mod machine;
 mod macros;
-mod mem;
+mod memory;
 mod start;
 mod uart;
-mod utils;
 
 // the -> ! means that this function won't return
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    print!("Aborting: ");
     if let Some(p) = info.location() {
-        println!(
-            "line {}, file {}: {}",
-            p.line(),
-            p.file(),
-            info.message().unwrap()
-        );
+        kprintln!("Aborting: file {}:{}: \n\t{}", p.file(), p.line(), info.message().unwrap());
     } else {
-        println!("no information available.");
+        kprintln!("Aborting: no information available.");
     }
     abort();
 }
@@ -32,6 +40,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 // turns off Rust's name mangling so the symbol is exactly eh_personality
 #[no_mangle]
 extern "C" fn abort() -> ! {
+    println!("[cpu: {}] enter extern \"C\" fn abort()", arch::riscv64::hart_id());
     loop {
         unsafe {
             riscv::asm::wfi();

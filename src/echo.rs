@@ -7,11 +7,11 @@ pub fn echo() -> ! {
             let mut driver = UART_DRIVER.lock();
             driver.get()
         } {
-            Some(8) => {
+            Some(8) | Some(0x7F) => {
                 // backspace really means to "move the cursor to the left by 1 character"
                 // the cursor would move, but the underlying text would still be there.
                 // so, our solution is to move the cursor, draw a space and then move the cursor left by that one space.
-                print!("{}{}{}", 8 as char, ' ', 8 as char);
+                print!("{}{}{}", 8 as char, b' ', 8 as char);
             }
             Some(10) | Some(13) => {
                 println!();

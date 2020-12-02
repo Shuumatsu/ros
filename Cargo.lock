@@ -49,6 +49,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ba62103ce691c2fd80fbae2213dfdda9ce60804973ac6b6e97de818ea7f52c8"
 
 [[package]]
+name = "kernel"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "bitvec",
+ "lazy_static",
+ "riscv",
+ "spin 0.7.0",
+ "static_assertions",
+ "volatile",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -90,7 +103,8 @@ checksum = "3b181ba2dcf07aaccad5448e8ead58db5b742cf85dfe035e2227f137a539a189"
 [[package]]
 name = "riscv"
 version = "0.6.0"
-source = "git+https://github.com/rust-embedded/riscv#4145e4aca0133c2b24fb4ccbbc13142588c314f3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2f0b705d428e9d0f78e2bb73093887ee58a83c9688de3faedbb4c0631c4618e"
 dependencies = [
  "bare-metal",
  "bit_field",
@@ -105,18 +119,6 @@ checksum = "88aa938cda42a0cf62a20cfe8d139ff1af20c2e681212b5b34adb5a58333f222"
 dependencies = [
  "lazy_static",
  "regex",
-]
-
-[[package]]
-name = "ros"
-version = "0.1.0"
-dependencies = [
- "bitflags",
- "bitvec",
- "lazy_static",
- "riscv",
- "spin 0.7.0",
- "volatile",
 ]
 
 [[package]]
@@ -154,6 +156,12 @@ name = "spin"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "652ac3743312871a5fb703f0337e68ffa3cdc28c863efad0b8dc858fa10c991b"
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "tap"

@@ -1,4 +1,4 @@
-// use volatile::Volatile;
+pub mod paging;
 
 #[inline(always)]
 pub fn hart_id() -> usize {
@@ -19,4 +19,15 @@ pub fn wait_forever() -> ! {
             riscv::asm::wfi();
         }
     }
+}
+
+#[inline(always)]
+pub fn stack_pointer() -> usize {
+    #[allow(unused_assignments)]
+    let mut sp: usize = 0;
+
+    unsafe {
+        asm!("mv {0}, sp", out(reg) sp);
+    }
+    sp
 }

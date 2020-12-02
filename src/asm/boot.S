@@ -41,10 +41,10 @@ _boot:
 
 2:    
     # stack grows from bottom to top, so we put the stack pointer to the very end of the stack range.
-    la      sp, _kernel_stack_end
+    la      sp, _kernel_stack_start
 
-    # Allocate 4096-byte stack for each hart
-    li      a0, 1024*4
+    # Allocate 64kb stack for each hart
+    li      a0, 64*1024
 	csrr    a1, mhartid
 	addi    a1, a1, 1
     mul     a0, a0, a1

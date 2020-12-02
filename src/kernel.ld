@@ -14,6 +14,11 @@ MEMORY {
     ram  (wxa) : ORIGIN = 0x80000000, LENGTH = 128M
 }
 
+/* _memory_start will be set to 0x8000_0000 here. We use ORIGIN(ram) so that it will take
+whatever we set the origin of ram to.  */
+PROVIDE(_memory_start = ORIGIN(ram));
+PROVIDE(_memory_end = ORIGIN(ram) + LENGTH(ram));
+
 /*
 PHDRS is short for "program headers", which we specify three here:
     text - CPU instructions (executable sections)
@@ -100,6 +105,9 @@ SECTIONS {
         . = ALIGN(16);
         *(.rodata .rodata.*)
 
+        /* in case rodata section is empty, ensure it occupys at least one page */
+        . = . + 4096;
+
         PROVIDE(_rodata_end = .);
     } >ram AT>ram :text
 
@@ -110,6 +118,9 @@ SECTIONS {
         *(.sdata .sdata.*) 
         . = ALIGN(16);
         *(.data .data.*)
+
+        /* in case data section is empty, ensure it occupys at least one page */
+        . = . + 4096;
 
         PROVIDE(_data_end = .);
     } >ram AT>ram :data
@@ -122,26 +133,28 @@ SECTIONS {
         . = ALIGN(16);
         *(.bss .bss.*)
 
+        /* in case bss section is empty, ensure it occupys at least one page */
+        . = . + 4096;
+
         PROVIDE(_bss_end = .);
     } >ram AT>ram :bss
 
-
-    /* _memory_start will be set to 0x8000_0000 here. We use ORIGIN(ram) so that it will take
-    whatever we set the origin of ram to.  */
-    PROVIDE(_memory_start = ORIGIN(ram));
 
     /*
     the stack grows from higher memory to lower memory (bottom to top).
     we set the stack at the very bottom of its allocated slot.
     */
     /* our kernel stack starts at the end of the bss segment (_bss_end). */
-    PROVIDE(_kernel_stack_start = _bss_end);
+    . = ALIGN(4096);
+    PROVIDE(_kernel_stack_start = .);
     /* we're allocating 0x80000 bytes (512 KiB) to our kernel stack. */
-    PROVIDE(_kernel_stack_end = _kernel_stack_start + 0x80000);
-    PROVIDE(_memory_end = ORIGIN(ram) + LENGTH(ram));
+    . = . + 0x100000;
+    PROVIDE(_kernel_stack_end = .);
+    
 
     /* our heap starts right after the kernel stack */
     /* we don't align here because we let the kernel determine how it wants to do this. */
-    PROVIDE(_heap_start = _kernel_stack_end);
+    . = ALIGN(4096);
+    PROVIDE(_heap_start = _kernel_stack_end + 4096);
     PROVIDE(_heap_size = _memory_end - _heap_start);
 }
