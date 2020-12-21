@@ -1,12 +1,12 @@
-use crate::collections::memlist::MemList;
-use crate::common::{align_down, align_up};
+use crate::collections::memlist::{MemList, Node};
+use crate::utils::{align_down, align_up};
 use crate::{kprint, kprintln};
 use core::alloc::Layout;
 use core::fmt;
 use core::mem::size_of;
 
 const MIN_ALLOCATION_SIZE_ORDER: usize =
-    size_of::<MemList>().next_power_of_two().trailing_zeros() as usize;
+    size_of::<Node>().next_power_of_two().trailing_zeros() as usize;
 const MAX_ALLOCATION_SIZE_ORDER: usize = 31;
 const BUCKET_COUNT: usize = MAX_ALLOCATION_SIZE_ORDER + 1;
 

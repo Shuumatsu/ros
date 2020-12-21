@@ -1,4 +1,5 @@
 use core::iter;
+use core::mem::size_of;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -6,9 +7,11 @@ pub struct Node {
     prev: Option<*mut Node>,
     next: Option<*mut Node>,
 }
+const_assert_eq!(size_of::<Option<*mut Node>>(), 16);
+const_assert_eq!(size_of::<Option<Node>>(), 32);
 
 impl Node {
-    pub unsafe fn isolate(&mut self) {
+    unsafe fn isolate(&mut self) {
         if let Some(prev) = self.prev {
             (*prev).next = self.next;
         }

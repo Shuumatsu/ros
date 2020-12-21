@@ -1,5 +1,3 @@
-global_asm!(include_str!("asm/boot.S"));
-
 extern "C" {
     static _text_start: usize;
 }

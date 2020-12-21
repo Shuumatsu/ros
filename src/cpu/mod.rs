@@ -1,4 +1,4 @@
-use crate::assembly::*;
+use crate::memory::layout::*;
 use crate::{kprint, kprintln};
 
 pub fn print_info() {

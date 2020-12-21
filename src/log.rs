@@ -1,6 +1,5 @@
 use core::fmt;
 
-
 pub fn _print(with_cpu: bool, args: fmt::Arguments) {
     use crate::arch::riscv64 as arch;
     use crate::uart::UART_DRIVER;
@@ -8,17 +7,17 @@ pub fn _print(with_cpu: bool, args: fmt::Arguments) {
 
     let mut driver = UART_DRIVER.lock();
 
-    if with_cpu {
-        driver
-            .write_fmt(format_args!("[cpu {}, sp: {:#x}] ", arch::hart_id(), arch::stack_pointer()))
-            .unwrap();
-    }
+    // if with_cpu {
+    //     driver
+    //         .write_fmt(format_args!("[cpu {}, sp: {:#x}] ", arch::hart_id(), arch::stack_pointer()))
+    //         .unwrap();
+    // }
     driver.write_fmt(args).unwrap();
 }
 #[macro_export]
 macro_rules! print {
     ($($args:tt)+) => ({
-        crate::macros::_print(false, format_args!($($args)*));
+        crate::log::_print(false, format_args!($($args)*));
     });
 }
 #[macro_export]
@@ -34,7 +33,7 @@ macro_rules! println {
 #[macro_export]
 macro_rules! kprint {
     ($($args:tt)+) => ({
-        crate::macros::_print(true, format_args!($($args)*));
+        crate::log::_print(true, format_args!($($args)*));
     });
 }
 #[macro_export]

@@ -4,22 +4,19 @@ use arch::{paging::sv39::virt_to_phys, stack_pointer};
 use riscv::register::*;
 
 use crate::arch::riscv64 as arch;
+use crate::cpu;
 use crate::interrupt;
-use crate::machine;
 use crate::memory;
 use crate::{kprint, kprintln, print, println};
-
 
 #[no_mangle]
 unsafe extern "C" fn start() {
     if arch::hart_id() == 0 {
-        machine::print_info();
+        cpu::print_info();
 
         kprintln!("initializing interrupts...");
         interrupt::init();
-
-        kprintln!("initializing paging...");
-        memory::paging::init();
+        kprintln!("initializing interrupts completed");
 
         kprintln!("setting csrs for switching to supervisor mode...");
         // next mode is supervisor mode
@@ -30,8 +27,7 @@ unsafe extern "C" fn start() {
         kprintln!("switching to supervisor mode...");
         asm!("mret");
 
-
-        assert!(false, "should not be able to reach here");
+        panic!("should not be able to reach here");
     } else {
         kmain_ap();
     }
@@ -39,9 +35,15 @@ unsafe extern "C" fn start() {
 
 #[no_mangle]
 unsafe extern "C" fn kmain() {
-    println!("This is my operating system!");
-    println!("I'm so awesome. If you start typing something, I'll show you what you typed!");
+    llvm_asm!("ebreak"::::"volatile");
 
+    println!("initializing paging...");
+    memory::paging::init();
+    println!("initializing paging completed");
+
+    println!("This is my operating system!");
+
+    println!("I'm so awesome. If you start typing something, I'll show you what you typed!");
     crate::echo::echo();
 }
 

@@ -1,7 +1,7 @@
 pub mod physical_addr;
 pub mod virtual_addr;
 
-use crate::common::{extract_value, set_range, KILOBYTE};
+use crate::utils::{extract_value, set_range, KILOBYTE};
 
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use core::fmt;
@@ -62,6 +62,7 @@ pub const USER_READ_WRITE_EXECUTE: usize = READ_WRITE_EXECUTE | USER;
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct Entry(usize);
+const_assert_eq!(size_of::<Entry>(), ENTRY_SIZE);
 
 impl fmt::Debug for Entry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -168,6 +169,7 @@ impl Entry {
 pub struct Table {
     entries: [Entry; ENTRIES_PER_PAGE],
 }
+const_assert_eq!(size_of::<Table>(), PAGE_SIZE);
 
 unsafe impl Send for Table {}
 

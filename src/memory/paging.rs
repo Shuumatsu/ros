@@ -6,14 +6,14 @@ use spin::Mutex;
 pub use crate::arch::riscv64::paging::sv39::{
     virt_to_phys, PhysicalAddr, Table, VirtualAddr, PAGE_SIZE,
 };
-use crate::assembly::{
+use crate::interrupt::CLINT_BASE_ADDR;
+use crate::memory::layout::{
     bss_end, bss_start, data_end, data_start, heap_size, heap_start, kernel_stack_end,
     kernel_stack_start, rodata_end, rodata_start, text_end, text_start,
 };
-use crate::common::{align_down, align_up};
-use crate::interrupt::CLINT_BASE_ADDR;
 use crate::uart::UART_BASE_ADDR;
-use crate::{arch::riscv64::paging::sv39 as paging, assembly::memory_end};
+use crate::utils::{align_down, align_up};
+use crate::{arch::riscv64::paging::sv39 as paging, memory::layout::memory_end};
 use crate::{kprint, kprintln};
 
 pub unsafe fn id_map_range(root: *mut Table, mut start: usize, mut end: usize, bits: usize) {

@@ -10,30 +10,20 @@ version = "0.1.0"
 # path = "src/lib.rs"
 
 [dependencies]
-# cc = "1.0.62"
-# bit_field = "0.10.1"
 bitflags = "1.2.1"
+bitvec = {default-features = false, version = "0.19.4"}
+lazy_static = {version = "1.4.0", features = ["spin_no_std"]}
+riscv = {git = "https://github.com/rcore-os/riscv", features = ["inline-asm"]}
 spin = "0.7.0"
 static_assertions = "1.1.0"
 volatile = "0.4.2"
 
-[dependencies.riscv]
-# features = ["riscv64"]
-# git = "https://github.com/rust-embedded/riscv"
-version = "0.6.0"
-
-[dependencies.lazy_static]
-features = ["spin_no_std"]
-version = "1.4.0"
-
-[dependencies.bitvec]
-default-features = false
-version = "0.19.4"
-
 [profile.dev]
 # abort on panic instead, disables the generation of unwinding symbol information
+debug = true
 panic = "abort"
 
 [profile.release]
 # abort on panic instead, disables the generation of unwinding symbol information
+debug = true
 panic = "abort"

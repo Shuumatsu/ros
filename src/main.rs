@@ -14,16 +14,19 @@ extern crate static_assertions;
 
 mod allocator;
 mod arch;
-mod assembly;
 mod collections;
-mod common;
+mod context;
+mod isa;
+mod cpu;
 mod echo;
 mod interrupt;
-mod machine;
-mod macros;
+mod log;
 mod memory;
 mod start;
 mod uart;
+mod utils;
+
+global_asm!(include_str!("boot.S"));
 
 // the -> ! means that this function won't return
 #[panic_handler]

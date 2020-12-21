@@ -1,4 +1,4 @@
-use crate::common::{extract_value, set_range};
+use crate::utils::{extract_value, set_range};
 use bitflags::bitflags;
 use core::fmt;
 use core::ptr;

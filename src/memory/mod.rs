@@ -1,15 +1,15 @@
-pub mod paging;
-
 use crate::allocator::Allocator;
+use crate::memory::layout::{heap_start, memory_end};
 use crate::{kprint, kprintln};
-use assembly::{heap_start, memory_end};
+
+pub mod layout;
+pub mod paging;
 
 use core::alloc::{GlobalAlloc, Layout};
 
 use lazy_static::lazy_static;
 use spin::Mutex;
 
-use crate::assembly;
 
 lazy_static! {
     static ref ALLOCATOR: Mutex<Allocator> = unsafe {
