@@ -54,6 +54,8 @@ impl VirtualAddr {
         }
     }
 
+    pub const fn extract_bits(&self) -> usize { self.0 }
+
     pub fn extract_offset(&self) -> usize { extract_value(self.0, (1 << 12) - 1, 0) }
     pub fn set_offset(&mut self, offset: usize) -> Self {
         VirtualAddr(set_range(self.0, offset, 0, 12))

@@ -103,11 +103,10 @@ checksum = "3b181ba2dcf07aaccad5448e8ead58db5b742cf85dfe035e2227f137a539a189"
 [[package]]
 name = "riscv"
 version = "0.6.0"
-source = "git+https://github.com/rcore-os/riscv#21e32ee1dc786cc0d5006ceee0040ce4f8398575"
+source = "git+https://github.com/rust-embedded/riscv#4145e4aca0133c2b24fb4ccbbc13142588c314f3"
 dependencies = [
  "bare-metal",
  "bit_field",
- "bitflags",
  "riscv-target",
 ]
 

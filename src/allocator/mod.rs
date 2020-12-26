@@ -1,6 +1,6 @@
 use crate::collections::memlist::{MemList, Node};
 use crate::utils::{align_down, align_up};
-use crate::{kprint, kprintln};
+use crate::{print, println};
 use core::alloc::Layout;
 use core::fmt;
 use core::mem::size_of;
@@ -30,7 +30,7 @@ impl Allocator {
     pub unsafe fn add_to_heap(&mut self, mut start: usize, mut end: usize) {
         start = align_up(start, size_of::<MemList>());
         end = align_down(end, size_of::<MemList>());
-        kprintln!("[add_to_heap] add [{:#x}, {:#x}) to allocator", start, end);
+        println!("[add_to_heap] add [{:#x}, {:#x}) to allocator", start, end);
 
         assert!(start <= end);
         let mut remaining: usize = end - start;
@@ -72,8 +72,8 @@ impl Allocator {
                 }
 
                 self.allocated += 2_usize.pow(target_order as u32);
-                // kprintln!("[alloc] after alloc for {:?} \n\t{:?}", layout, self);
-                // kprintln!("[alloc] allocated at {:#x}", curr_start);
+                // println!("[alloc] after alloc for {:?} \n\t{:?}", layout, self);
+                // println!("[alloc] allocated at {:#x}", curr_start);
                 curr_start as *mut u8
             }
         }
@@ -98,7 +98,7 @@ impl Allocator {
     }
 
     pub unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
-        // kprintln!("[dealloc] before dealloc \n\t{:?}", self);
+        // println!("[dealloc] before dealloc \n\t{:?}", self);
         let size = core::cmp::max(
             layout.size().next_power_of_two(),
             core::cmp::max(layout.align(), size_of::<MemList>()),
@@ -108,6 +108,6 @@ impl Allocator {
         self.insert_block(ptr, target_order);
         self.allocated -= size;
 
-        // kprintln!("[dealloc] after dealloc \n\t{:?}", self);
+        // println!("[dealloc] after dealloc \n\t{:?}", self);
     }
 }

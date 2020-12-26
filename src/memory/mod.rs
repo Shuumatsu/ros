@@ -1,6 +1,6 @@
 use crate::allocator::Allocator;
 use crate::memory::layout::{heap_start, memory_end};
-use crate::{kprint, kprintln};
+use crate::{print, println};
 
 pub mod layout;
 pub mod paging;
@@ -10,12 +10,11 @@ use core::alloc::{GlobalAlloc, Layout};
 use lazy_static::lazy_static;
 use spin::Mutex;
 
-
 lazy_static! {
     static ref ALLOCATOR: Mutex<Allocator> = unsafe {
-        kprintln!("[allocator] initializing global heap allocator...");
+        println!("[allocator] initializing global heap allocator...");
         let allocator = Allocator::new(heap_start(), memory_end());
-        kprintln!(
+        println!(
             "[allocator] global heap allocator created at {:#x}",
             &allocator as *const _ as usize
         );
@@ -28,9 +27,9 @@ struct OsAllocator;
 
 unsafe impl GlobalAlloc for OsAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // kprintln!("allocating memory for {:?}", layout);
+        // println!("allocating memory for {:?}", layout);
         let r = ALLOCATOR.lock().alloc(layout);
-        // kprintln!("[OsAllocator] allocated memory for {:?}, at {:?}", layout, r);
+        // println!("[OsAllocator] allocated memory for {:?}, at {:?}", layout, r);
         r
     }
 

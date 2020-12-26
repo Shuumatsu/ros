@@ -1,16 +1,9 @@
-use core::convert::TryInto;
-use core::fmt::{Error, Write};
-use lazy_static::lazy_static;
-use spin::Mutex;
-
 pub struct UartDriver {
     base_address: usize,
 }
 
-// QEMU emulates the NS16550A UART chipset.
 // We control this UART system using memory mapped I/O at base address 0x1000_0000.
 // we can control the NS16550a registers, the transmitter (THR) and receiver (RBR) registers are both exactly 8-bits
-pub const UART_BASE_ADDR: usize = 0x1000_0000;
 
 pub const RHR_OFFSET: usize = 0; // receive holding register (for input bytes)
 pub const THR_OFFSET: usize = 0; // transmit holding register (for output bytes)
@@ -32,14 +25,6 @@ pub const LCR_BAUD_LATCH: u8 = 1 << 7; // special mode to set baud rate
 pub const LSR_OFFSET: usize = 5; // line status register
 pub const LSR_RX_READY: u8 = 1 << 0; // input is waiting to be read from RHR
 pub const LSR_TX_IDLE: u8 = 1 << 5; // THR can accept another character to send
-
-lazy_static! {
-    pub static ref UART_DRIVER: Mutex<UartDriver> = Mutex::new({
-        let mut driver = UartDriver::new(UART_BASE_ADDR);
-        driver.init();
-        driver
-    });
-}
 
 // the UART control registers; http://byterunner.com/16550.html
 impl UartDriver {
@@ -93,14 +78,5 @@ impl UartDriver {
                 Some(ptr.add(RHR_OFFSET).read_volatile())
             }
         }
-    }
-}
-
-impl Write for UartDriver {
-    fn write_str(&mut self, out: &str) -> Result<(), Error> {
-        for c in out.bytes() {
-            self.put_sync(c);
-        }
-        Ok(())
     }
 }

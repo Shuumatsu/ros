@@ -1,5 +1,5 @@
 use crate::utils::{extract_value, set_range};
-use crate::{kprint, kprintln};
+use crate::{print, println};
 use alloc::format;
 use bitflags::bitflags;
 use core::fmt;
@@ -42,6 +42,8 @@ impl PhysicalAddr {
 
     pub const fn as_ptr<T>(&self) -> *const T { self.0 as *const T }
     pub const fn as_mut_ptr<T>(&self) -> *mut T { self.0 as *mut T }
+
+    pub const fn extract_bits(&self) -> usize { self.0 }
 
     pub const fn extract_ppn(&self, idx: usize) -> usize {
         match idx {

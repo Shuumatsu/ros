@@ -1,7 +1,6 @@
-use crate::uart::UART_DRIVER;
-use crate::{print, println};
-
 pub fn echo() -> ! {
+    println!("I'm so awesome. If you start typing something, I'll show you what you typed!");
+
     loop {
         match {
             let mut driver = UART_DRIVER.lock();

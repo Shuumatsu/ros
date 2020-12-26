@@ -8,7 +8,7 @@ use core::fmt;
 use core::mem::size_of;
 use core::ptr;
 
-use crate::{kprint, kprintln, panic};
+use crate::{panic, print, println};
 
 pub use self::physical_addr::*;
 pub use self::virtual_addr::*;
@@ -178,9 +178,9 @@ impl Table {
 }
 
 unsafe fn alloc_entry_page(entry: &mut Entry) {
-    // kprintln!("[alloc_entry_page] entry {:?} not valid, allocating new page...", entry);
+    // println!("[alloc_entry_page] entry {:?} not valid, allocating new page...", entry);
     let ptr = alloc_zeroed(Layout::new::<Table>());
-    // kprintln!("[alloc_entry_page] allocated new page for entry at {:?}", ptr);
+    // println!("[alloc_entry_page] allocated new page for entry at {:?}", ptr);
 
     entry.set_ppn(PhysicalAddr::new(ptr as usize));
     entry.set_valid();
@@ -191,7 +191,7 @@ unsafe fn alloc_entry_page(entry: &mut Entry) {
 ///       The bits MUST include one or more of the following:
 ///          Read, Write, Execute
 pub unsafe fn map(root: *mut Table, vaddr: VirtualAddr, paddr: PhysicalAddr, flags: usize) {
-    // kprintln!(
+    // println!(
     //     "[sv39::map] \n\troot: {:?}, \n\tvaddr: {:?}, \n\tpaddr: {:?}, flags: {:b}",
     //     root,
     //     vaddr,
@@ -201,11 +201,11 @@ pub unsafe fn map(root: *mut Table, vaddr: VirtualAddr, paddr: PhysicalAddr, fla
 
     let mut table = root;
     for lvl in (1..=2).rev() {
-        // kprintln!("[sv39::map] lvl: {}, root: {:?}, tbl: {:?}", lvl, root, table);
+        // println!("[sv39::map] lvl: {}, root: {:?}, tbl: {:?}", lvl, root, table);
 
         let entry = &mut (*table).entries[vaddr.extract_vpn(lvl)];
         if !entry.is_valid() {
-            // kprintln!(
+            // println!(
             //     "[sv39::map] entry {:?} not valid for {:?} in {:?}, level {}",
             //     entry,
             //     vaddr,
@@ -215,7 +215,7 @@ pub unsafe fn map(root: *mut Table, vaddr: VirtualAddr, paddr: PhysicalAddr, fla
             alloc_entry_page(entry);
         }
 
-        // kprintln!("[sv39::map] entry {:?}", entry);
+        // println!("[sv39::map] entry {:?}", entry);
         let ppn = entry.extract_ppn_all();
         table = PhysicalAddr::from(ppn, 0).as_mut_ptr::<Table>();
     }

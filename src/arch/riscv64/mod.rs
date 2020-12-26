@@ -1,4 +1,5 @@
 pub mod paging;
+pub mod sbi;
 
 #[inline(always)]
 pub fn hart_id() -> usize {

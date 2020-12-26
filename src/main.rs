@@ -15,15 +15,16 @@ extern crate static_assertions;
 mod allocator;
 mod arch;
 mod collections;
-mod context;
-mod isa;
 mod cpu;
-mod echo;
-mod interrupt;
-mod log;
+mod drivers;
+mod isa;
+mod lang_items;
+#[macro_use]
+mod console;
 mod memory;
+mod proc;
 mod start;
-mod uart;
+mod trap;
 mod utils;
 
 global_asm!(include_str!("boot.S"));
@@ -43,7 +44,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 // turns off Rust's name mangling so the symbol is exactly eh_personality
 #[no_mangle]
 extern "C" fn abort() -> ! {
-    println!("[cpu: {}] enter extern \"C\" fn abort()", arch::riscv64::hart_id());
+    kprintln!("[cpu: {}] enter extern \"C\" fn abort()", arch::riscv64::hart_id());
     loop {
         unsafe {
             riscv::asm::wfi();

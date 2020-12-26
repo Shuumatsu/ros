@@ -1,4 +1,3 @@
-use crate::{kprint, kprintln};
 use alloc::{format, string::String};
 use core::mem::size_of;
 use core::ops::Range;
@@ -65,7 +64,7 @@ where
     T: From<u8>,
 {
     let mut ptr = range.start;
-    kprintln!("{:?}", range);
+    println!("{:?}", range);
     while ptr < range.end {
         core::ptr::write_volatile(ptr, T::from(0));
         ptr = ptr.offset(1);
