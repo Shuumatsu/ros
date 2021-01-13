@@ -7,7 +7,6 @@ use riscv::register::*;
 use riscv::{interrupt, register::scause::Trap};
 
 // use context::*;
-use crate::{print, println};
 pub use trapframe::*;
 
 global_asm!(include_str!("trampoline.S"));
@@ -50,8 +49,8 @@ extern "C" {
 // 在 RISCV 中，这个地址由 stvec 控制寄存器保存。init 将其设置为 trap_handler 的地址
 pub unsafe fn init() {
     interrupt::free(|_| {
-        exceptions::init();
         interrupts::init();
+        exceptions::init();
 
         // stvec 中包含了向量基址（BASE） 和向量模式（MODE）
         // 向量基址（BASE） 必须按照 4 字节对齐。
@@ -60,7 +59,7 @@ pub unsafe fn init() {
         // 向量模式（Vectored） MODE = 1 ，对第 i 种中断 ，跳转到 BASE + i * 4；对所有异常，仍跳转到 BASE
         // 我们采用第一种模式，先进入统一的处理函数，之后再根据中断 / 异常种类进行不同处理。
         let mode = stvec::TrapMode::Direct;
-        println!("[interrupts::init] set stec register: trap_entry {:#x}, mode {:?}", addr, mode);
+        kprintln!("[interrupts::init] set stec register: trap_entry {:#x}, mode {:?}", addr, mode);
         stvec::write(addr, mode);
 
         // 当中断发生时，cpu 跳转到中断处理函数。sscratch 存储了函数将要用到的 sp
@@ -73,11 +72,11 @@ pub unsafe fn init() {
 
 #[no_mangle]
 unsafe extern "C" fn trap_handler(tf: &mut TrapFrame) {
-    println!("[trap_handler] enter trap_handler");
+    kprintln!("[trap_handler] enter trap_handler");
 
     let cause = scause::read().cause();
     let epc = sepc::read();
-    println!("[trap_handler] scause: {:?}, sepc: {:#x}", cause, epc);
+    kprintln!("[trap_handler] scause: {:?}, sepc: {:#x}", cause, epc);
 
     match cause {
         Trap::Exception(e) => exceptions::handler(e, tf),
@@ -86,7 +85,7 @@ unsafe extern "C" fn trap_handler(tf: &mut TrapFrame) {
 }
 
 unsafe extern "C" fn user_entry() {
-    println!("enter user_entry");
+    kprintln!("enter user_entry");
 
     unimplemented!("user_entry")
 }

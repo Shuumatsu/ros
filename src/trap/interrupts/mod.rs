@@ -1,4 +1,4 @@
-use riscv::register::{scause::Interrupt, sstatus};
+use riscv::register::{scause::Interrupt, sie, sstatus};
 
 use crate::trap::TrapFrame;
 use crate::{print, println};
@@ -7,14 +7,18 @@ mod clint;
 mod plic;
 
 pub unsafe fn init() {
-    println!("delegate all interrupts to supervisor mode");
+    kprintln!("delegate all interrupts to supervisor mode");
     asm!("li t0, 0xffff");
     asm!("csrw mideleg, t0");
+
+    sie::set_sext();
+    sie::set_stimer();
+    sie::set_ssoft();
 
     clint::init();
     plic::init();
 
-    println!("enable supervisor interrupts");
+    kprintln!("enable supervisor interrupts");
     sstatus::set_sie();
 }
 

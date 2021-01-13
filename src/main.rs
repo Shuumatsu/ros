@@ -23,6 +23,7 @@ mod lang_items;
 mod console;
 mod memory;
 mod proc;
+mod sbi;
 mod start;
 mod trap;
 mod utils;

@@ -74,7 +74,7 @@ unsafe fn complete(intr_id: usize) {
 }
 
 pub unsafe fn init() {
-    println!("enable plic interrupts");
+    kprintln!("enable plic interrupts");
     sie::set_sext();
 
     enable(UART_INTR_ID);

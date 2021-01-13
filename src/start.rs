@@ -2,13 +2,19 @@ use riscv::register::*;
 
 use crate::arch::riscv64 as arch;
 use crate::cpu;
+use crate::memory::layout::{clint_mtimecmp, CLINT_MTIME};
 use crate::trap;
 
 // static mut KERNEL_STARTED: bool = false;
+static INTERVAL: u64 = 10_0000;
 
 #[no_mangle]
 unsafe extern "C" fn start() {
-    if arch::hart_id() == 0 {
+    // disable paging for now.
+    satp::set(satp::Mode::Bare, 0, 0);
+
+    let hart = arch::hart_id();
+    if hart == 0 {
         cpu::print_info();
     }
 
@@ -63,4 +69,11 @@ unsafe extern "C" fn kmain_ap() -> ! {
     scheduler();
 }
 
-fn scheduler() -> ! { arch::wait_forever() }
+fn scheduler() -> ! {
+    loop {
+        unsafe {
+            llvm_asm!("ebreak"::::"volatile");
+        }
+    }
+    arch::wait_forever()
+}

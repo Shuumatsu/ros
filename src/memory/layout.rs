@@ -157,7 +157,7 @@ pub const CLINT_SIZE: usize = 0x0001_0000;
 
 pub fn clint_mtimecmp(hartid: usize) -> usize { CLINT_BASE_ADDR + 0x4000 + 8 * (hartid) }
 // cycles since boot.
-pub fn clint_mtime(hartid: usize) -> usize { CLINT_BASE_ADDR + 0xBFF8 }
+pub const CLINT_MTIME: usize = CLINT_BASE_ADDR + 0xBFF8;
 
 // ---
 
