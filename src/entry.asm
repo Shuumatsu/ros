@@ -36,6 +36,4 @@ _start:
 
 
 4:
-.global _before_entry
-_before_entry:
     call    rust_entry

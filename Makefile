@@ -1,3 +1,5 @@
+# https://seisman.github.io/how-to-write-makefile/introduction.html
+
 # Building
 TARGET := riscv64gc-unknown-none-elf
 MODE := release
@@ -26,18 +28,9 @@ env:
 	rustup component add rust-src
 	rustup component add llvm-tools-preview
 
-$(KERNEL_BIN): kernel
-	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
-
 kernel:
-	@echo Platform: $(BOARD)
-	@cp src/linker-$(BOARD).ld src/linker.ld
-	@cargo build --$(MODE)
-	@rm src/linker.ld
-
-clean:
-	@cargo clean
-
+	@cargo build --release
+	
 disasm: kernel
 	@$(OBJDUMP) $(DISASM) $(KERNEL_ELF) | less
 
@@ -46,30 +39,28 @@ disasm-vim: kernel
 	@vim $(DISASM_TMP)
 	@rm $(DISASM_TMP)
 
-run: run-inner
+$(KERNEL_BIN): kernel
+	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
 
-gdb: build
+run: build
 	@qemu-system-riscv64 \
-		-s -S \
-		-machine virt \
-		-smp 1 \
-		-nographic \
-		-bios $(BOOTLOADER) \
-		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
-
-		
-run-inner: build
-	@qemu-system-riscv64 \
-		-machine virt \
 		-smp 4 \
+		-machine virt \
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
 
 debug: build
-	@tmux new-session -d \
-		"qemu-system-riscv64 -machine virt -nographic -bios $(BOOTLOADER) -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) -s -S" && \
-		tmux split-window -h "riscv64-unknown-elf-gdb -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'" && \
-		tmux -2 attach-session -d
+	@qemu-system-riscv64 \
+		-s -S \
+		-smp 4 \
+		-machine virt \
+		-nographic \
+		-bios $(BOOTLOADER) \
+		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
+
+clean:
+	@cargo clean
+
 
 .PHONY: build env kernel clean disasm disasm-vim run-inner

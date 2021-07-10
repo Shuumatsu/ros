@@ -1,9 +1,11 @@
 #![no_std]
 #![no_main]
 #![feature(llvm_asm)]
+#![feature(core_intrinsics)]
 #![feature(panic_info_message)]
 #![feature(global_asm)]
 
+use core::intrinsics::volatile_load;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use log::{info, warn, LevelFilter};
@@ -38,7 +40,10 @@ extern "C" fn rust_entry(hart_id: usize) -> ! {
     }
 }
 
+#[no_mangle]
 fn rust_main(hart_id: usize) -> ! {
+    println!("main hart {} started", hart_id);
+
     logger::init();
 
     info!(".text [{:#x}, {:#x})", *TEXT_START, *TEXT_END);
@@ -48,15 +53,14 @@ fn rust_main(hart_id: usize) -> ! {
 
     HAS_STARTED.store(true, Ordering::SeqCst);
 
-    println!("main hart {} started", hart_id);
-
     loop {}
 }
 
+#[no_mangle]
 fn rust_main_ap(hart_id: usize) -> ! {
     while !HAS_STARTED.load(Ordering::SeqCst) {}
 
-    println!("hart {:?} started", hart_id);
+    println!("hart {:?} started", hart_id + 1 - 1);
 
     loop {}
 }
