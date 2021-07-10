@@ -44,6 +44,7 @@ $(KERNEL_BIN): kernel
 
 run: build
 	@qemu-system-riscv64 \
+		-s \
 		-smp 4 \
 		-machine virt \
 		-nographic \

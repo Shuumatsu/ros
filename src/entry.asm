@@ -36,4 +36,7 @@ _start:
 
 
 4:
-    call    rust_entry
+    bnez    a0, 5f
+    call    rust_main
+5:
+    call    rust_main_ap

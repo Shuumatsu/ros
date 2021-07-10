@@ -15,11 +15,13 @@ use spin::Mutex;
 extern crate lazy_static;
 #[macro_use]
 mod console;
+mod cpu;
 mod lang_items;
 mod logger;
 mod memory;
 mod sbi;
 
+use crate::cpu::CPU;
 use crate::logger::ColorLogger;
 use crate::memory::layout::{
     BSS_END, BSS_START, DATA_END, DATA_START, KERNEL_STACK_END, KERNEL_STACK_START, RODATA_END,
@@ -32,29 +34,24 @@ global_asm!(include_str!("entry.asm"));
 static HAS_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
-extern "C" fn rust_entry(hart_id: usize) -> ! {
-    if hart_id == 0 {
-        rust_main(hart_id)
-    } else {
-        rust_main_ap(hart_id)
-    }
-}
-
-#[no_mangle]
 fn rust_main(hart_id: usize) -> ! {
-    println!(
-        "main hart {} started, {:x}",
-        hart_id, &hart_id as *const _ as usize
-    );
+    println!("main hart initializing");
 
     logger::init();
 
-    info!(".text [{:#x}, {:#x})", *TEXT_START, *TEXT_END);
-    info!(".rodata [{:#x}, {:#x})", *RODATA_START, *RODATA_END);
-    info!(".data [{:#x}, {:#x})", *DATA_START, *DATA_END);
-    info!(".bss [{:#x}, {:#x})", *BSS_START, *BSS_END);
+    info!("=== memory layout ===");
+    info!("text_start: {:#x}, text_end: {:#x}", *TEXT_START, *TEXT_END);
+    info!(
+        "rodata_start: {:#x}, rodata_end: {:#x}",
+        *RODATA_START, *RODATA_END
+    );
+    info!("data_start: {:#x}, data_end: {:#x}", *DATA_START, *DATA_END);
+    info!("bss_start: {:#x}, bss_end: {:#x}", *BSS_START, *BSS_END);
 
     HAS_STARTED.store(true, Ordering::SeqCst);
+
+    let cpu = CPU { hart_id };
+    println!("main hart {} started", cpu.hart_id);
 
     loop {}
 }
@@ -63,10 +60,8 @@ fn rust_main(hart_id: usize) -> ! {
 fn rust_main_ap(hart_id: usize) -> ! {
     while !HAS_STARTED.load(Ordering::SeqCst) {}
 
-    println!(
-        "hart {} started, {:x}",
-        hart_id, &hart_id as *const _ as usize
-    );
+    let cpu = CPU { hart_id };
+    println!("hart {} started", cpu.hart_id);
 
     loop {}
 }
