@@ -42,7 +42,10 @@ extern "C" fn rust_entry(hart_id: usize) -> ! {
 
 #[no_mangle]
 fn rust_main(hart_id: usize) -> ! {
-    println!("main hart {} started", hart_id);
+    println!(
+        "main hart {} started, {:x}",
+        hart_id, &hart_id as *const _ as usize
+    );
 
     logger::init();
 
@@ -60,7 +63,10 @@ fn rust_main(hart_id: usize) -> ! {
 fn rust_main_ap(hart_id: usize) -> ! {
     while !HAS_STARTED.load(Ordering::SeqCst) {}
 
-    println!("hart {:?} started", hart_id + 1 - 1);
+    println!(
+        "hart {} started, {:x}",
+        hart_id, &hart_id as *const _ as usize
+    );
 
     loop {}
 }
