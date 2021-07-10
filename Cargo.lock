@@ -27,6 +27,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcb6dd1c2376d2e096796e234a70e17e94cc2d5d54ff8ce42b28cef1d0d359a4"
 
 [[package]]
+name = "bitflags"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf1de2fe8c75bc145a2f577add951f8134889b4795d47466a54a5c846d691693"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -133,6 +139,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "riscv"
+version = "0.6.0"
+source = "git+https://github.com/rcore-os/riscv#b6c469f0aabb5982b194a3ac3be0ea45329476ab"
+dependencies = [
+ "bare-metal",
+ "bit_field",
+ "bitflags",
+ "log",
+ "riscv-target",
+]
+
+[[package]]
 name = "riscv-target"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -149,6 +167,7 @@ dependencies = [
  "device_tree",
  "lazy_static",
  "log",
+ "riscv 0.6.0 (git+https://github.com/rcore-os/riscv)",
  "rustsbi",
  "serde",
  "spin 0.9.1",
@@ -172,7 +191,7 @@ dependencies = [
  "embedded-hal",
  "lazy_static",
  "nb",
- "riscv",
+ "riscv 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "spin 0.7.1",
 ]
 

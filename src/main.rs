@@ -15,19 +15,20 @@ use spin::Mutex;
 extern crate lazy_static;
 #[macro_use]
 mod console;
+mod batch;
 mod cpu;
 mod lang_items;
 mod logger;
 mod memory;
 mod sbi;
+mod syscall;
+mod trap;
 
 use crate::cpu::CPU;
-use crate::logger::ColorLogger;
 use crate::memory::layout::{
     BSS_END, BSS_START, DATA_END, DATA_START, KERNEL_STACK_END, KERNEL_STACK_START, RODATA_END,
     RODATA_START, TEXT_END, TEXT_START,
 };
-use crate::sbi::shutdown;
 
 global_asm!(include_str!("entry.asm"));
 
@@ -47,6 +48,8 @@ fn rust_main(hart_id: usize) -> ! {
     );
     info!("data_start: {:#x}, data_end: {:#x}", *DATA_START, *DATA_END);
     info!("bss_start: {:#x}, bss_end: {:#x}", *BSS_START, *BSS_END);
+
+    trap::init();
 
     HAS_STARTED.store(true, Ordering::SeqCst);
 
