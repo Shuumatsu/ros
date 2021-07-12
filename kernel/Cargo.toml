@@ -1,0 +1,14 @@
+[package]
+edition = "2018"
+name = "kernel"
+version = "0.1.0"
+
+[dependencies]
+device_tree = {git = "https://github.com/rcore-os/device_tree-rs/"}
+lazy_static = {version = "1.4.0", features = ["spin_no_std"]}
+log = {version = "0.4.14", features = ["serde"]}
+riscv = {git = "https://github.com/rcore-os/riscv", features = ["inline-asm"]}
+rustsbi = "0.2.0-alpha.4"
+serde = {version = "1.0.126", default-features = false, features = ["derive"]}
+spin = "0.9.1"
+static_assertions = "1.1.0"

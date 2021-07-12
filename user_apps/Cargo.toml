@@ -1,0 +1,33 @@
+[package]
+edition = "2018"
+name = "user_apps"
+version = "0.1.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+user_lib = {path = "../user_lib"}
+
+[[bin]]
+name = "hello_world"
+path = "bin/hello_world.rs"
+
+[[bin]]
+name = "exit"
+path = "bin/exit.rs"
+
+[[bin]]
+name = "power"
+path = "bin/power.rs"
+
+[[bin]]
+name = "store_faults"
+path = "bin/store_faults.rs"
+
+[[bin]]
+name = "write0"
+path = "bin/write0.rs"
+
+[[bin]]
+name = "write1"
+path = "bin/write1.rs"

@@ -1,0 +1,16 @@
+[workspace]
+members = [
+  "kernel",
+  "user_apps",
+  "user_lib",
+]
+
+[profile.dev]
+# abort on panic instead, disables the generation of unwinding symbol information
+debug = true
+panic = "abort"
+
+[profile.release]
+# abort on panic instead, disables the generation of unwinding symbol information
+debug = true
+panic = "abort"

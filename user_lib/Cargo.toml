@@ -1,0 +1,10 @@
+[package]
+edition = "2018"
+name = "user_lib"
+version = "0.1.0"
+
+[dependencies]
+lazy_static = {version = "1.4.0", features = ["spin_no_std"]}
+log = {version = "0.4.14", features = ["serde"]}
+riscv = {git = "https://github.com/rcore-os/riscv", features = ["inline-asm"]}
+spin = "0.9.1"
