@@ -1,59 +1,58 @@
+use core::ops::{BitAnd, BitOr, Range};
+
 use alloc::{format, string::String};
+use num::Num;
 
-#[allow(unused_macros)]
-#[macro_use]
-macro_rules! set_nth_bit {
-    ($bits: expr, $pos: expr, $b: expr) => {{
-        assert!(($pos as usize) < core::mem::size_of_val(&$bits) * 8);
+pub const fn set_nth_bit(bits: u64, n: usize, b: bool) -> u64 {
+    assert!(n < core::mem::size_of_val(&bits) * 8);
 
-        $bits & !(1 << $pos) | (if $b { 1 } else { 0 } << $pos)
-    }};
+    bits & !(1 << n) | (if b { 1 } else { 0 } << n)
 }
 
-#[allow(unused_macros)]
-#[macro_use]
-macro_rules! toggle_nth_bit {
-    ($bits: expr, $n: expr) => {{
-        assert!($n < core::mem::size_of_val(&$bits) * 8);
+pub const fn toggle_nth_bit(bits: u64, n: usize, b: bool) -> u64 {
+    assert!(n < core::mem::size_of_val(&bits) * 8);
 
-        $bits ^ (1 << $n)
-    }};
+    bits ^ (1 << n)
 }
 
-#[allow(unused_macros)]
-#[macro_use]
-macro_rules! extract_nth_bit {
-    ($bits: expr, $n: expr) => {{
-        assert!($n < core::mem::size_of_val(&$bits) * 8);
+pub const fn extract_nth_bit(bits: u64, n: usize) -> bool {
+    assert!(n < core::mem::size_of_val(&bits) * 8);
 
-        match ($bits >> $n) & 1 {
-            0 => false,
-            1 => true,
-            _ => panic!("unexpected result"),
-        }
-    }};
+    match (bits >> n) & 1 {
+        0 => false,
+        1 => true,
+        _ => panic!("unexpected result"),
+    }
 }
 
-#[allow(unused_macros)]
-#[macro_use]
-macro_rules! extract_range {
-    ($bits: expr, $start_pos: expr, $end_pos: expr) => {{
-        assert!($start_pos >= 0 && $start_pos < core::mem::size_of_val(&$bits) * 8);
-        assert!($end_pos >= 0 && $end_pos < core::mem::size_of_val(&$bits) * 8);
+pub const fn extract_range(bits: u64, range: Range<usize>) -> u64 {
+    assert!(range.start >= 0 && range.start < core::mem::size_of_val(&bits) * 8);
+    assert!(range.end >= 0 && range.end < core::mem::size_of_val(&bits) * 8);
 
-        ($start_pos..$end_pos).fold(0, |accu, n| (accu << 1) & extract_nth_bit!($bits, n))
-    }};
+    range.fold(0, |accu, n| {
+        (accu << 1) & if extract_nth_bit(bits, n) { 1 } else { 0 }
+    })
+}
+
+pub const fn store_range(bits: u64, range: Range<usize>, val: u64) -> u64 {
+    assert!(range.start >= 0 && range.start < core::mem::size_of_val(&bits) * 8);
+    assert!(range.end >= 0 && range.end < core::mem::size_of_val(&bits) * 8);
+
+    (range.start..range.end).fold(bits, |bits, n| {
+        let b = extract_nth_bit(val, n - range.start);
+        set_nth_bit(bits, n, b)
+    })
 }
 
 #[allow(unused_macros)]
 #[macro_use]
 macro_rules! store_range {
-    ($bits: expr, $start_pos: expr, $end_pos: expr, $val: expr) => {{
-        assert!($start_pos >= 0 && $start_pos < core::mem::size_of_val(&$bits) * 8);
-        assert!($end_pos >= 0 && $end_pos < core::mem::size_of_val(&$bits) * 8);
+    ($bits: expr, range.start: expr, range.end: expr, $val: expr) => {{
+        assert!(range.start >= 0 && range.start < core::mem::size_of_val(&$bits) * 8);
+        assert!(range.end >= 0 && range.end < core::mem::size_of_val(&$bits) * 8);
 
-        ($start_pos..$end_pos).fold($bits, |bits, n| {
-            let b = extract_nth_bit!($val, n - $start_pos);
+        (range.start..range.end).fold($bits, |bits, n| {
+            let b = extract_nth_bit!($val, n - range.start);
             set_nth_bit!(bits, n, b)
         })
     }};
@@ -62,11 +61,11 @@ macro_rules! store_range {
 #[allow(unused_macros)]
 #[macro_use]
 macro_rules! set_range {
-    ($bits: expr, $start_pos: expr, $end_pos: expr, $b: expr) => {{
-        assert!($start_pos >= 0 && $start_pos < core::mem::size_of_val(&$bits) * 8);
-        assert!($end_pos >= 0 && $end_pos < core::mem::size_of_val(&$bits) * 8);
+    ($bits: expr, range.start: expr, range.end: expr, $b: expr) => {{
+        assert!(range.start >= 0 && range.start < core::mem::size_of_val(&$bits) * 8);
+        assert!(range.end >= 0 && range.end < core::mem::size_of_val(&$bits) * 8);
 
-        ($start_pos..$end_pos).fold($bits, |bits, n| set_nth_bit!(bits, n, $b))
+        (range.start..range.end).fold($bits, |bits, n| set_nth_bit!(bits, n, $b))
     }};
 }
 
