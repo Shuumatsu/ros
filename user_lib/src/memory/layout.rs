@@ -53,17 +53,3 @@ extern "C" {
 lazy_static! {
     pub static ref BSS_END: usize = unsafe { &_bss_end as *const _ as _ };
 }
-
-extern "C" {
-    static _kernel_stack_start: usize;
-}
-lazy_static! {
-    pub static ref KERNEL_STACK_START: usize = unsafe { &_kernel_stack_start as *const _ as _ };
-}
-
-extern "C" {
-    static _kernel_stack_end: usize;
-}
-lazy_static! {
-    pub static ref KERNEL_STACK_END: usize = unsafe { &_kernel_stack_end as *const _ as _ };
-}

@@ -4,7 +4,8 @@
 
 #[macro_use]
 extern crate user_lib;
-extern crate core;
+use user_lib::prelude::*;
+
 use core::slice;
 use user_lib::{write, STDOUT};
 

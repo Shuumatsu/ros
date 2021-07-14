@@ -1,14 +1,24 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
-BASE_ADDRESS = 0x80200000;
+
+MEMORY {
+    /* we have "ram" that contains a section that is 
+    'w' (writeable), 'x' (executable), and 'a' (allocatable). */
+
+    /* qemu is set to have 128M memory starting from 0x80000000 */
+    ram  (wxa) : ORIGIN = 0x80200000, LENGTH = 126M
+}
+
+PROVIDE(_memory_start = ORIGIN(ram));
+PROVIDE(_memory_end = ORIGIN(ram) + LENGTH(ram));
 
 SECTIONS
 {
-    . = BASE_ADDRESS;
+    . = ORIGIN(ram);
     PROVIDE(_kernel_start = .);
 
     .text : {
-    PROVIDE(_text_start = .);
+        PROVIDE(_text_start = .);
 
         *(.text.entry)
         *(.text .text.*)
@@ -65,8 +75,8 @@ SECTIONS
 
     PROVIDE(_kernel_end = .);
 
-    /DISCARD/ : {
-        *(.eh_frame)
-    }
+    . = ALIGN(4096);
+    PROVIDE(_heap_start = .);
+    PROVIDE(_heap_end = _memory_end)
 }
 

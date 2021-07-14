@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 #![feature(const_panic, panic_info_message)]
+#![feature(const_size_of_val)]
 #![feature(core_intrinsics)]
 #![feature(global_asm, llvm_asm, asm)]
 #![feature(alloc_error_handler)]
@@ -14,12 +15,16 @@ use core::sync::atomic::{AtomicBool, Ordering};
 extern crate lazy_static;
 #[macro_use]
 extern crate static_assertions;
+#[macro_use]
+extern crate bitflags;
 
 use log::{info, warn, LevelFilter};
 use spin::Mutex;
 
 #[macro_use]
 mod console;
+#[macro_use]
+mod utils;
 mod batch;
 mod collections;
 mod config;
@@ -30,7 +35,6 @@ mod memory;
 mod sbi;
 mod syscall;
 mod trap;
-mod utils;
 
 use crate::cpu::CPU;
 use crate::memory::layout::{

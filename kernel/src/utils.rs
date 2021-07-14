@@ -1,43 +1,73 @@
 use alloc::{format, string::String};
-use core::mem::size_of;
-use core::ops::Range;
 
-pub const fn set_nth_bit(bits: usize, n: usize, b: bool) -> usize {
-    assert!(n < size_of::<usize>() * 8);
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! set_nth_bit {
+    ($bits: expr, $pos: expr, $b: expr) => {{
+        assert!(($pos as usize) < core::mem::size_of_val(&$bits) * 8);
 
-    bits & !(1 << n) | (if b { 1 } else { 0 } << n)
+        $bits & !(1 << $pos) | (if $b { 1 } else { 0 } << $pos)
+    }};
 }
 
-pub const fn toggle_nth_bit(bits: usize, n: usize) -> usize {
-    assert!(n < size_of::<usize>() * 8);
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! toggle_nth_bit {
+    ($bits: expr, $n: expr) => {{
+        assert!($n < core::mem::size_of_val(&$bits) * 8);
 
-    bits ^ (1 << n)
+        $bits ^ (1 << $n)
+    }};
 }
 
-pub const fn extract_nth_bit(bits: usize, n: usize) -> bool {
-    assert!(n < size_of::<usize>() * 8);
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! extract_nth_bit {
+    ($bits: expr, $n: expr) => {{
+        assert!($n < core::mem::size_of_val(&$bits) * 8);
 
-    match (bits >> n) & 1 {
-        0 => false,
-        1 => true,
-        _ => panic!("unexpected result"),
-    }
+        match ($bits >> $n) & 1 {
+            0 => false,
+            1 => true,
+            _ => panic!("unexpected result"),
+        }
+    }};
 }
 
-pub const fn extract_value(bits: usize, mask: usize, start_pos: usize) -> usize {
-    assert!(start_pos < size_of::<usize>() * 8);
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! extract_range {
+    ($bits: expr, $start_pos: expr, $end_pos: expr) => {{
+        assert!($start_pos >= 0 && $start_pos < core::mem::size_of_val(&$bits) * 8);
+        assert!($end_pos >= 0 && $end_pos < core::mem::size_of_val(&$bits) * 8);
 
-    (bits & (mask << start_pos)) >> start_pos
+        ($start_pos..$end_pos).fold(0, |accu, n| (accu << 1) & extract_nth_bit!($bits, n))
+    }};
 }
 
-pub fn set_range(bits: usize, val: usize, start_pos: usize, end_pos: usize) -> usize {
-    assert!(start_pos < size_of::<usize>() * 8 && end_pos < size_of::<usize>() * 8);
-    assert!(start_pos < end_pos);
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! store_range {
+    ($bits: expr, $start_pos: expr, $end_pos: expr, $val: expr) => {{
+        assert!($start_pos >= 0 && $start_pos < core::mem::size_of_val(&$bits) * 8);
+        assert!($end_pos >= 0 && $end_pos < core::mem::size_of_val(&$bits) * 8);
 
-    (start_pos..end_pos).fold(bits, |bits, n| {
-        let b = extract_nth_bit(val, n - start_pos);
-        set_nth_bit(bits, n, b)
-    })
+        ($start_pos..$end_pos).fold($bits, |bits, n| {
+            let b = extract_nth_bit!($val, n - $start_pos);
+            set_nth_bit!(bits, n, b)
+        })
+    }};
+}
+
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! set_range {
+    ($bits: expr, $start_pos: expr, $end_pos: expr, $b: expr) => {{
+        assert!($start_pos >= 0 && $start_pos < core::mem::size_of_val(&$bits) * 8);
+        assert!($end_pos >= 0 && $end_pos < core::mem::size_of_val(&$bits) * 8);
+
+        ($start_pos..$end_pos).fold($bits, |bits, n| set_nth_bit!(bits, n, $b))
+    }};
 }
 
 pub const KILOBYTE: usize = 1024;
@@ -64,7 +94,6 @@ where
     T: From<u8>,
 {
     let mut ptr = range.start;
-    println!("{:?}", range);
     while ptr < range.end {
         core::ptr::write_volatile(ptr, T::from(0));
         ptr = ptr.offset(1);
@@ -85,4 +114,6 @@ pub fn align_down(addr: usize, align: usize) -> usize {
 
 /// Align upwards. Returns the smallest x with alignment `align`
 /// so that x >= addr. The alignment must be a power of 2.
-pub fn align_up(addr: usize, align: usize) -> usize { align_down(addr + align - 1, align) }
+pub fn align_up(addr: usize, align: usize) -> usize {
+    align_down(addr + align - 1, align)
+}

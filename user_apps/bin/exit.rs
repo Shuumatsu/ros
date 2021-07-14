@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
 
+#[macro_use]
 extern crate user_lib;
+use user_lib::prelude::*;
+
 use user_lib::exit;
 
 const MAGIC: usize = 1234;

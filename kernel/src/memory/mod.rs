@@ -6,18 +6,16 @@ use spin::Mutex;
 
 mod allocator;
 pub mod layout;
+mod paging;
 
-use crate::config::KERNEL_HEAP_SIZE;
 use allocator::Allocator;
-
-static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
+use layout::{HEAP_END, HEAP_START};
 
 lazy_static! {
     static ref ALLOCATOR: Mutex<Allocator> = unsafe {
         debug!("[allocator] initializing global heap allocator...");
 
-        let addr = &HEAP_SPACE as *const _ as usize;
-        let allocator = Allocator::new(addr, addr + KERNEL_HEAP_SIZE);
+        let allocator = Allocator::new(*HEAP_START, *HEAP_END);
 
         println!(
             "[allocator] global heap allocator created at {:#x}",

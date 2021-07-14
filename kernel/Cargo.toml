@@ -4,9 +4,11 @@ name = "kernel"
 version = "0.1.0"
 
 [dependencies]
+bitflags = "1.2.1"
 device_tree = {git = "https://github.com/rcore-os/device_tree-rs/"}
 lazy_static = {version = "1.4.0", features = ["spin_no_std"]}
 log = {version = "0.4.14", features = ["serde"]}
+num = {version = "0.4.0", default-features = false}
 riscv = {git = "https://github.com/rcore-os/riscv", features = ["inline-asm"]}
 rustsbi = "0.2.0-alpha.4"
 serde = {version = "1.0.126", default-features = false, features = ["derive"]}

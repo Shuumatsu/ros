@@ -3,7 +3,10 @@
 
 #[macro_use]
 extern crate user_lib;
+use user_lib::prelude::*;
+
 use user_lib::{write, STDOUT};
+
 const DATA_STRING: &'static str = "string from data section\n";
 
 /// 正确输出：

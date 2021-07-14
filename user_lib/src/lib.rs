@@ -8,7 +8,9 @@ extern crate lazy_static;
 
 #[macro_use]
 pub mod console;
+pub mod lang_items;
 pub mod memory;
+pub mod prelude;
 mod syscall;
 
 use memory::layout::{BSS_END, BSS_START};

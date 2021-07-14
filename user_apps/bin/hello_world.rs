@@ -3,6 +3,7 @@
 
 #[macro_use]
 extern crate user_lib;
+use user_lib::prelude::*;
 
 /// 正确输出：
 /// Hello world from user mode program!
