@@ -2,5 +2,7 @@
     "files.associations": {
         "stdio.h": "c",
         "stdint.h": "c"
-    }
+    },
+    "rust-analyzer.cargo.target": "riscv64gc-unknown-none-elf",
+    "rust-analyzer.checkOnSave.allTargets": false
 }
