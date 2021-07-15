@@ -1,7 +1,11 @@
-use std::fs::{read_dir, File};
+use std::fs::{self, read_dir, File};
 use std::io::{Result, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-static TARGET_PATH: &str = "../user_apps/target/riscv64gc-unknown-none-elf/release/";
+static THIS_FILE: &str = file!();
+static WORKSPACE_PATH: &str = "..";
+static TARGET_PATH: &str = "/home/curry/workspace/ros/target/riscv64gc-unknown-none-elf/release";
 
 fn main() {
     println!("cargo:rerun-if-changed=../user_apps/src/");
@@ -40,6 +44,24 @@ _num_app:
     writeln!(f, r#"    .quad app_{}_end"#, apps.len() - 1)?;
 
     for (idx, app) in apps.iter().enumerate() {
+        // rust-objcopy --binary-architecture=riscv64
+
+        let elf = format!(
+            "/home/curry/workspace/ros/target/riscv64gc-unknown-none-elf/release/{}",
+            app
+        );
+        let bin = format!(
+            "/home/curry/workspace/ros/target/riscv64gc-unknown-none-elf/release/{}.bin",
+            app
+        );
+
+        Command::new("rust-objcopy")
+            .arg("--binary-architecture=riscv64")
+            .arg(&elf[..])
+            .arg("--strip-all -O binary")
+            .arg(&bin[..])
+            .output()?;
+
         println!("app_{}: {}", idx, app);
         writeln!(
             f,
@@ -49,9 +71,9 @@ _num_app:
     .global app_{0}_end
     .align 3 
 app_{0}_start:
-    .incbin "{2}{1}"
+    .incbin "{1}"
 app_{0}_end:"#,
-            idx, app, TARGET_PATH
+            idx, bin
         )?;
     }
     Ok(())

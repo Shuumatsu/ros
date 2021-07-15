@@ -3,12 +3,12 @@
 # Building
 TARGET := riscv64gc-unknown-none-elf
 MODE := release
-KERNEL_ELF := target/$(TARGET)/$(MODE)/kernel
+KERNEL_ELF := ../target/$(TARGET)/$(MODE)/kernel
 KERNEL_BIN := $(KERNEL_ELF).bin
-DISASM_TMP := target/$(TARGET)/$(MODE)/asm
+DISASM_TMP := ../target/$(TARGET)/$(MODE)/asm
 
 # BOARD
-BOOTLOADER := bootloader/rustsbi-qemu.bin
+BOOTLOADER := ../bootloader/rustsbi-qemu.bin
 
 # KERNEL ENTRY
 KERNEL_ENTRY_PA := 0x80200000
