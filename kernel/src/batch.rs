@@ -14,6 +14,8 @@ const APP_SIZE_LIMIT: usize = 0x20000;
 static KERNEL_STACK: [u8; KERNEL_STACK_SIZE] = [0; KERNEL_STACK_SIZE];
 static USER_STACK: [u8; USER_STACK_SIZE] = [0; USER_STACK_SIZE];
 
+global_asm!(include_str!("link_app.S"));
+
 pub fn is_valid_location(loc: usize) -> bool {
     let user_stack_loc = &USER_STACK as *const _ as _;
 

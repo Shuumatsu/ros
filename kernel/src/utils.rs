@@ -1,58 +1,56 @@
-use core::ops::{BitAnd, BitOr, Range};
-
 use alloc::{format, string::String};
-use num::Num;
+use core::ops::Range;
 
-pub const fn set_nth_bit(bits: u64, n: usize, b: bool) -> u64 {
-    assert!(n < core::mem::size_of_val(&bits) * 8);
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! set_nth_bit {
+    ($bits: expr, $n: expr, $b: expr) => {{
+        assert!(($n as usize) < core::mem::size_of_val(&$bits) * 8);
 
-    bits & !(1 << n) | (if b { 1 } else { 0 } << n)
+        $bits & !(1 << $n) | (if $b { 1 } else { 0 } << $n)
+    }};
 }
 
-pub const fn toggle_nth_bit(bits: u64, n: usize, b: bool) -> u64 {
-    assert!(n < core::mem::size_of_val(&bits) * 8);
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! toggle_nth_bit {
+    ($bits: expr, $n: expr) => {{
+        assert!(($n as usize) < core::mem::size_of_val(&$bits) * 8);
 
-    bits ^ (1 << n)
+        $bits ^ (1 << $n)
+    }};
 }
 
-pub const fn extract_nth_bit(bits: u64, n: usize) -> bool {
-    assert!(n < core::mem::size_of_val(&bits) * 8);
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! extract_nth_bit {
+    ($bits: expr, $n: expr) => {{
+        assert!(($n as usize) < core::mem::size_of_val(&$bits) * 8);
 
-    match (bits >> n) & 1 {
-        0 => false,
-        1 => true,
-        _ => panic!("unexpected result"),
-    }
+        match ($bits >> $n) & 1 {
+            0 => false,
+            1 => true,
+            _ => panic!("unexpected result"),
+        }
+    }};
 }
 
-pub const fn extract_range(bits: u64, range: Range<usize>) -> u64 {
-    assert!(range.start >= 0 && range.start < core::mem::size_of_val(&bits) * 8);
-    assert!(range.end >= 0 && range.end < core::mem::size_of_val(&bits) * 8);
-
-    range.fold(0, |accu, n| {
-        (accu << 1) & if extract_nth_bit(bits, n) { 1 } else { 0 }
-    })
-}
-
-pub const fn store_range(bits: u64, range: Range<usize>, val: u64) -> u64 {
-    assert!(range.start >= 0 && range.start < core::mem::size_of_val(&bits) * 8);
-    assert!(range.end >= 0 && range.end < core::mem::size_of_val(&bits) * 8);
-
-    (range.start..range.end).fold(bits, |bits, n| {
-        let b = extract_nth_bit(val, n - range.start);
-        set_nth_bit(bits, n, b)
-    })
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! extract_range {
+    ($bits: expr, $start_pos: expr, $end_pos: expr) => {{
+        ($start_pos..$end_pos).fold(0, |accu, n| {
+            (accu << 1) & if extract_nth_bit!($bits, n) { 1 } else { 0 }
+        })
+    }};
 }
 
 #[allow(unused_macros)]
 #[macro_use]
 macro_rules! store_range {
-    ($bits: expr, range.start: expr, range.end: expr, $val: expr) => {{
-        assert!(range.start >= 0 && range.start < core::mem::size_of_val(&$bits) * 8);
-        assert!(range.end >= 0 && range.end < core::mem::size_of_val(&$bits) * 8);
-
-        (range.start..range.end).fold($bits, |bits, n| {
-            let b = extract_nth_bit!($val, n - range.start);
+    ($bits: expr, $start_pos: expr, $end_pos: expr, $val: expr) => {{
+        ($start_pos..$end_pos).fold($bits, |bits, n| {
+            let b = extract_nth_bit!($val, n - $start_pos);
             set_nth_bit!(bits, n, b)
         })
     }};
@@ -61,11 +59,10 @@ macro_rules! store_range {
 #[allow(unused_macros)]
 #[macro_use]
 macro_rules! set_range {
-    ($bits: expr, range.start: expr, range.end: expr, $b: expr) => {{
-        assert!(range.start >= 0 && range.start < core::mem::size_of_val(&$bits) * 8);
-        assert!(range.end >= 0 && range.end < core::mem::size_of_val(&$bits) * 8);
-
-        (range.start..range.end).fold($bits, |bits, n| set_nth_bit!(bits, n, $b))
+    ($bits: expr, $start_pos: expr, $end_pos: expr, $b: expr) => {{
+        ($start_pos..$end_pos).fold($bits, |bits, n| {
+            set_nth_bit!(bits, n, if $b { 1 } else { 0 })
+        })
     }};
 }
 

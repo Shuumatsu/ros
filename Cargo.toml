@@ -1,8 +1,8 @@
 [workspace]
 members = [
-  "kernel",
-  "user_apps",
   "user_lib",
+  "user_apps",
+  "kernel",
 ]
 
 [profile.dev]

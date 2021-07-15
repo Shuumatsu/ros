@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(unused)]
 #![no_main]
 #![feature(const_panic, panic_info_message)]
 #![feature(const_size_of_val)]
@@ -42,7 +43,7 @@ use crate::memory::layout::{
     RODATA_START, TEXT_END, TEXT_START,
 };
 
-global_asm!(include_str!("entry.asm"));
+global_asm!(include_str!("entry.S"));
 
 static HAS_STARTED: AtomicBool = AtomicBool::new(false);
 

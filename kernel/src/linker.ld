@@ -77,6 +77,6 @@ SECTIONS
 
     . = ALIGN(4096);
     PROVIDE(_heap_start = .);
-    PROVIDE(_heap_end = _memory_end)
+    PROVIDE(_heap_end = _memory_end);
 }
 

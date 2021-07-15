@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(llvm_asm)]
+#![feature(llvm_asm, asm)]
 #![feature(linkage)]
 #![feature(panic_info_message)]
 
