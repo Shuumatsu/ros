@@ -75,4 +75,4 @@ debug: build
 clean:
 	cargo clean
 
-.PHONY: clean debug run build kernel-binary user-apps user-lib env
+.PHONY: clean debug run build kernel-binary user-apps user-lib env  

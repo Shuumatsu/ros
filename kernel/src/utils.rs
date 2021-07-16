@@ -60,9 +60,7 @@ macro_rules! store_range {
 #[macro_use]
 macro_rules! set_range {
     ($bits: expr, $start_pos: expr, $end_pos: expr, $b: expr) => {{
-        ($start_pos..$end_pos).fold($bits, |bits, n| {
-            set_nth_bit!(bits, n, if $b { 1 } else { 0 })
-        })
+        ($start_pos..$end_pos).fold($bits, |bits, n| set_nth_bit!(bits, n, $b))
     }};
 }
 
@@ -112,4 +110,10 @@ pub fn align_down(addr: usize, align: usize) -> usize {
 /// so that x >= addr. The alignment must be a power of 2.
 pub fn align_up(addr: usize, align: usize) -> usize {
     align_down(addr + align - 1, align)
+}
+
+pub unsafe fn memset(ptr: *mut u8, ch: u8, count: usize) {
+    for _ in 0..count {
+        *ptr = ch;
+    }
 }

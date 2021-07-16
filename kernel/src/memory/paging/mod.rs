@@ -1,10 +1,10 @@
-// use alloc::boxed::Box;
+use alloc::boxed::Box;
 
-// use spin::Mutex;
+use spin::Mutex;
 
-// pub mod physical_addr;
+pub mod physical_addr;
 // mod table;
-// pub mod virtual_addr;
+pub mod virtual_addr;
 
 // use table::Table;
 
