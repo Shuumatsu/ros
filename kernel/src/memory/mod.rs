@@ -4,6 +4,7 @@ use lazy_static::lazy_static;
 use log::debug;
 use spin::Mutex;
 
+pub mod addr;
 mod frame_allocator;
 mod heap_allocator;
 pub mod layout;
@@ -62,7 +63,7 @@ lazy_static! {
     pub static ref FRAME_ALLOCATOR: Mutex<FrameAllocator> = Mutex::new({
         let mut allocator = FrameAllocator::new();
         for phys_no in (*HEAP_START..*HEAP_END).step_by(PAGE_SIZE) {
-            allocator.dealloc(phys_no);
+            allocator.dealloc(extract_range!(phys_no, 12, 56));
         }
         allocator
     });

@@ -2,11 +2,11 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::config::PAGE_SIZE;
-use crate::memory::layout::{HEAP_END, HEAP_START};
+use crate::memory::addr::{PhysicalAddr, VirtualAddr};
 
 #[derive(Debug, Default)]
 pub struct FrameAllocator {
-    frames: Vec<usize>,
+    frames: Vec<u64>,
 }
 
 impl FrameAllocator {
@@ -14,11 +14,11 @@ impl FrameAllocator {
         Self::default()
     }
 
-    pub fn alloc(&mut self) -> Option<usize> {
+    pub fn alloc(&mut self) -> Option<u64> {
         self.frames.pop()
     }
 
-    pub fn dealloc(&mut self, phys_no: usize) {
-        self.frames.push(phys_no)
+    pub fn dealloc(&mut self, ppn: u64) {
+        self.frames.push(ppn)
     }
 }

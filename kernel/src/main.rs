@@ -7,6 +7,7 @@
 #![feature(global_asm, llvm_asm, asm)]
 #![feature(alloc_error_handler)]
 #![feature(alloc_prelude)]
+#![feature(lang_items)]
 extern crate alloc;
 
 use core::intrinsics::volatile_load;
