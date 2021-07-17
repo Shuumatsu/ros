@@ -1,8 +1,9 @@
 use core::fmt::{self, Write};
 
+use riscv::interrupt;
 use spin::Mutex;
 
-use crate::sbi::console_putchar;
+use crate::{cpu, sbi::console_putchar};
 
 struct Stdout;
 
@@ -20,7 +21,9 @@ lazy_static! {
 }
 
 pub fn print(args: fmt::Arguments) {
-    STDOUT.lock().write_fmt(args).unwrap();
+    cpu::without_interrupts(|| {
+        STDOUT.lock().write_fmt(args).unwrap();
+    })
 }
 
 #[macro_export]

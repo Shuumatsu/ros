@@ -20,6 +20,7 @@ extern crate static_assertions;
 #[macro_use]
 extern crate bitflags;
 
+use alloc::vec;
 use log::{info, warn, LevelFilter};
 use spin::Mutex;
 
@@ -28,7 +29,6 @@ mod console;
 #[macro_use]
 mod utils;
 mod batch;
-mod collections;
 mod config;
 mod cpu;
 mod lang_items;
@@ -63,6 +63,7 @@ fn rust_main(hart_id: usize) -> ! {
     info!("data_start: {:#x}, data_end: {:#x}", *DATA_START, *DATA_END);
     info!("bss_start: {:#x}, bss_end: {:#x}", *BSS_START, *BSS_END);
 
+    memory::init();
     trap::init();
 
     HAS_STARTED.store(true, Ordering::SeqCst);

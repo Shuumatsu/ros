@@ -43,13 +43,3 @@ pub fn shutdown() -> ! {
     sbi_call(SBI_SHUTDOWN, 0, 0, 0);
     panic!("It should shutdown!");
 }
-
-#[inline(always)]
-pub fn hart_id() -> usize {
-    let mut hart_id: usize = 0;
-
-    unsafe {
-        llvm_asm!("mv $0, tp" : "=r"(hart_id) ::: "volatile");
-    }
-    hart_id
-}

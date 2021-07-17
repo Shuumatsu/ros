@@ -1,6 +1,6 @@
 use crate::utils::KILOBYTE;
 
-pub const KERNEL_HEAP_SIZE: usize = 8 * KILOBYTE;
+pub const KERNEL_HEAP_SIZE: usize = 64 * KILOBYTE;
 pub const USER_STACK_SIZE: usize = 8 * KILOBYTE;
 
 pub const PAGE_SIZE: usize = 4 * KILOBYTE;

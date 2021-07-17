@@ -4,7 +4,7 @@ pub struct ColorLogger;
 
 impl Log for ColorLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Info
+        true
     }
 
     fn log(&self, record: &Record) {

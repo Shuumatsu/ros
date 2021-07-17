@@ -1,54 +1,40 @@
 use core::alloc::{GlobalAlloc, Layout};
+use core::mem::size_of_val;
 
+use buddy_system_allocator::{LockedFrameAllocator, LockedHeap};
 use lazy_static::lazy_static;
-use log::debug;
+use log::{debug, info, trace};
 use spin::Mutex;
 
 pub mod addr;
-mod frame_allocator;
-mod heap_allocator;
 pub mod layout;
 mod paging;
 
 use crate::config::{KERNEL_HEAP_SIZE, PAGE_SIZE};
-use frame_allocator::FrameAllocator;
-use heap_allocator::Allocator;
 use layout::{HEAP_END, HEAP_START};
 
-const KERNEL_HEAP: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
-
 lazy_static! {
-    static ref HEAP_ALLOCTOR: Mutex<Allocator> = unsafe {
-        debug!("[allocator] initializing global heap allocator...");
-
-        let allocator = Allocator::new(
-            &KERNEL_HEAP as *const _ as _,
-            &KERNEL_HEAP.last().unwrap() as *const _ as _,
-        );
-
-        println!(
-            "[allocator] global heap allocator created at {:#x}",
-            &allocator as *const _ as usize
-        );
-
-        Mutex::new(allocator)
-    };
+    static ref FRAME_ALLOCATOR: LockedFrameAllocator = LockedFrameAllocator::new();
 }
 
-struct OsAllocator;
-
-unsafe impl GlobalAlloc for OsAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        HEAP_ALLOCTOR.lock().alloc(layout)
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        HEAP_ALLOCTOR.lock().dealloc(ptr, layout);
-    }
-}
+static mut KERNEL_HEAP: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
 
 #[global_allocator]
-static GA: OsAllocator = OsAllocator;
+static HEAP_ALLOCATOR: LockedHeap<31> = LockedHeap::empty();
+
+pub fn init() {
+    unsafe {
+        HEAP_ALLOCATOR
+            .lock()
+            .init(&KERNEL_HEAP as *const _ as _, size_of_val(&KERNEL_HEAP));
+    }
+    unsafe {
+        FRAME_ALLOCATOR.lock().add_frame(
+            extract_range!(*HEAP_START, 12, 56),
+            extract_range!(*HEAP_END, 12, 56),
+        );
+    }
+}
 
 #[alloc_error_handler]
 pub fn alloc_error(l: Layout) -> ! {
@@ -57,14 +43,4 @@ pub fn alloc_error(l: Layout) -> ! {
         l.size(),
         l.align()
     );
-}
-
-lazy_static! {
-    pub static ref FRAME_ALLOCATOR: Mutex<FrameAllocator> = Mutex::new({
-        let mut allocator = FrameAllocator::new();
-        for phys_no in (*HEAP_START..*HEAP_END).step_by(PAGE_SIZE) {
-            allocator.dealloc(extract_range!(phys_no, 12, 56));
-        }
-        allocator
-    });
 }

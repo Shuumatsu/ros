@@ -64,8 +64,10 @@ pub fn init() {
 
 #[no_mangle]
 pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
-    // let scause = scause::read();
-    // let stval = stval::read();
+    let scause = scause::read();
+    let stval = stval::read();
+    println!("{:?} {:?}", scause.cause(), stval);
+
     // match scause.cause() {
     //     Trap::Exception(Exception::UserEnvCall) => {
     //         cx.sepc += 4;

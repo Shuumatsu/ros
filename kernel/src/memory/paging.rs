@@ -106,7 +106,7 @@ impl Entry {
     unsafe fn ensure(&mut self) -> bool {
         let flags = self.extract_flags();
         if !flags.contains(EntryFlags::VALID) {
-            if let Some(ppn) = FRAME_ALLOCATOR.lock().alloc() {
+            if let Some(ppn) = FRAME_ALLOCATOR.lock().alloc(1) {
                 self.set_frame(ppn as u64);
                 self.set_flags(flags | EntryFlags::VALID);
             } else {
@@ -200,7 +200,9 @@ pub unsafe fn unmap(root: *mut Table, vaddr: VirtualAddr) {
         return;
     }
 
-    FRAME_ALLOCATOR.lock().dealloc(entry.extract_ppn());
+    FRAME_ALLOCATOR
+        .lock()
+        .dealloc(entry.extract_ppn() as usize, 1);
     entry.set_flags(flags & !EntryFlags::VALID);
 }
 
@@ -216,7 +218,9 @@ pub unsafe fn free(root: *mut Table) {
             let table = PhysicalAddr::new(ppn, 0).as_mut_ptr::<Table>();
             free(table);
         } else {
-            FRAME_ALLOCATOR.lock().dealloc(entry.extract_ppn());
+            FRAME_ALLOCATOR
+                .lock()
+                .dealloc(entry.extract_ppn() as usize, 1);
         }
         entry.set_flags(flags & !EntryFlags::VALID);
     }

@@ -54,14 +54,16 @@ kernel-binary:
 
 build: user-lib user-apps kernel-binary
 
-run: build
-	@qemu-system-riscv64 \
+pure-run:
+	qemu-system-riscv64 \
 		-s \
 		-smp 4 \
 		-machine virt \
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
+
+run: build pure-run
 
 debug: build
 	@qemu-system-riscv64 \
