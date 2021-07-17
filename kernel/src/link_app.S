@@ -17,7 +17,7 @@ _num_app:
     .global app_0_end
     .align 3 
 app_0_start:
-    .incbin "/home/curry/workspace/ros/target/riscv64gc-unknown-none-elf/release/exit.bin"
+    .incbin "/home/oslab/workspace/ros/target/riscv64gc-unknown-none-elf/release/exit.bin"
 app_0_end:
 
     .section .data
@@ -25,7 +25,7 @@ app_0_end:
     .global app_1_end
     .align 3 
 app_1_start:
-    .incbin "/home/curry/workspace/ros/target/riscv64gc-unknown-none-elf/release/hello_world.bin"
+    .incbin "/home/oslab/workspace/ros/target/riscv64gc-unknown-none-elf/release/hello_world.bin"
 app_1_end:
 
     .section .data
@@ -33,7 +33,7 @@ app_1_end:
     .global app_2_end
     .align 3 
 app_2_start:
-    .incbin "/home/curry/workspace/ros/target/riscv64gc-unknown-none-elf/release/power.bin"
+    .incbin "/home/oslab/workspace/ros/target/riscv64gc-unknown-none-elf/release/power.bin"
 app_2_end:
 
     .section .data
@@ -41,7 +41,7 @@ app_2_end:
     .global app_3_end
     .align 3 
 app_3_start:
-    .incbin "/home/curry/workspace/ros/target/riscv64gc-unknown-none-elf/release/store_faults.bin"
+    .incbin "/home/oslab/workspace/ros/target/riscv64gc-unknown-none-elf/release/store_faults.bin"
 app_3_end:
 
     .section .data
@@ -49,7 +49,7 @@ app_3_end:
     .global app_4_end
     .align 3 
 app_4_start:
-    .incbin "/home/curry/workspace/ros/target/riscv64gc-unknown-none-elf/release/write0.bin"
+    .incbin "/home/oslab/workspace/ros/target/riscv64gc-unknown-none-elf/release/write0.bin"
 app_4_end:
 
     .section .data
@@ -57,5 +57,5 @@ app_4_end:
     .global app_5_end
     .align 3 
 app_5_start:
-    .incbin "/home/curry/workspace/ros/target/riscv64gc-unknown-none-elf/release/write1.bin"
+    .incbin "/home/oslab/workspace/ros/target/riscv64gc-unknown-none-elf/release/write1.bin"
 app_5_end:

@@ -50,7 +50,7 @@ user-apps:
 
 kernel-binary: 
 	cd $(KERNEL_PROJ_DIR) && \
-	cargo build --release && \
+	TARGET_DIR=$(TARGET_DIR) cargo build --release && \
 	$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $(KERNEL_BIN)
 
 build: user-lib user-apps kernel-binary
