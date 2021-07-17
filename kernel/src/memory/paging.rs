@@ -287,9 +287,9 @@ lazy_static! {
     static ref ROOT_TABLE: Mutex<Box<Table>> = Mutex::new(Box::new(Table::new()));
 }
 
-pub unsafe fn init() {
+pub fn init() {
     let mut root = ROOT_TABLE.lock();
-    {
+    unsafe {
         let root = (*root).as_mut() as *mut _;
 
         info!(
@@ -370,10 +370,12 @@ pub unsafe fn init() {
     let addr = root.as_ref() as *const _ as usize;
     let ppn = PhysicalAddr::from(addr).extract_ppn();
 
-    satp::set(satp::Mode::Sv39, 0, ppn);
-    println!("[paging::init] set satp register completed");
+    unsafe {
+        // satp::set(satp::Mode::Sv39, 0, ppn);
+        // println!("[paging::init] set satp register completed");
 
-    sfence_vma_all();
+        // sfence_vma_all();
 
-    println!("[paging::init] virtual memory initialized");
+        // println!("[paging::init] virtual memory initialized");
+    }
 }

@@ -43,13 +43,14 @@ use crate::memory::layout::{
     BSS_END, BSS_START, DATA_END, DATA_START, KERNEL_STACK_END, KERNEL_STACK_START, RODATA_END,
     RODATA_START, TEXT_END, TEXT_START,
 };
+use crate::memory::paging;
 
 global_asm!(include_str!("entry.S"));
 
 static HAS_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
-fn rust_main(hart_id: usize) -> ! {
+fn rust_main(hart_id: usize, sp: usize) -> ! {
     println!("main hart initializing");
 
     logger::init();
@@ -62,24 +63,40 @@ fn rust_main(hart_id: usize) -> ! {
     );
     info!("data_start: {:#x}, data_end: {:#x}", *DATA_START, *DATA_END);
     info!("bss_start: {:#x}, bss_end: {:#x}", *BSS_START, *BSS_END);
+    info!(
+        "kernel_stack_start: {:#x}, kernel_stack_end: {:#x}",
+        *KERNEL_STACK_START, *KERNEL_STACK_END
+    );
 
     memory::init();
+    paging::init();
     trap::init();
 
     HAS_STARTED.store(true, Ordering::SeqCst);
 
+    unsafe {
+        llvm_asm!("ebreak");
+    }
+
     let cpu = CPU { hart_id };
-    println!("main hart {} started", cpu.hart_id);
+    println!("main hart {} started, {:#x}", cpu.hart_id, sp);
 
     loop {}
 }
 
 #[no_mangle]
-fn rust_main_ap(hart_id: usize) -> ! {
+fn rust_main_ap(hart_id: usize, sp: usize) -> ! {
     while !HAS_STARTED.load(Ordering::SeqCst) {}
 
+    paging::init();
+    trap::init();
+
+    unsafe {
+        llvm_asm!("ebreak");
+    }
+
     let cpu = CPU { hart_id };
-    println!("hart {} started", cpu.hart_id);
+    println!("main hart {} started, {:#x}", cpu.hart_id, sp);
 
     loop {}
 }

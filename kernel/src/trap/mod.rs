@@ -66,29 +66,35 @@ pub fn init() {
 pub fn trap_handler(cx: &mut TrapContext) -> &mut TrapContext {
     let scause = scause::read();
     let stval = stval::read();
-    println!("{:?} {:?}", scause.cause(), stval);
 
-    // match scause.cause() {
-    //     Trap::Exception(Exception::UserEnvCall) => {
-    //         cx.sepc += 4;
-    //         cx.x[10] = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12]]) as usize;
-    //     }
-    //     Trap::Exception(Exception::StoreFault) | Trap::Exception(Exception::StorePageFault) => {
-    //         println!("[kernel] PageFault in application, core dumped.");
-    //         run_next_app();
-    //     }
-    //     Trap::Exception(Exception::IllegalInstruction) => {
-    //         println!("[kernel] IllegalInstruction in application, core dumped.");
-    //         run_next_app();
-    //     }
-    //     _ => {
-    //         panic!(
-    //             "Unsupported trap {:?}, stval = {:#x}!",
-    //             scause.cause(),
-    //             stval
-    //         );
-    //     }
-    // }
-    // cx
-    unimplemented!()
+    println!("{:?} {:#x} {:#x}", scause.cause(), stval, cx.sepc);
+
+    match scause.cause() {
+        Trap::Exception(Exception::UserEnvCall) => {
+            cx.sepc += 4;
+            cx.general.a0 =
+                syscall(cx.general.a7, [cx.general.a0, cx.general.a1, cx.general.a2]) as usize;
+        }
+        Trap::Exception(Exception::StoreFault) | Trap::Exception(Exception::StorePageFault) => {
+            panic!("[kernel] StoreFault/StorePageFault in application.");
+            println!("[kernel] StoreFault/StorePageFault in application, core dumped.");
+        }
+        Trap::Exception(Exception::LoadFault) | Trap::Exception(Exception::LoadPageFault) => {
+            println!("[kernel] LoadFault/LoadPageFault in application, core dumped.");
+        }
+        Trap::Exception(Exception::IllegalInstruction) => {
+            println!("[kernel] IllegalInstruction in application, core dumped.");
+        }
+        Trap::Exception(Exception::Breakpoint) => {
+            cx.sepc += 4;
+        }
+        _ => {
+            panic!(
+                "Unsupported trap {:?}, stval = {:#x}!",
+                scause.cause(),
+                stval
+            );
+        }
+    }
+    cx
 }

@@ -2,7 +2,7 @@ use crate::sbi::shutdown;
 use core::panic::PanicInfo;
 
 #[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
+fn panic_handler(info: &PanicInfo) -> ! {
     if let Some(location) = info.location() {
         println!(
             "Panicked at {}:{} {}",

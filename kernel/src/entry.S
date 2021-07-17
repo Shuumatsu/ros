@@ -28,6 +28,7 @@ _start:
     bgeu    a2, a0, 4f
 3:
     li      a4, -65536
+    li      a4, -65536
     #       sp -= 65536
     add     sp, sp, a4
     addi    a2, a2, 1
@@ -37,6 +38,8 @@ _start:
 
 4:
     bnez    a0, 5f
+    mv a1, sp
     call    rust_main
 5:
+    mv a1, sp
     call    rust_main_ap

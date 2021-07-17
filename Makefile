@@ -12,6 +12,7 @@ BOOTLOADER := $(MAKEFILE_DIR)/bootloader/rustsbi-qemu.bin
 
 # KERNEL ENTRY
 KERNEL_ENTRY_PA := 0x80200000
+CORE_CNT := 2
 
 # Building
 TARGET := riscv64gc-unknown-none-elf
@@ -57,7 +58,7 @@ build: user-lib user-apps kernel-binary
 pure-run:
 	qemu-system-riscv64 \
 		-s \
-		-smp 4 \
+		-smp $(CORE_CNT) \
 		-m 256M \
 		-machine virt \
 		-nographic \
@@ -66,17 +67,20 @@ pure-run:
 
 run: build pure-run
 
-debug: build
-	@qemu-system-riscv64 \
+pure-debug:
+	qemu-system-riscv64 \
 		-s -S \
-		-smp 4 \
+		-smp $(CORE_CNT) \
 		-m 256M \
 		-machine virt \
 		-nographic \
 		-bios $(BOOTLOADER) \
 		-device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
 
+debug: build pure-debug
+
 clean:
 	cargo clean
 
-.PHONY: clean debug run build kernel-binary user-apps user-lib env  
+.PHONY: clean debug pure-debug run pure-run build kernel-binary user-apps user-lib env  
+

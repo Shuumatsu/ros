@@ -8,7 +8,7 @@ use spin::Mutex;
 
 pub mod addr;
 pub mod layout;
-mod paging;
+pub mod paging;
 
 use crate::config::{KERNEL_HEAP_SIZE, PAGE_SIZE};
 use layout::{HEAP_END, HEAP_START};
@@ -33,13 +33,6 @@ pub fn init() {
             extract_range!(*HEAP_START, 12, 56),
             extract_range!(*HEAP_END, 12, 56),
         );
-        println!(
-            "frames_cnt: {}",
-            extract_range!(*HEAP_END, 12, 56) - extract_range!(*HEAP_START, 12, 56)
-        );
-    }
-    unsafe {
-        paging::init();
     }
 }
 
