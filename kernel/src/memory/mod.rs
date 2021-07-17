@@ -33,6 +33,13 @@ pub fn init() {
             extract_range!(*HEAP_START, 12, 56),
             extract_range!(*HEAP_END, 12, 56),
         );
+        println!(
+            "frames_cnt: {}",
+            extract_range!(*HEAP_END, 12, 56) - extract_range!(*HEAP_START, 12, 56)
+        );
+    }
+    unsafe {
+        paging::init();
     }
 }
 

@@ -58,6 +58,7 @@ pure-run:
 	qemu-system-riscv64 \
 		-s \
 		-smp 4 \
+		-m 256M \
 		-machine virt \
 		-nographic \
 		-bios $(BOOTLOADER) \
@@ -69,6 +70,7 @@ debug: build
 	@qemu-system-riscv64 \
 		-s -S \
 		-smp 4 \
+		-m 256M \
 		-machine virt \
 		-nographic \
 		-bios $(BOOTLOADER) \

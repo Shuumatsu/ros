@@ -39,8 +39,8 @@ macro_rules! extract_nth_bit {
 #[macro_use]
 macro_rules! extract_range {
     ($bits: expr, $start_pos: expr, $end_pos: expr) => {{
-        ($start_pos..$end_pos).fold(0, |accu, n| {
-            (accu << 1) & if extract_nth_bit!($bits, n) { 1 } else { 0 }
+        ($start_pos..$end_pos).rev().fold(0, |accu, n| {
+            (accu << 1) | if extract_nth_bit!($bits, n) { 1 } else { 0 }
         })
     }};
 }

@@ -22,6 +22,9 @@ impl fmt::Debug for PhysicalAddr {
 
 impl From<usize> for PhysicalAddr {
     fn from(paddr: usize) -> Self {
+        for pos in 56..64 {
+            assert!(extract_nth_bit!(paddr, pos) == extract_nth_bit!(paddr, 55));
+        }
         PhysicalAddr(paddr)
     }
 }
@@ -80,6 +83,9 @@ impl fmt::Debug for VirtualAddr {
 
 impl From<usize> for VirtualAddr {
     fn from(vaddr: usize) -> Self {
+        for pos in 39..64 {
+            assert!(extract_nth_bit!(vaddr, pos) == extract_nth_bit!(vaddr, 38));
+        }
         VirtualAddr(vaddr)
     }
 }

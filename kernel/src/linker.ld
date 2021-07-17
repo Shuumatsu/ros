@@ -6,7 +6,8 @@ MEMORY {
     'w' (writeable), 'x' (executable), and 'a' (allocatable). */
 
     /* qemu is set to have 128M memory starting from 0x80000000 */
-    ram  (wxa) : ORIGIN = 0x80200000, LENGTH = 126M
+    /* ram  (wxa) : ORIGIN = 0x80200000, LENGTH = 126M */
+    ram  (wxa) : ORIGIN = 0x80200000, LENGTH = 8M
 }
 
 PROVIDE(_memory_start = ORIGIN(ram));

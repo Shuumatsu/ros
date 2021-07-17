@@ -1,16 +1,21 @@
-use alloc::boxed::Box;
-
+use log::info;
+use riscv::asm::sfence_vma_all;
+use riscv::register::satp;
 use spin::Mutex;
 
 use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+use alloc::boxed::Box;
 use core::fmt;
 use core::mem::size_of;
 use core::ptr;
 
 use crate::config::{ENTRIES_PER_PAGE, ENTRY_SIZE, PAGE_SIZE, PAGE_SIZE_BITS};
-use crate::memory::FRAME_ALLOCATOR;
-
 use crate::memory::addr::{PhysicalAddr, VirtualAddr};
+use crate::memory::layout::{
+    BSS_END, BSS_START, DATA_END, DATA_START, HEAP_END, HEAP_START, KERNEL_STACK_END,
+    KERNEL_STACK_START, RODATA_END, RODATA_START, TEXT_END, TEXT_START,
+};
+use crate::memory::FRAME_ALLOCATOR;
 
 // +----------+---------+---------+---------+-------+---+---+---+---+---+---+---+---+
 // | Not Used | PPN[2]  | PPN[1]  | PPN[0]  | RSW   | D | A | G | U | X | W | R | V |
@@ -63,10 +68,10 @@ impl From<usize> for Entry {
 }
 
 impl Entry {
-    pub fn new(paddr: PhysicalAddr, flags: EntryFlags) -> Self {
+    pub fn new(ppn: usize, flags: EntryFlags) -> Self {
         let mut ret = Self::empty();
         ret.set_flags(flags);
-        ret.set_page(paddr);
+        ret.set_ppn(ppn);
         ret
     }
 
@@ -86,11 +91,8 @@ impl Entry {
         extract_range!(self.0, 10, 54)
     }
 
-    pub fn set_frame(&mut self, frame: usize) {
+    pub fn set_ppn(&mut self, frame: usize) {
         self.0 = store_range!(self.0, 10, 54, frame)
-    }
-    pub fn set_page(&mut self, paddr: PhysicalAddr) {
-        self.set_frame(paddr.extract_ppn())
     }
 
     // A leaf has one or more RWX bits set
@@ -107,10 +109,10 @@ impl Entry {
         let flags = self.extract_flags();
         if !flags.contains(EntryFlags::VALID) {
             if let Some(ppn) = FRAME_ALLOCATOR.lock().alloc(1) {
-                self.set_frame(ppn);
+                self.set_ppn(ppn);
                 self.set_flags(flags | EntryFlags::VALID);
             } else {
-                return false;
+                panic!("???");
             }
         }
         true
@@ -163,13 +165,8 @@ pub unsafe fn map(
     }
 
     let entry = &mut (*table).entries[vaddr.extract_vpn(0) as usize];
-    if !entry.ensure() {
-        return false;
-    }
-
-    entry.set_page(paddr);
-    entry.set_flags(flags);
-
+    entry.set_ppn(paddr.extract_ppn());
+    entry.set_flags(flags | EntryFlags::VALID);
     true
 }
 
@@ -209,7 +206,7 @@ pub unsafe fn unmap(root: *mut Table, vaddr: VirtualAddr) {
 pub unsafe fn free(root: *mut Table) {
     for entry in (*root).entries.iter_mut() {
         let flags = entry.extract_flags();
-        if flags.contains(EntryFlags::VALID) {
+        if !flags.contains(EntryFlags::VALID) {
             continue;
         }
 
@@ -287,115 +284,96 @@ pub unsafe fn id_map_range(
 }
 
 lazy_static! {
-    pub static ref ROOT_TABLE: Mutex<Box<Table>> = unsafe {
-        let ret = Mutex::new(Box::new(Table::new()));
-
-        {
-            // let root = ret.lock().as_mut() as *mut _;
-            // println!("[initialize root table] root page table created at, {:?}", root);
-
-            // // UART
-            // println!("[initialize root table] mapping UART...");
-            // id_map_range(root, UART_BASE_ADDR, UART_BASE_ADDR + PAGE_SIZE, paging::READ_WRITE);
-            // println!("[initialize root table] mapping UART completed");
-
-            // let expected = Some(PhysicalAddr::new(UART_BASE_ADDR));
-            // let mapped = virt_to_phys(root, VirtualAddr::new(UART_BASE_ADDR));
-            // assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
-
-            // // CLINT
-            // println!("[initialize root table] mapping CLINT...");
-            // id_map_range(root, CLINT_BASE_ADDR, CLINT_BASE_ADDR + PAGE_SIZE, paging::READ_WRITE);
-            // println!("[initialize root table] mapping CLINT completed");
-
-            // let expected = Some(PhysicalAddr::new(CLINT_BASE_ADDR));
-            // let mapped = virt_to_phys(root, VirtualAddr::new(CLINT_BASE_ADDR));
-            // assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
-
-            // // PLIC
-            // println!("[initialize root table] mapping PLIC...");
-            // id_map_range(root, PLIC_BASE_ADDR, PLIC_END_ADDR, paging::READ_WRITE);
-            // println!("[initialize root table] mapping PLIC completed");
-
-            // let expected = Some(PhysicalAddr::new(PLIC_BASE_ADDR));
-            // let mapped = virt_to_phys(root, VirtualAddr::new(PLIC_BASE_ADDR));
-            // assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
-
-            // // map text section
-            // println!("[initialize root table] mapping text section...");
-            // id_map_range(root, text_start(), text_end(), paging::READ_EXECUTE);
-            // println!("[initialize root table] mapping text section completed");
-
-            // let expected = Some(PhysicalAddr::new(text_start()));
-            // let mapped = virt_to_phys(root, VirtualAddr::new(text_start()));
-            // assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
-
-            // // map rodata section
-            // println!("[initialize root table] mapping rodata section...");
-            // id_map_range(root, rodata_start(), rodata_end(), paging::READ);
-            // println!("[initialize root table] mapping rodata section completed");
-
-            // let expected = Some(PhysicalAddr::new(rodata_start()));
-            // let mapped = virt_to_phys(root, VirtualAddr::new(rodata_start()));
-            // assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
-
-            // // map data section
-            // println!("[initialize root table] mapping data section...");
-            // id_map_range(root, data_start(), data_end(), paging::READ_WRITE);
-            // println!("[initialize root table] mapping data section completed");
-
-            // let expected = Some(PhysicalAddr::new(data_start()));
-            // let mapped = virt_to_phys(root, VirtualAddr::new(data_start()));
-            // assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
-
-            // // map bss section
-            // println!("[initialize root table] mapping bss section...");
-            // id_map_range(root, bss_start(), bss_end(), paging::READ_WRITE);
-            // println!("[initialize root table] mapping bss section completed");
-
-            // let expected = Some(PhysicalAddr::new(bss_start()));
-            // let mapped = virt_to_phys(root, VirtualAddr::new(bss_start()));
-            // assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
-
-            // // map kernel stack`
-            // println!("[initialize root table] mapping kernel stack...");
-            // id_map_range(root, kernel_stack_start(), kernel_stack_end() + PAGE_SIZE, paging::READ_WRITE);
-            // println!("[initialize root table] mapping kernel stack completed");
-
-            // let expected = Some(PhysicalAddr::new(kernel_stack_start()));
-            // let mapped = virt_to_phys(root, VirtualAddr::new(kernel_stack_start()));
-            // assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
-
-            // // map heap descriptors
-            // println!("[initialize root table] mapping heap descriptors...");
-            // id_map_range(root, heap_start(), memory_end(), paging::READ_WRITE);
-            // println!("[initialize root table] mapping heap descriptors completed");
-
-            // let expected = Some(PhysicalAddr::new(heap_start()));
-            // let mapped = virt_to_phys(root, VirtualAddr::new(heap_start()));
-            // assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
-
-            // println!("root page table mapping initialized");
-        }
-
-        ret
-    };
+    static ref ROOT_TABLE: Mutex<Box<Table>> = Mutex::new(Box::new(Table::new()));
 }
 
 pub unsafe fn init() {
-    // let root = ROOT_TABLE.lock();
-    // let addr = root.as_ref() as *const _ as usize;
-    // let ppn = PhysicalAddr::new(addr).extract_ppn_all();
+    let mut root = ROOT_TABLE.lock();
+    {
+        let root = (*root).as_mut() as *mut _;
 
-    // println!(
-    //     "[paging::init] set satp register, mode: {:?}, ppn: {:#x}",
-    //     satp::Mode::Sv39,
-    //     ppn
-    // );
-    // satp::set(satp::Mode::Sv39, 0, ppn);
-    // println!("[paging::init] set satp register completed");
+        info!(
+            "[initialize kernel root table] mapping text section [{:#x}, {:#x})...",
+            *TEXT_START, *TEXT_END
+        );
+        id_map_range(
+            root,
+            VirtualAddr::from(*TEXT_START),
+            VirtualAddr::from(*TEXT_END),
+            EntryFlags::READ_EXECUTE,
+        );
+        info!("[initialize kernel root table] mapping text section completed");
 
-    // println!("[paging::init] sfence_vma_all");
-    // sfence_vma_all();
-    // println!("[paging::init] sfence_vma_all completed");
+        info!(
+            "[initialize kernel root table] mapping rodata section [{:#x}, {:#x})...",
+            *RODATA_START, *RODATA_END
+        );
+        id_map_range(
+            root,
+            VirtualAddr::from(*RODATA_START),
+            VirtualAddr::from(*RODATA_END),
+            EntryFlags::READ,
+        );
+        info!("[initialize kernel root table] mapping rodata section completed");
+
+        info!(
+            "[initialize kernel root table] mapping data section [{:#x}, {:#x})...",
+            *DATA_START, *DATA_END
+        );
+        id_map_range(
+            root,
+            VirtualAddr::from(*DATA_START),
+            VirtualAddr::from(*DATA_END),
+            EntryFlags::READ_WRITE,
+        );
+        info!("[initialize kernel root table] mapping data section completed");
+
+        info!(
+            "[initialize kernel root table] mapping bss section [{:#x}, {:#x})...",
+            *BSS_START, *BSS_END
+        );
+        id_map_range(
+            root,
+            VirtualAddr::from(*BSS_START),
+            VirtualAddr::from(*BSS_END),
+            EntryFlags::READ_WRITE,
+        );
+        info!("[initialize kernel root table] mapping bss section completed");
+
+        info!(
+            "[initialize kernel root table] mapping kernel stack [{:#x}, {:#x})...",
+            *KERNEL_STACK_START, *KERNEL_STACK_END
+        );
+        id_map_range(
+            root,
+            VirtualAddr::from(*KERNEL_STACK_START),
+            VirtualAddr::from(*KERNEL_STACK_END),
+            EntryFlags::READ_WRITE,
+        );
+        info!("[initialize kernel root table] mapping kernel stack completed");
+
+        info!(
+            "[initialize kernel root table] mapping heap [{:#x}, {:#x})...",
+            *HEAP_START, *HEAP_END
+        );
+        id_map_range(
+            root,
+            VirtualAddr::from(*HEAP_START),
+            VirtualAddr::from(*HEAP_END),
+            EntryFlags::READ_WRITE,
+        );
+        info!("[initialize kernel root table] mapping heap completed");
+
+        println!("root page table mapping completed");
+    }
+
+    let addr = root.as_ref() as *const _ as usize;
+    let ppn = PhysicalAddr::from(addr).extract_ppn();
+
+    satp::set(satp::Mode::Sv39, 0, ppn);
+    println!("[paging::init] set satp register completed");
+
+    sfence_vma_all();
+
+    println!("[paging::init] virtual memory initialized");
 }
