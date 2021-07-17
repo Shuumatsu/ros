@@ -7,7 +7,7 @@ use core::mem::{size_of, size_of_val};
 // +----------+---------+---------+---------+-------------+
 #[repr(transparent)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct PhysicalAddr(u64);
+pub struct PhysicalAddr(usize);
 
 impl fmt::Debug for PhysicalAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -20,19 +20,19 @@ impl fmt::Debug for PhysicalAddr {
     }
 }
 
-impl From<u64> for PhysicalAddr {
-    fn from(paddr: u64) -> Self {
+impl From<usize> for PhysicalAddr {
+    fn from(paddr: usize) -> Self {
         PhysicalAddr(paddr)
     }
 }
 
 impl PhysicalAddr {
-    pub fn new(ppn: u64, offset: u64) -> Self {
+    pub fn new(ppn: usize, offset: usize) -> Self {
         let addr = store_range!(offset, 12, 56, ppn);
         PhysicalAddr(set_range!(addr, 56, 64, extract_nth_bit!(addr, 55)))
     }
 
-    pub const fn extract_bits(&self) -> u64 {
+    pub const fn extract_bits(&self) -> usize {
         self.0
     }
 
@@ -43,15 +43,15 @@ impl PhysicalAddr {
         self.0 as *mut T
     }
 
-    pub fn extract_ppn(&self) -> u64 {
+    pub fn extract_ppn(&self) -> usize {
         extract_range!(self.0, 12, 56)
     }
 
-    pub fn extract_offset(&self) -> u64 {
+    pub fn extract_offset(&self) -> usize {
         extract_range!(self.0, 0, 12)
     }
 
-    pub fn is_aligned(&self, alignment: u64) -> bool {
+    pub fn is_aligned(&self, alignment: usize) -> bool {
         self.extract_offset() == 0
     }
 }
@@ -61,10 +61,9 @@ impl PhysicalAddr {
 // +----------+---------+---------+---------+-------------+
 // | 63 - 39  | 38 - 30 | 29 - 21 | 20 - 12 | 11 - 0      |
 // +----------+---------+---------+---------+-------------+
-
 #[repr(transparent)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct VirtualAddr(u64);
+pub struct VirtualAddr(usize);
 
 impl fmt::Debug for VirtualAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -79,19 +78,19 @@ impl fmt::Debug for VirtualAddr {
     }
 }
 
-impl From<u64> for VirtualAddr {
-    fn from(vaddr: u64) -> Self {
+impl From<usize> for VirtualAddr {
+    fn from(vaddr: usize) -> Self {
         VirtualAddr(vaddr)
     }
 }
 
 impl VirtualAddr {
-    pub fn new(vpn: u64, offset: u64) -> Self {
+    pub fn new(vpn: usize, offset: usize) -> Self {
         let addr = store_range!(offset, 12, 56, vpn);
         VirtualAddr(set_range!(addr, 39, 64, extract_nth_bit!(addr, 38)))
     }
 
-    pub const fn extract_bits(&self) -> u64 {
+    pub const fn extract_bits(&self) -> usize {
         self.0
     }
 
@@ -102,7 +101,7 @@ impl VirtualAddr {
         self.0 as *mut T
     }
 
-    pub fn extract_vpn(&self, idx: u64) -> u64 {
+    pub fn extract_vpn(&self, idx: usize) -> usize {
         let mask = (1 << 9) - 1;
         match idx {
             0 => extract_range!(self.0, 12, 21),
@@ -112,11 +111,11 @@ impl VirtualAddr {
         }
     }
 
-    pub fn extract_offset(&self) -> u64 {
+    pub fn extract_offset(&self) -> usize {
         extract_range!(self.0, 0, 12)
     }
 
-    pub fn is_aligned(&self, alignment: u64) -> bool {
+    pub fn is_aligned(&self, alignment: usize) -> bool {
         self.extract_offset() == 0
     }
 }

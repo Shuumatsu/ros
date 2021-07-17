@@ -94,22 +94,30 @@ where
     }
 }
 
-/// Align downwards. Returns the greatest x with alignment `align`
-/// so that x <= addr. The alignment must be a power of 2.
-pub fn align_down(addr: usize, align: usize) -> usize {
-    if align.is_power_of_two() {
-        addr & !(align - 1)
-    } else if align == 0 {
-        addr
-    } else {
-        panic!("`align` must be a power of 2");
-    }
-}
-
 /// Align upwards. Returns the smallest x with alignment `align`
 /// so that x >= addr. The alignment must be a power of 2.
-pub fn align_up(addr: usize, align: usize) -> usize {
-    align_down(addr + align - 1, align)
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! align_up {
+    ($addr: expr, $align: expr) => {{
+        if $align.is_power_of_two() {
+            $addr & !($align - 1)
+        } else if $align == 0 {
+            $addr
+        } else {
+            panic!("`align` must be a power of 2");
+        }
+    }};
+}
+
+/// Align downwards. Returns the greatest x with alignment `align`
+/// so that x <= addr. The alignment must be a power of 2.
+#[allow(unused_macros)]
+#[macro_use]
+macro_rules! align_down {
+    ($addr: expr, $align: expr) => {{
+        align_up!($addr + $align - 1, $align)
+    }};
 }
 
 pub unsafe fn memset(ptr: *mut u8, ch: u8, count: usize) {
