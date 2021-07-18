@@ -1,0 +1,44 @@
+qemu-system-riscv64 \
+	-s -S \
+	-smp 1 \
+	-m 256M \
+	-machine virt \
+	-nographic \
+	-bios /home/curry/workspace/ros/bootloader/rustsbi-qemu.bin \
+	-device loader,file=/home/curry/workspace/ros/target/riscv64gc-unknown-none-elf/release/kernel.bin,addr=0x80200000
+[rustsbi] RustSBI version 0.2.0-alpha.4
+.______       __    __      _______.___________.  _______..______   __
+|   _  \     |  |  |  |    /       |           | /       ||   _  \ |  |
+|  |_)  |    |  |  |  |   |   (----`---|  |----`|   (----`|  |_)  ||  |
+|      /     |  |  |  |    \   \       |  |      \   \    |   _  < |  |
+|  |\  \----.|  `--'  |.----)   |      |  |  .----)   |   |  |_)  ||  |
+| _| `._____| \______/ |_______/       |__|  |_______/    |______/ |__|
+
+[rustsbi] Implementation: RustSBI-QEMU Version 0.0.1
+[rustsbi-dtb] Hart count: cluster0 with 1 cores
+[rustsbi] misa: RV64ACDFIMSU
+[rustsbi] mideleg: ssoft, stimer, sext (0x222)
+[rustsbi] medeleg: ima, ia, bkpt, la, sa, uecall, ipage, lpage, spage (0xb1ab)
+[rustsbi] pmp0: 0x80000000 ..= 0x800fffff (rwx)
+[rustsbi] pmp6: 0x80000000 ..= 0x807fffff (rwx)
+[rustsbi] pmp12: 0x0 ..= 0xffffffffffffff (---)
+main hart initializing
+[34m=== memory layout ===[0m
+[34mtext_start: 0x80200000, text_end: 0x8020b000[0m
+[34mrodata_start: 0x8020b000, rodata_end: 0x80211000[0m
+[34mdata_start: 0x80211690, data_end: 0x80213000[0m
+[34mbss_start: 0x80213000, bss_end: 0x802235b8[0m
+[34mkernel_stack_start: 0x80224000, kernel_stack_end: 0x80324000[0m
+[34m[initialize kernel root table] mapping text section [0x80200000, 0x8020b000)...[0m
+[34m[initialize kernel root table] mapping text section completed[0m
+[34m[initialize kernel root table] mapping rodata section [0x8020b000, 0x80211000)...[0m
+[34m[initialize kernel root table] mapping rodata section completed[0m
+[34m[initialize kernel root table] mapping data section [0x80211690, 0x80213000)...[0m
+[34m[initialize kernel root table] mapping data section completed[0m
+[34m[initialize kernel root table] mapping bss section [0x80213000, 0x802235b8)...[0m
+[34m[initialize kernel root table] mapping bss section completed[0m
+[34m[initialize kernel root table] mapping kernel stack [0x80224000, 0x80324000)...[0m
+[34m[initialize kernel root table] mapping kernel stack completed[0m
+[34m[initialize kernel root table] mapping heap [0x80324000, 0x88000000)...[0m
+[34m[initialize kernel root table] mapping heap completed[0m
+root page table mapping completed

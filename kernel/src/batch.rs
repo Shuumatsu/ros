@@ -3,7 +3,7 @@ use core::cell::RefCell;
 use lazy_static::*;
 use spin::Mutex;
 
-use crate::trap::TrapContext;
+use trapframe::TrapFrame;
 
 const USER_STACK_SIZE: usize = 4096;
 const KERNEL_STACK_SIZE: usize = 4096;

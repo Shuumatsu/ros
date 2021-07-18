@@ -10,7 +10,6 @@
 #![feature(lang_items)]
 extern crate alloc;
 
-use core::intrinsics::volatile_load;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[macro_use]
@@ -75,7 +74,7 @@ fn rust_main(hart_id: usize, sp: usize) -> ! {
     HAS_STARTED.store(true, Ordering::SeqCst);
 
     unsafe {
-        llvm_asm!("ebreak");
+        (0x951231 as *const u8).read_volatile();
     }
 
     let cpu = CPU { hart_id };
@@ -88,15 +87,18 @@ fn rust_main(hart_id: usize, sp: usize) -> ! {
 fn rust_main_ap(hart_id: usize, sp: usize) -> ! {
     while !HAS_STARTED.load(Ordering::SeqCst) {}
 
+    println!("hart {} initializing", hart_id);
+
     paging::init();
     trap::init();
 
     unsafe {
-        llvm_asm!("ebreak");
+        (0x951231 as *const u8).read_volatile();
+        // (0x19951231 as *mut u8).write_volatile(0);
     }
 
     let cpu = CPU { hart_id };
-    println!("main hart {} started, {:#x}", cpu.hart_id, sp);
+    println!("hart {} started, {:#x}", cpu.hart_id, sp);
 
     loop {}
 }

@@ -12,7 +12,7 @@ BOOTLOADER := $(MAKEFILE_DIR)/bootloader/rustsbi-qemu.bin
 
 # KERNEL ENTRY
 KERNEL_ENTRY_PA := 0x80200000
-CORE_CNT := 2
+CORE_CNT := 4
 
 # Building
 TARGET := riscv64gc-unknown-none-elf

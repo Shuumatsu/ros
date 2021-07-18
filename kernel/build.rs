@@ -3,12 +3,16 @@ use std::io::{Result, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-static TARGET_DIR: &str = env!("TARGET_DIR");
+static mut TARGET_DIR: &str = "";
 
 fn main() {
+    unsafe {
+        TARGET_DIR = option_env!("TARGET_DIR").unwrap();
+    }
+
     println!("cargo:rerun-if-changed=../user_apps/src/");
     println!("cargo:rerun-if-changed=../user_lib/src/");
-    println!("cargo:rerun-if-changed={}", TARGET_DIR);
+    println!("cargo:rerun-if-changed={}", unsafe { TARGET_DIR });
     insert_app_data().unwrap();
 }
 
@@ -44,8 +48,8 @@ _num_app:
     for (idx, app) in apps.iter().enumerate() {
         // rust-objcopy --binary-architecture=riscv64
 
-        let elf = format!("{}/{}", TARGET_DIR, app);
-        let bin = format!("{}/{}.bin", TARGET_DIR, app);
+        let elf = format!("{}/{}", unsafe { TARGET_DIR }, app);
+        let bin = format!("{}/{}.bin", unsafe { TARGET_DIR }, app);
 
         Command::new("rust-objcopy")
             .arg("--binary-architecture=riscv64")

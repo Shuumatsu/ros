@@ -1,4 +1,8 @@
+use core::mem::size_of;
 use riscv::register::sstatus;
+use std::sync::atomic::compiler_fence;
+
+use crate::memory::layout::{TEXT_END, TEXT_START};
 
 #[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
@@ -72,3 +76,55 @@ where
 
     r
 }
+
+/// Returns the current frame pointer or stack base pointer
+#[inline(always)]
+pub fn fp() -> usize {
+    let ptr: usize;
+
+    unsafe {
+        llvm_asm!("mv $0, s0" : "=r"(ptr));
+    }
+
+    ptr
+}
+
+/// Returns the current return address
+#[inline(always)]
+pub fn ra() -> usize {
+    let ptr: usize;
+
+    unsafe {
+        llvm_asm!("mv $0, ra" : "=r"(ptr));
+    }
+
+    ptr
+}
+
+// // Print the backtrace starting from the caller
+// pub fn backtrace() {
+//     unsafe {
+//         let mut current_ra = ra();
+//         let mut current_fp = fp();
+//         let mut stack_num = 0;
+
+//         println!("=== BEGIN rCore stack trace ===");
+
+//         while current_ra >= *TEXT_START && current_ra <= *TEXT_END && current_fp as usize != 0 {
+//             // print current backtrace
+//             println!(
+//                 "#{:02} PC: {:#018X} FP: {:#018X}",
+//                 stack_num,
+//                 current_ra - size_of::<usize>(),
+//                 current_fp
+//             );
+
+//             stack_num = stack_num + 1;
+
+//             current_fp = *(current_fp as *const usize).offset(-2);
+//             current_ra = *(current_fp as *const usize).offset(-1);
+//         }
+
+//         println!("=== END rCore stack trace ===");
+//     }
+// }

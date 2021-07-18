@@ -6,14 +6,14 @@ use crate::cpu::GeneralRegs;
 
 #[repr(C)]
 #[derive(Debug)]
-pub struct TrapContext {
+pub struct TrapFrame {
     pub general: GeneralRegs,
     pub sstatus: Sstatus,
     pub sepc: usize,
 }
-const_assert_eq!(size_of::<TrapContext>(), 34 * 8);
+const_assert_eq!(size_of::<TrapFrame>(), 34 * 8);
 
-impl TrapContext {
+impl TrapFrame {
     pub fn set_sp(&mut self, sp: usize) {
         self.general.sp = sp;
     }
