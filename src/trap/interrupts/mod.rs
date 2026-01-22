@@ -10,7 +10,7 @@ mod plic;
 
 pub unsafe fn init() {
     unsafe {
-        kprintln!("delegate all interrupts to supervisor mode");
+        println!("delegate all interrupts to supervisor mode");
         asm!("li t0, 0xffff");
         asm!("csrw mideleg, t0");
 
@@ -21,7 +21,7 @@ pub unsafe fn init() {
         clint::init();
         plic::init();
 
-        kprintln!("enable supervisor interrupts");
+        println!("enable supervisor interrupts");
         sstatus::set_sie();
     }
 }

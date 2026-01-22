@@ -61,7 +61,7 @@ pub unsafe fn init() {
         // 直接模式（Driect） MODE = 0 ，触发任何中断异常 时都把 PC 设置为 BASE
         // 向量模式（Vectored） MODE = 1 ，对第 i 种中断 ，跳转到 BASE + i * 4；对所有异常，仍跳转到 BASE
         // 我们采用第一种模式，先进入统一的处理函数，之后再根据中断 / 异常种类进行不同处理。
-        kprintln!("[interrupts::init] set stec register: trap_entry {:#x}, mode Direct", addr);
+        println!("[interrupts::init] set stec register: trap_entry {:#x}, mode Direct", addr);
         stvec::write(stvec::Stvec::new(addr, stvec::TrapMode::Direct));
 
         // 当中断发生时，cpu 跳转到中断处理函数。sscratch 存储了函数将要用到的 sp

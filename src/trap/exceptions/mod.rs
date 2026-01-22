@@ -8,7 +8,7 @@ mod breakpoint;
 
 pub unsafe fn init() {
     unsafe {
-        kprintln!("delegate all exceptions to supervisor mode");
+        println!("delegate all exceptions to supervisor mode");
         asm!("li t0, 0xffff");
         asm!("csrw medeleg, t0");
     }
