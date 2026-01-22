@@ -1,17 +1,16 @@
 use core::fmt;
-use lazy_static::lazy_static;
-use spin::Mutex;
+use spin::{Lazy, Mutex};
 
 use crate::drivers::serial::uart16550::UartDriver;
 use crate::memory::layout::UART_BASE_ADDR;
 
-lazy_static! {
-    pub static ref UART_DRIVER: Mutex<UartDriver> = Mutex::new({
+pub static UART_DRIVER: Lazy<Mutex<UartDriver>> = Lazy::new(|| {
+    Mutex::new({
         let mut driver = UartDriver::new(UART_BASE_ADDR);
         driver.init();
         driver
-    });
-}
+    })
+});
 
 pub struct Stdout;
 

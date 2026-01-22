@@ -10,7 +10,6 @@ use core::arch::global_asm;
 #[macro_use]
 extern crate static_assertions;
 
-mod allocator;
 mod arch;
 mod collections;
 mod cpu;

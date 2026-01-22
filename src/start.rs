@@ -40,6 +40,7 @@ unsafe extern "C" fn start() {
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
+    crate::memory::init();
     println!("enter kmain");
     // println!("initializing paging...");
     // memory::paging::init();
