@@ -1,10 +1,13 @@
+use crate::console::UART;
+use crate::{print, println};
+
 pub fn echo() -> ! {
     println!("I'm so awesome. If you start typing something, I'll show you what you typed!");
 
     loop {
         match {
-            let mut driver = UART_DRIVER.lock();
-            driver.get()
+            let mut driver = UART.lock();
+            driver.try_receive().ok()
         } {
             Some(8) | Some(0x7F) => {
                 // backspace really means to "move the cursor to the left by 1 character"
@@ -17,13 +20,13 @@ pub fn echo() -> ! {
             }
             Some(0x1b) => {
                 match {
-                    let mut driver = UART_DRIVER.lock();
-                    driver.get()
+                    let mut driver = UART.lock();
+                    driver.try_receive().ok()
                 } {
                     Some(91) => {
                         match {
-                            let mut driver = UART_DRIVER.lock();
-                            driver.get().map(|u| u as char)
+                            let mut driver = UART.lock();
+                            driver.try_receive().ok().map(|u| u as char)
                         } {
                             Some('A') => {
                                 println!("That's the up arrow!");

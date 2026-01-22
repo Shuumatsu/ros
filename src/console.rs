@@ -1,15 +1,13 @@
 use core::fmt;
 use spin::{Lazy, Mutex};
+use uart_16550::MmioSerialPort;
 
-use crate::drivers::serial::uart16550::UartDriver;
-use crate::memory::layout::UART_BASE_ADDR;
+use crate::platform::UART0_BASE;
 
-pub static UART_DRIVER: Lazy<Mutex<UartDriver>> = Lazy::new(|| {
-    Mutex::new({
-        let mut driver = UartDriver::new(UART_BASE_ADDR);
-        driver.init();
-        driver
-    })
+pub static UART: Lazy<Mutex<MmioSerialPort>> = Lazy::new(|| {
+    let mut serial = unsafe { MmioSerialPort::new(UART0_BASE) };
+    serial.init();
+    Mutex::new(serial)
 });
 
 pub struct Stdout;
@@ -17,7 +15,7 @@ pub struct Stdout;
 impl fmt::Write for Stdout {
     fn write_str(&mut self, out: &str) -> fmt::Result {
         for c in out.bytes() {
-            UART_DRIVER.lock().put_sync(c);
+            UART.lock().send(c);
         }
         Ok(())
     }

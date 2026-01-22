@@ -19,6 +19,7 @@ mod lang_items;
 #[macro_use]
 mod console;
 mod memory;
+mod platform;
 mod proc;
 mod sbi;
 mod start;

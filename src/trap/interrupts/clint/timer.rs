@@ -6,7 +6,7 @@ use crossbeam_utils::CachePadded;
 use riscv::register::{mie, mscratch, mstatus, mtvec};
 
 use crate::arch::{riscv64::hart_id, NCPU};
-use crate::memory::layout::{clint_mtimecmp, CLINT_MTIME};
+use crate::platform::{clint_mtimecmp, CLINT_MTIME};
 use crate::trap::TrapFrame;
 
 pub const INTERVAL: u64 = 10_0000;

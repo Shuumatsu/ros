@@ -4,12 +4,10 @@ use riscv::register::{mie, sie};
 use crate::trap::TrapFrame;
 use crate::{print, println};
 // The PLIC is an interrupt controller controlled via MMIO.
-use crate::memory::layout::{
-    CLAIM_BASE_ADDR, COMPLETE_BASE_ADDR, ENABLE_BASE_ADDR, PENDING_BASE_ADDR, PRIORITY_BASE_ADDR,
-    PRIORITY_THRESHOLD_BASE_ADDR,
+use crate::platform::{
+    PLIC_CLAIM_BASE, PLIC_ENABLE_BASE, PLIC_PENDING_BASE, PLIC_PRIORITY_BASE, PLIC_THRESHOLD_BASE,
+    UART0_IRQ,
 };
-
-const UART_INTR_ID: usize = 10;
 
 // The platform-level interrupt controller (PLIC) routes all signals through one pin on the CPU--the EI (external interrupt) pin.
 // This pin can be enabled via the machine external interrupt enable (meie) bit in the mie register.
@@ -25,7 +23,7 @@ unsafe fn enable(intr_id: usize) {
 
     let bit = 1 << intr_id;
     // 似乎 qemu 是运行在 context 0？
-    let ptr = ENABLE_BASE_ADDR as *mut u32;
+    let ptr = PLIC_ENABLE_BASE as *mut u32;
     ptr.write_volatile(ptr.read_volatile() | bit);
 }
 
@@ -33,23 +31,23 @@ unsafe fn set_priority(intr_id: usize, mut prio: u32) {
     assert!(intr_id < 1024);
 
     let tsh = {
-        let ptr = PRIORITY_THRESHOLD_BASE_ADDR as *mut u32;
+        let ptr = PLIC_THRESHOLD_BASE as *mut u32;
         ptr.read_volatile()
     };
     prio = max(prio, tsh);
 
-    let ptr = PRIORITY_BASE_ADDR as *mut u32;
+    let ptr = PLIC_PRIORITY_BASE as *mut u32;
     ptr.add(intr_id).write_volatile(prio);
 }
 
 unsafe fn set_threshold(threshold: u32) {
-    let ptr = PRIORITY_THRESHOLD_BASE_ADDR as *mut u32;
+    let ptr = PLIC_THRESHOLD_BASE as *mut u32;
     ptr.write_volatile(threshold)
 }
 
 /// See if a given interrupt id is pending.
 unsafe fn is_pending(intr_id: u32) -> bool {
-    let ptr = PENDING_BASE_ADDR as *const u32;
+    let ptr = PLIC_PENDING_BASE as *const u32;
 
     let bits = ptr.read_volatile();
     (1 << intr_id) & bits != 0
@@ -58,7 +56,7 @@ unsafe fn is_pending(intr_id: u32) -> bool {
 // returns the ID of the highest priority pending interrupt or zero if there is no pending interrupt
 // A successful claim will also atomically clear the corresponding pending bit on the interrupt source.
 unsafe fn claim() -> Option<usize> {
-    let ptr = CLAIM_BASE_ADDR as *const u32;
+    let ptr = PLIC_CLAIM_BASE as *const u32;
 
     match ptr.read_volatile() {
         0 => None,
@@ -69,7 +67,7 @@ unsafe fn claim() -> Option<usize> {
 // The PLIC does not check whether the completion ID is the same as the last claim ID for that target.
 // If the completion ID does not match an interrupt source that is currently enabled for the target, the completion is silently ignored.
 unsafe fn complete(intr_id: usize) {
-    let ptr = COMPLETE_BASE_ADDR as *mut u32;
+    let ptr = PLIC_CLAIM_BASE as *mut u32;
     ptr.write_volatile(intr_id as u32)
 }
 
@@ -77,18 +75,18 @@ pub unsafe fn init() {
     kprintln!("enable plic interrupts");
     sie::set_sext();
 
-    enable(UART_INTR_ID);
+    enable(UART0_IRQ);
     // permits all interrupts with non-zero priority
     set_threshold(0);
-    set_priority(UART_INTR_ID, 1);
+    set_priority(UART0_IRQ, 1);
 }
 
 pub unsafe fn handler(tf: &TrapFrame) {
     if let Some(intr_id) = claim() {
         match intr_id {
-            UART_INTR_ID => {
+            UART0_IRQ => {
                 panic!("qqq");
-                complete(UART_INTR_ID);
+                complete(UART0_IRQ);
             }
             _ => {
                 unimplemented!()

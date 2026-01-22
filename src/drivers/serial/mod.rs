@@ -1,7 +1,5 @@
 use super::Driver;
 
-pub mod uart16550;
-
 pub trait SerialDriver: Driver {
     // read one byte from tty
     fn read(&self) -> u8;

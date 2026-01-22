@@ -7,9 +7,9 @@ pub use crate::arch::riscv64::paging::sv39::{
 };
 use crate::memory::layout::{
     bss_end, bss_start, data_end, data_start, heap_size, heap_start, kernel_stack_end,
-    kernel_stack_start, rodata_end, rodata_start, text_end, text_start, CLINT_BASE_ADDR,
-    PLIC_BASE_ADDR, PLIC_END_ADDR, UART_BASE_ADDR,
+    kernel_stack_start, rodata_end, rodata_start, text_end, text_start,
 };
+use crate::platform::{CLINT_BASE, PLIC_BASE, PLIC_END, UART0_BASE};
 use crate::utils::{align_down, align_up};
 use crate::{arch::riscv64::paging::sv39 as paging, memory::layout::memory_end};
 use crate::{print, println};
@@ -55,31 +55,31 @@ pub static ROOT_TABLE: Lazy<Mutex<Box<Table>>> = Lazy::new(|| unsafe {
 
         // UART
         println!("[initialize root table] mapping UART...");
-        id_map_range(root, UART_BASE_ADDR, UART_BASE_ADDR + PAGE_SIZE, paging::READ_WRITE);
+        id_map_range(root, UART0_BASE, UART0_BASE + PAGE_SIZE, paging::READ_WRITE);
         println!("[initialize root table] mapping UART completed");
 
-        let expected = Some(PhysicalAddr::new(UART_BASE_ADDR));
-        let mapped = virt_to_phys(root, VirtualAddr::new(UART_BASE_ADDR));
+        let expected = Some(PhysicalAddr::new(UART0_BASE));
+        let mapped = virt_to_phys(root, VirtualAddr::new(UART0_BASE));
         assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
 
 
         // CLINT
         println!("[initialize root table] mapping CLINT...");
-        id_map_range(root, CLINT_BASE_ADDR, CLINT_BASE_ADDR + PAGE_SIZE, paging::READ_WRITE);
+        id_map_range(root, CLINT_BASE, CLINT_BASE + PAGE_SIZE, paging::READ_WRITE);
         println!("[initialize root table] mapping CLINT completed");
 
-        let expected = Some(PhysicalAddr::new(CLINT_BASE_ADDR));
-        let mapped = virt_to_phys(root, VirtualAddr::new(CLINT_BASE_ADDR));
+        let expected = Some(PhysicalAddr::new(CLINT_BASE));
+        let mapped = virt_to_phys(root, VirtualAddr::new(CLINT_BASE));
         assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
 
 
         // PLIC
         println!("[initialize root table] mapping PLIC...");
-        id_map_range(root, PLIC_BASE_ADDR, PLIC_END_ADDR, paging::READ_WRITE);
+        id_map_range(root, PLIC_BASE, PLIC_END, paging::READ_WRITE);
         println!("[initialize root table] mapping PLIC completed");
 
-        let expected = Some(PhysicalAddr::new(PLIC_BASE_ADDR));
-        let mapped = virt_to_phys(root, VirtualAddr::new(PLIC_BASE_ADDR));
+        let expected = Some(PhysicalAddr::new(PLIC_BASE));
+        let mapped = virt_to_phys(root, VirtualAddr::new(PLIC_BASE));
         assert!(mapped == expected, "expect {:?}, but get {:?}", expected, mapped);
 
 
