@@ -1,14 +1,15 @@
+use core::arch::asm;
+
 use riscv::register::*;
 
 use crate::arch::riscv64 as arch;
 use crate::cpu;
-use crate::memory::layout::{clint_mtimecmp, CLINT_MTIME};
 use crate::trap;
 
 // static mut KERNEL_STARTED: bool = false;
 static INTERVAL: u64 = 10_0000;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 unsafe extern "C" fn start() {
     // disable paging for now.
     satp::set(satp::Mode::Bare, 0, 0);
@@ -37,7 +38,7 @@ unsafe extern "C" fn start() {
     unreachable!();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     println!("enter kmain");
     // println!("initializing paging...");
@@ -48,14 +49,14 @@ unsafe extern "C" fn kmain() -> ! {
 
     println!("This is my operating system!");
 
-    llvm_asm!("ebreak"::::"volatile");
+    asm!("ebreak", options(nomem, nostack));
 
     // crate::echo::echo();
 
     scheduler();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 // mark the function as extern "C" to tell the compiler that it should use the C calling convention for this function
 unsafe extern "C" fn kmain_ap() -> ! {
     println!("enter kmain_ap");
@@ -72,8 +73,7 @@ unsafe extern "C" fn kmain_ap() -> ! {
 fn scheduler() -> ! {
     loop {
         unsafe {
-            llvm_asm!("ebreak"::::"volatile");
+            asm!("ebreak", options(nomem, nostack));
         }
     }
-    arch::wait_forever()
 }

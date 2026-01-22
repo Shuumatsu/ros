@@ -3,8 +3,11 @@ mod exceptions;
 mod interrupts;
 mod trapframe;
 
+use core::arch::global_asm;
+
+use riscv::interrupt::supervisor::{Exception, Interrupt};
+use riscv::interrupt::Trap;
 use riscv::register::*;
-use riscv::{interrupt, register::scause::Trap};
 
 // use context::*;
 pub use trapframe::*;
@@ -12,8 +15,8 @@ pub use trapframe::*;
 global_asm!(include_str!("trampoline.S"));
 
 #[allow(improper_ctypes)]
-extern "C" {
-    fn trap_entry();
+unsafe extern "C" {
+    safe fn trap_entry();
     // fn run_user(regs: &mut UserContext);
 }
 
@@ -48,7 +51,7 @@ extern "C" {
 // 当我们的程序遇上中断或异常时，cpu 会跳转到一个指定的地址进行中断处理。
 // 在 RISCV 中，这个地址由 stvec 控制寄存器保存。init 将其设置为 trap_handler 的地址
 pub unsafe fn init() {
-    interrupt::free(|_| {
+    unsafe {
         interrupts::init();
         exceptions::init();
 
@@ -58,29 +61,29 @@ pub unsafe fn init() {
         // 直接模式（Driect） MODE = 0 ，触发任何中断异常 时都把 PC 设置为 BASE
         // 向量模式（Vectored） MODE = 1 ，对第 i 种中断 ，跳转到 BASE + i * 4；对所有异常，仍跳转到 BASE
         // 我们采用第一种模式，先进入统一的处理函数，之后再根据中断 / 异常种类进行不同处理。
-        let mode = stvec::TrapMode::Direct;
-        kprintln!("[interrupts::init] set stec register: trap_entry {:#x}, mode {:?}", addr, mode);
-        stvec::write(addr, mode);
+        kprintln!("[interrupts::init] set stec register: trap_entry {:#x}, mode Direct", addr);
+        stvec::write(stvec::Stvec::new(addr, stvec::TrapMode::Direct));
 
         // 当中断发生时，cpu 跳转到中断处理函数。sscratch 存储了函数将要用到的 sp
         // 我们用 sscratch 是否为 0 来区分中断是来自内核还是来自用户
         // 如果来自内核，则继续使用操作系统的栈即可
         // 如果来自用户，则需要切换到为进程分配的内核栈；此时我们交换 sscratch 与 sp 以保存用户的 sp
         sscratch::write(0);
-    });
+    }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 unsafe extern "C" fn trap_handler(tf: &mut TrapFrame) {
     kprintln!("[trap_handler] enter trap_handler");
 
-    let cause = scause::read().cause();
+    let scause = scause::read();
     let epc = sepc::read();
-    kprintln!("[trap_handler] scause: {:?}, sepc: {:#x}", cause, epc);
+    kprintln!("[trap_handler] scause code: {}, sepc: {:#x}", scause.code(), epc);
 
+    let cause: Trap<Interrupt, Exception> = scause.cause().try_into().expect("unknown trap cause");
     match cause {
         Trap::Exception(e) => exceptions::handler(e, tf),
-        Trap::Interrupt(intr) => interrupts::handler(intr, tf),
+        Trap::Interrupt(intr) => unsafe { interrupts::handler(intr, tf) },
     }
 }
 

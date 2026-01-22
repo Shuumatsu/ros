@@ -1,13 +1,17 @@
-use riscv::register::{medeleg, scause::Exception};
+use core::arch::asm;
+
+use riscv::interrupt::supervisor::Exception;
 
 use crate::trap::TrapFrame;
 
 mod breakpoint;
 
 pub unsafe fn init() {
-    kprintln!("delegate all exceptions to supervisor mode");
-    asm!("li t0, 0xffff");
-    asm!("csrw medeleg, t0");
+    unsafe {
+        kprintln!("delegate all exceptions to supervisor mode");
+        asm!("li t0, 0xffff");
+        asm!("csrw medeleg, t0");
+    }
 }
 
 pub fn handler(e: Exception, tf: &mut TrapFrame) {

@@ -1,4 +1,7 @@
+use core::arch::naked_asm;
 use core::mem::size_of;
+use core::ptr::addr_of_mut;
+
 use crossbeam_utils::CachePadded;
 use riscv::register::{mie, mscratch, mstatus, mtvec};
 
@@ -19,7 +22,7 @@ static mut TIMER_SCRATCH: [CachePadded<Scratch>; NCPU] = [CachePadded::new((0, 0
 
 #[naked]
 unsafe extern "C" fn timervec() {
-    asm!(
+    naked_asm!(
         "
             csrrw a0, mscratch, a0
 
@@ -49,8 +52,7 @@ unsafe extern "C" fn timervec() {
 
             csrrw a0, mscratch, a0
 
-            mret",
-        options(noreturn)
+            mret"
     );
 }
 
@@ -58,7 +60,7 @@ unsafe extern "C" fn timervec() {
 pub unsafe fn init() {
     let hart = hart_id();
 
-    let scratch: *mut CachePadded<_> = (&mut TIMER_SCRATCH.as_mut_ptr()).add(hart);
+    let scratch: *mut CachePadded<Scratch> = addr_of_mut!(TIMER_SCRATCH[hart]);
     (*scratch).0 = clint_mtimecmp(hart) as u64;
     (*scratch).1 = INTERVAL;
     mscratch::write(scratch as usize);
@@ -69,7 +71,7 @@ pub unsafe fn init() {
     let mtime = CLINT_MTIME as *const u64;
     mtimecmp.write_volatile(mtime.read_volatile() + INTERVAL);
 
-    mtvec::write(timervec as usize, mtvec::TrapMode::Direct);
+    mtvec::write(mtvec::Mtvec::new(timervec as usize, mtvec::TrapMode::Direct));
 
     mstatus::set_mie();
     mie::set_mtimer();

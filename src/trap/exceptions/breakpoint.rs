@@ -1,5 +1,5 @@
-use riscv::register::scause::Exception;
+use riscv::interrupt::supervisor::Exception;
 
 use crate::trap::TrapFrame;
 
-pub fn handler(e: Exception, tf: &mut TrapFrame) { tf.increase_sepc(); }
+pub fn handler(_e: Exception, tf: &mut TrapFrame) { tf.increase_sepc(); }

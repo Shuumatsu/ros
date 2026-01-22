@@ -1,14 +1,13 @@
 pub mod paging;
 pub mod sbi;
 
+use core::arch::asm;
+
 #[inline(always)]
 pub fn hart_id() -> usize {
-    #[allow(unused_assignments)]
-    let mut hart_id: usize = 0;
-
+    let hart_id: usize;
     unsafe {
-        llvm_asm!("mv $0, tp" : "=r"(hart_id) ::: "volatile");
-        // asm!("mv {0}, tp", out(reg) hart_id);
+        asm!("mv {0}, tp", out(reg) hart_id, options(nomem, nostack));
     }
     hart_id
 }

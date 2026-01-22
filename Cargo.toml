@@ -1,6 +1,6 @@
 [package]
 authors = ["curry <VanishingDante@gmail.com>"]
-edition = "2018"
+edition = "2024"
 name = "kernel"
 version = "0.1.0"
 
@@ -10,14 +10,15 @@ version = "0.1.0"
 # path = "src/lib.rs"
 
 [dependencies]
-bitflags = "1.2.1"
-bitvec = {default-features = false, version = "0.19.4"}
-crossbeam-utils = {version = "0.8.3", default-features = false}
-lazy_static = {version = "1.4.0", features = ["spin_no_std"]}
-riscv = {git = "https://github.com/rust-embedded/riscv", features = ["inline-asm"]}
-spin = "0.7.0"
+bitflags = "2.10.0"
+bitvec = {default-features = false, version = "1.0.1"}
+crossbeam-utils = {version = "0.8.21", default-features = false}
+lazy_static = {version = "1.5.0", features = ["spin_no_std"]}
+riscv = "0.16.0"
+riscv-rt = "0.17.1"
+spin = "0.10.0"
 static_assertions = "1.1.0"
-volatile = "0.4.2"
+volatile = "0.6.1"
 
 [profile.dev]
 # abort on panic instead, disables the generation of unwinding symbol information

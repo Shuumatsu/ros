@@ -1,14 +1,12 @@
 #![no_std]
 #![no_main]
-#![feature(const_panic, panic_info_message)]
 #![feature(lang_items)]
-#![feature(global_asm, llvm_asm, asm)]
 #![feature(alloc_error_handler)]
 #![feature(naked_functions)]
-// https://doc.rust-lang.org/alloc/prelude/index.html
-#![feature(alloc_prelude)]
+
 extern crate alloc;
-use alloc::prelude::v1::*;
+
+use core::arch::global_asm;
 #[macro_use]
 extern crate static_assertions;
 
@@ -34,7 +32,7 @@ global_asm!(include_str!("boot.S"));
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     if let Some(p) = info.location() {
-        kprintln!("Aborting: file {}:{}: \n\t{}", p.file(), p.line(), info.message().unwrap());
+        kprintln!("Aborting: file {}:{}: \n\t{}", p.file(), p.line(), info.message());
     } else {
         kprintln!("Aborting: no information available.");
     }
@@ -43,13 +41,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 // https://internals.rust-lang.org/t/why-rust-has-name-mangling/12503
 // turns off Rust's name mangling so the symbol is exactly eh_personality
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn abort() -> ! {
     kprintln!("[cpu: {}] enter extern \"C\" fn abort()", arch::riscv64::hart_id());
     loop {
-        unsafe {
-            riscv::asm::wfi();
-        }
+        riscv::asm::wfi();
     }
 }
 
