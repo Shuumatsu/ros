@@ -1,8 +1,49 @@
 [build]
 # https://doc.rust-lang.org/nightly/rustc/platform-support.html
-# Bare RISC-V (riscv64gc = RV64IMAFDC ISA)
-rustflags = ['-Clink-arg=-Tsrc/kernel.ld', '--cfg=riscv64', '-Ctarget-feature=-c']
+rustflags = [
+    '-Clink-arg=-Tsrc/kernel.ld',  # Use custom linker script
+    '--cfg=riscv64',                # Define cfg flag for conditional compilation
+    '-Ctarget-feature=-c',          # Disable compressed instructions (RVC)
+]
+# Target: RISC-V 64-bit, I+M+A+C extensions, bare metal, no OS
 target = "riscv64imac-unknown-none-elf"
 
 [target.riscv64imac-unknown-none-elf]
-runner = "qemu-system-riscv64 -s -nographic -no-reboot -machine virt -cpu rv64 -d guest_errors,unimp -smp 1 -m 128M -drive if=none,format=raw,file=hdd.dsk,id=foo -device virtio-blk-device,scsi=off,drive=foo -serial mon:stdio -bios none -device virtio-rng-device -device virtio-gpu-device -device virtio-net-device -device virtio-tablet-device -device virtio-keyboard-device -kernel "
+runner = """qemu-system-riscv64 \
+    -s \
+    -nographic \
+    -no-reboot \
+    -machine virt \
+    -cpu rv64 \
+    -d guest_errors,unimp \
+    -smp 1 \
+    -m 128M \
+    -drive if=none,format=raw,file=hdd.dsk,id=foo \
+    -device virtio-blk-device,drive=foo \
+    -serial mon:stdio \
+    -bios none \
+    -device virtio-rng-device \
+    -device virtio-gpu-device \
+    -device virtio-net-device \
+    -device virtio-tablet-device \
+    -device virtio-keyboard-device \
+    -kernel """
+# QEMU options:
+#   -s                      Enable GDB server on port 1234
+#   -nographic              Disable graphical output, use terminal only
+#   -no-reboot              Exit instead of rebooting on crash/shutdown
+#   -machine virt           QEMU generic virtual RISC-V machine
+#   -cpu rv64               Generic RV64 CPU model
+#   -d guest_errors,unimp   Debug: log guest errors and unimplemented features
+#   -smp 1                  Single CPU core
+#   -m 128M                 128 MB RAM
+#   -drive ...              Define raw disk image named "foo"
+#   -device virtio-blk-*    Attach disk as virtio block device
+#   -serial mon:stdio       Serial to terminal + QEMU monitor (Ctrl+A, C)
+#   -bios none              No firmware, kernel loads at 0x80000000
+#   -device virtio-rng-*    Hardware RNG
+#   -device virtio-gpu-*    Virtual GPU (framebuffer)
+#   -device virtio-net-*    Virtual network card
+#   -device virtio-tablet-* Absolute pointing device
+#   -device virtio-keyboard-* Virtual keyboard
+#   -kernel                 Path to kernel binary (appended by cargo)
