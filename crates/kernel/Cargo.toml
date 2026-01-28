@@ -1,0 +1,23 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+authors = ["curry <VanishingDante@gmail.com>"]
+edition = "2024"
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+
+[dependencies]
+bitflags = "2.10.0"
+bitvec = { default-features = false, version = "1.0.1" }
+buddy_system_allocator = "0.12.0"
+crossbeam-utils = { version = "0.8.21", default-features = false }
+paging = { path = "../paging", default-features = false }
+riscv = "0.16.0"
+riscv-rt = "0.17.1"
+spin = "0.10.0"
+static_assertions = "1.1.0"
+uart_16550 = "0.4"
+volatile = "0.6.1"
+

@@ -1,32 +1,11 @@
-[package]
-authors = ["curry <VanishingDante@gmail.com>"]
-edition = "2024"
-name = "kernel"
-version = "0.1.0"
-
-# [lib]
-# crate-type = ["staticlib"]
-# name = "kernel"
-# path = "src/lib.rs"
-
-[dependencies]
-bitflags = "2.10.0"
-bitvec = {default-features = false, version = "1.0.1"}
-buddy_system_allocator = "0.12.0"
-crossbeam-utils = {version = "0.8.21", default-features = false}
-riscv = "0.16.0"
-riscv-rt = "0.17.1"
-spin = "0.10.0"
-static_assertions = "1.1.0"
-uart_16550 = "0.4"
-volatile = "0.6.1"
+[workspace]
+members = ["crates/paging", "crates/kernel"]
+resolver = "3"
 
 [profile.dev]
-# abort on panic instead, disables the generation of unwinding symbol information
 debug = true
 panic = "abort"
 
 [profile.release]
-# abort on panic instead, disables the generation of unwinding symbol information
 debug = true
 panic = "abort"

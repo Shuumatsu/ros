@@ -1,47 +1,18 @@
-pub mod physical_addr;
-pub mod virtual_addr;
+//! Page table entry type and flag constants for Sv39 paging.
 
-use crate::utils::{extract_value, set_range, KILOBYTE};
-
-use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+use crate::utils::{extract_value, set_range};
 use core::fmt;
 use core::mem::size_of;
-use core::ptr;
 
-use crate::{panic, print, println};
-
-pub use self::physical_addr::*;
-pub use self::virtual_addr::*;
-
-pub const PAGE_SIZE: usize = 4 * KILOBYTE;
-pub const ENTRY_SIZE: usize = 8;
-pub const ENTRIES_PER_PAGE: usize = PAGE_SIZE / ENTRY_SIZE;
+use super::ENTRY_SIZE;
+use super::addr::PhysicalAddr;
 
 // +----------+---------+---------+---------+-------+---+---+---+---+---+---+---+---+
 // | Not Used | PPN[2]  | PPN[1]  | PPN[0]  | RSW   | D | A | G | U | X | W | R | V |
 // +----------+---------+---------+---------+-------+---+---+---+---+---+---+---+---+
 // | 63 - 54  | 53 - 28 | 27 - 19 | 18 - 10 | 9 - 8 | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
 // +----------+---------+---------+---------+-------+---+---+---+---+---+---+---+---+
-// bitflags! {
-//     pub struct EntryFlags: u64 {
-//         const Valid     = 1 << 0;
-//         const Read      = 1 << 1;
-//         const Write     = 1 << 2;
-//         const Execute   = 1 << 3;
-//         const User      = 1 << 4;
-//         const Global    = 1 << 5;
-//         const Access    = 1 << 6;
-//         const Dirty     = 1 << 7;
 
-//         const ReadWrite = Self::Read.bits | Self::Write.bits;
-//         const ReadExecute = Self::Read.bits | Self::Execute.bits;
-//         const ReadWriteExecute = Self::Read.bits | Self::Write.bits | Self::Execute.bits;
-
-//         const UserReadWrite = Self::ReadWrite.bits | Self::User.bits;
-//         const UserReadExecute = Self::ReadExecute.bits | Self::User.bits;
-//         const UserReadWriteExecute = Self::UserReadWriteExecute.bits | Self::User.bits;
-//   }
-// }
 pub const VALID: usize = 1 << 0;
 pub const READ: usize = 1 << 1;
 pub const WRITE: usize = 1 << 2;
@@ -162,98 +133,4 @@ impl Entry {
     }
     pub fn set_user_read_write_execute(&mut self) { self.0 |= USER_READ_WRITE_EXECUTE }
     pub fn clear_user_read_write_execute(&mut self) { self.0 &= !USER_READ_WRITE_EXECUTE }
-}
-
-#[derive(Debug)]
-#[repr(transparent)]
-pub struct Table {
-    entries: [Entry; ENTRIES_PER_PAGE],
-}
-const_assert_eq!(size_of::<Table>(), PAGE_SIZE);
-
-unsafe impl Send for Table {}
-
-impl Table {
-    pub const fn new() -> Self { Table { entries: [Entry::new(0); ENTRIES_PER_PAGE] } }
-}
-
-unsafe fn alloc_entry_page(entry: &mut Entry) {
-    // println!("[alloc_entry_page] entry {:?} not valid, allocating new page...", entry);
-    let ptr = alloc_zeroed(Layout::new::<Table>());
-    // println!("[alloc_entry_page] allocated new page for entry at {:?}", ptr);
-
-    entry.set_ppn(PhysicalAddr::new(ptr as usize));
-    entry.set_valid();
-}
-
-///       The bits should contain only the following:
-///          Read, Write, Execute, User, and/or Global
-///       The bits MUST include one or more of the following:
-///          Read, Write, Execute
-pub unsafe fn map(root: *mut Table, vaddr: VirtualAddr, paddr: PhysicalAddr, flags: usize) {
-    // println!(
-    //     "[sv39::map] \n\troot: {:?}, \n\tvaddr: {:?}, \n\tpaddr: {:?}, flags: {:b}",
-    //     root,
-    //     vaddr,
-    //     paddr,
-    //     flags
-    // );
-
-    let mut table = root;
-    for lvl in (1..=2).rev() {
-        // println!("[sv39::map] lvl: {}, root: {:?}, tbl: {:?}", lvl, root, table);
-
-        let entry = &mut (*table).entries[vaddr.extract_vpn(lvl)];
-        if !entry.is_valid() {
-            // println!(
-            //     "[sv39::map] entry {:?} not valid for {:?} in {:?}, level {}",
-            //     entry,
-            //     vaddr,
-            //     table,
-            //     lvl
-            // );
-            alloc_entry_page(entry);
-        }
-
-        // println!("[sv39::map] entry {:?}", entry);
-        let ppn = entry.extract_ppn_all();
-        table = PhysicalAddr::from(ppn, 0).as_mut_ptr::<Table>();
-    }
-
-    let entry = &mut (*table).entries[vaddr.extract_vpn(0)];
-    entry.set_ppn(paddr);
-    entry.set_flags(flags);
-    entry.set_valid();
-
-    let mapped = virt_to_phys(root, vaddr);
-    assert!(mapped == Some(paddr), "expect {:?} mapped to {:?} but get {:?}", vaddr, paddr, mapped);
-}
-
-pub unsafe fn unmap(root: *mut Table) {
-    for entry in (*root).entries.iter_mut() {
-        let ppn = entry.extract_ppn_all();
-        if entry.is_valid() {
-            if entry.is_branch() {
-                let table = PhysicalAddr::from(ppn, 0).as_mut_ptr::<Table>();
-                unmap(table);
-            }
-            dealloc(PhysicalAddr::from(ppn, 0).as_mut_ptr::<u8>(), Layout::new::<Table>());
-        }
-    }
-}
-
-pub fn virt_to_phys(root: *const Table, vaddr: VirtualAddr) -> Option<PhysicalAddr> {
-    let mut table = root;
-    for lvl in (1..=2).rev() {
-        let entry = unsafe { &(*table).entries[vaddr.extract_vpn(lvl)] };
-        if !entry.is_valid() {
-            return None;
-        }
-        let ppn = entry.extract_ppn_all();
-        table = PhysicalAddr::from(ppn, 0).as_mut_ptr::<Table>();
-    }
-
-    let entry = unsafe { &(*table).entries[vaddr.extract_vpn(0)] };
-    let ppn = entry.extract_ppn_all();
-    Some(PhysicalAddr::from(ppn, vaddr.extract_offset()))
 }
