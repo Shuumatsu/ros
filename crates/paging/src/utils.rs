@@ -36,26 +36,20 @@ pub fn set_range(bits: usize, val: usize, start_pos: usize, end_pos: usize) -> u
 
 pub const KILOBYTE: usize = 1024;
 
-/// Check if n is a power of two
-#[inline]
-pub const fn is_power_of_two(n: usize) -> bool {
-    n != 0 && (n & (n - 1)) == 0
-}
-
 #[inline]
 pub const fn align_down(addr: usize, align: usize) -> usize {
-    debug_assert!(is_power_of_two(align), "alignment must be power of 2");
+    debug_assert!(align.is_power_of_two(), "alignment must be power of 2");
     addr & !(align - 1)
 }
 
 #[inline]
 pub const fn align_up(addr: usize, align: usize) -> usize {
-    debug_assert!(is_power_of_two(align), "alignment must be power of 2");
+    debug_assert!(align.is_power_of_two(), "alignment must be power of 2");
     (addr + align - 1) & !(align - 1)
 }
 
 #[inline]
 pub const fn align_offset(addr: usize, align: usize) -> usize {
-    debug_assert!(is_power_of_two(align), "alignment must be power of 2");
+    debug_assert!(align.is_power_of_two(), "alignment must be power of 2");
     addr & (align - 1)
 }

@@ -1,6 +1,6 @@
 //! Virtual and physical address types for Sv39 paging.
 
-use crate::utils::{align_down, align_offset, align_up, extract_value, is_power_of_two, set_range};
+use crate::utils::{align_down, align_offset, align_up, extract_value, set_range};
 use core::fmt;
 
 /// Trait for memory address types providing common operations.
@@ -19,7 +19,7 @@ pub trait MemoryAddr: Copy + Clone + Ord + Eq {
         align_offset(self.as_usize(), align)
     }
     fn is_aligned(self, align: usize) -> bool {
-        debug_assert!(is_power_of_two(align), "alignment must be power of 2");
+        debug_assert!(align.is_power_of_two(), "alignment must be power of 2");
         self.as_usize() & (align - 1) == 0
     }
 

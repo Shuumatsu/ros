@@ -10,7 +10,7 @@ use crate::memory::layout::{
     kernel_stack_start, rodata_end, rodata_start, text_end, text_start,
 };
 use crate::platform::{CLINT_BASE, PLIC_BASE, PLIC_END, UART0_BASE};
-use crate::utils::{align_down, align_up};
+use ::paging::utils::{align_down, align_up};
 use crate::{arch::riscv64::paging::sv39 as paging, memory::layout::memory_end};
 use crate::{print, println};
 
