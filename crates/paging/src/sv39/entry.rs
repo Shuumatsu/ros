@@ -30,6 +30,16 @@ pub const USER_READ_WRITE: usize = READ_WRITE | USER;
 pub const USER_READ_EXECUTE: usize = READ_EXECUTE | USER;
 pub const USER_READ_WRITE_EXECUTE: usize = READ_WRITE_EXECUTE | USER;
 
+macro_rules! define_flag_methods {
+    ($(($is:ident, $set:ident, $clear:ident, $flag:ident)),* $(,)?) => {
+        $(
+            pub const fn $is(&self) -> bool { (self.0 & $flag) != 0 }
+            pub fn $set(&mut self) { self.0 |= $flag; }
+            pub fn $clear(&mut self) { self.0 &= !$flag; }
+        )*
+    };
+}
+
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct Entry(usize);
@@ -76,61 +86,163 @@ impl Entry {
     pub const fn is_leaf(&self) -> bool { (self.0 & (READ | WRITE | EXECUTE)) != 0 }
     pub const fn is_branch(&self) -> bool { !self.is_leaf() }
 
-    pub const fn is_valid(&self) -> bool { (self.0 & VALID) != 0 }
-    pub fn set_valid(&mut self) { self.0 |= VALID }
-    pub fn clear_valid(&mut self) { self.0 &= !VALID }
+    define_flag_methods!(
+        (is_valid, set_valid, clear_valid, VALID),
+        (is_read, set_read, clear_read, READ),
+        (is_write, set_write, clear_write, WRITE),
+        (is_execute, set_execute, clear_execute, EXECUTE),
+        (is_user, set_user, clear_user, USER),
+        (is_global, set_global, clear_global, GLOBAL),
+        (is_access, set_access, clear_access, ACCESS),
+        (is_dirty, set_dirty, clear_dirty, DIRTY),
+        (is_read_write, set_read_write, clear_read_write, READ_WRITE),
+        (is_read_execute, set_read_execute, clear_read_execute, READ_EXECUTE),
+        (
+            is_read_write_execute,
+            set_read_write_execute,
+            clear_read_write_execute,
+            READ_WRITE_EXECUTE
+        ),
+        (is_user_read_write, set_user_read_write, clear_user_read_write, USER_READ_WRITE),
+        (is_user_read_execute, set_user_read_execute, clear_user_read_execute, USER_READ_EXECUTE),
+        (
+            is_user_read_write_execute,
+            set_user_read_write_execute,
+            clear_user_read_write_execute,
+            USER_READ_WRITE_EXECUTE
+        ),
+    );
+}
 
-    pub const fn is_read(&self) -> bool { (self.0 & READ) != 0 }
-    pub fn set_read(&mut self) { self.0 |= READ }
-    pub fn clear_read(&mut self) { self.0 &= !READ }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    pub const fn is_write(&self) -> bool { (self.0 & WRITE) != 0 }
-    pub fn set_write(&mut self) { self.0 |= WRITE }
-    pub fn clear_write(&mut self) { self.0 &= !WRITE }
+    #[test]
+    fn test_entry_new_and_bits() {
+        let entry = Entry::new(0);
+        assert!(!entry.is_valid());
+        assert!(!entry.is_read());
+        assert!(!entry.is_write());
+        assert!(!entry.is_execute());
 
-    pub const fn is_execute(&self) -> bool { (self.0 & EXECUTE) != 0 }
-    pub fn set_execute(&mut self) { self.0 |= EXECUTE }
-    pub fn clear_execute(&mut self) { self.0 &= !EXECUTE }
-
-    pub const fn is_user(&self) -> bool { (self.0 & USER) != 0 }
-    pub fn set_user(&mut self) { self.0 |= USER }
-    pub fn clear_user(&mut self) { self.0 &= !USER }
-
-    pub const fn is_global(&self) -> bool { (self.0 & GLOBAL) != 0 }
-    pub fn set_global(&mut self) { self.0 |= GLOBAL }
-    pub fn clear_global(&mut self) { self.0 &= !GLOBAL }
-
-    pub const fn is_access(&self) -> bool { (self.0 & ACCESS) != 0 }
-    pub fn set_access(&mut self) { self.0 |= ACCESS }
-    pub fn clear_access(&mut self) { self.0 &= !ACCESS }
-
-    pub const fn is_dirty(&self) -> bool { (self.0 & DIRTY) != 0 }
-    pub fn set_dirty(&mut self) { self.0 |= DIRTY }
-    pub fn clear_dirty(&mut self) { self.0 &= !DIRTY }
-
-    pub const fn is_read_write(&self) -> bool { (self.0 & READ_WRITE) != 0 }
-    pub fn set_read_write(&mut self) { self.0 |= READ_WRITE }
-    pub fn clear_read_write(&mut self) { self.0 &= !READ_WRITE }
-
-    pub const fn is_read_execute(&self) -> bool { (self.0 & READ_EXECUTE) != 0 }
-    pub fn set_read_execute(&mut self) { self.0 |= READ_EXECUTE }
-    pub fn clear_read_execute(&mut self) { self.0 &= !READ_EXECUTE }
-
-    pub const fn is_read_write_execute(&self) -> bool { (self.0 & READ_WRITE_EXECUTE) != 0 }
-    pub fn set_read_write_execute(&mut self) { self.0 |= READ_WRITE_EXECUTE }
-    pub fn clear_read_write_execute(&mut self) { self.0 &= !READ_WRITE_EXECUTE }
-
-    pub const fn is_user_read_write(&self) -> bool { (self.0 & USER_READ_WRITE) != 0 }
-    pub fn set_user_read_write(&mut self) { self.0 |= USER_READ_WRITE }
-    pub fn clear_user_read_write(&mut self) { self.0 &= !USER_READ_WRITE }
-
-    pub const fn is_user_read_execute(&self) -> bool { (self.0 & USER_READ_EXECUTE) != 0 }
-    pub fn set_user_read_execute(&mut self) { self.0 |= USER_READ_EXECUTE }
-    pub fn clear_user_read_execute(&mut self) { self.0 &= !USER_READ_EXECUTE }
-
-    pub const fn is_user_read_write_execute(&self) -> bool {
-        (self.0 & USER_READ_WRITE_EXECUTE) != 0
+        let entry = Entry::new(0b11111111); // all flags set
+        assert!(entry.is_valid());
+        assert!(entry.is_read());
+        assert!(entry.is_write());
+        assert!(entry.is_execute());
+        assert!(entry.is_user());
+        assert!(entry.is_global());
+        assert!(entry.is_access());
+        assert!(entry.is_dirty());
     }
-    pub fn set_user_read_write_execute(&mut self) { self.0 |= USER_READ_WRITE_EXECUTE }
-    pub fn clear_user_read_write_execute(&mut self) { self.0 &= !USER_READ_WRITE_EXECUTE }
+
+    #[test]
+    fn test_entry_flag_constants() {
+        // Verify flag bit positions match RISC-V spec
+        assert_eq!(VALID, 1 << 0);
+        assert_eq!(READ, 1 << 1);
+        assert_eq!(WRITE, 1 << 2);
+        assert_eq!(EXECUTE, 1 << 3);
+        assert_eq!(USER, 1 << 4);
+        assert_eq!(GLOBAL, 1 << 5);
+        assert_eq!(ACCESS, 1 << 6);
+        assert_eq!(DIRTY, 1 << 7);
+    }
+
+    #[test]
+    fn test_entry_set_clear_flags() {
+        let mut entry = Entry::new(0);
+
+        // Test one flag to verify macro correctness
+        entry.set_valid();
+        assert!(entry.is_valid());
+        entry.clear_valid();
+        assert!(!entry.is_valid());
+    }
+
+    #[test]
+    fn test_entry_leaf_vs_branch() {
+        // Branch: V=1, R=W=X=0 (points to next level table)
+        let branch = Entry::new(VALID);
+        assert!(branch.is_branch());
+        assert!(!branch.is_leaf());
+
+        // Leaf: has at least one of R, W, X set
+        let leaf_r = Entry::new(VALID | READ);
+        assert!(leaf_r.is_leaf());
+        assert!(!leaf_r.is_branch());
+
+        let leaf_w = Entry::new(VALID | WRITE);
+        assert!(leaf_w.is_leaf());
+
+        let leaf_x = Entry::new(VALID | EXECUTE);
+        assert!(leaf_x.is_leaf());
+
+        let leaf_rwx = Entry::new(VALID | READ | WRITE | EXECUTE);
+        assert!(leaf_rwx.is_leaf());
+    }
+
+    #[test]
+    fn test_entry_ppn_extraction() {
+        // PTE layout: bits [53:10] = PPN
+        // PPN[0]: bits [18:10] (9 bits)
+        // PPN[1]: bits [27:19] (9 bits)
+        // PPN[2]: bits [53:28] (26 bits)
+
+        // Set PPN[0] = 0x1FF (max 9-bit value)
+        let entry = Entry::new(0x1FF << 10);
+        assert_eq!(entry.extract_ppn(0), 0x1FF);
+        assert_eq!(entry.extract_ppn(1), 0);
+        assert_eq!(entry.extract_ppn(2), 0);
+
+        // Set PPN[1] = 0x1FF
+        let entry = Entry::new(0x1FF << 19);
+        assert_eq!(entry.extract_ppn(0), 0);
+        assert_eq!(entry.extract_ppn(1), 0x1FF);
+        assert_eq!(entry.extract_ppn(2), 0);
+
+        // Set PPN[2] = 0x3FFFFFF (max 26-bit value)
+        let entry = Entry::new(0x3FFFFFF_usize << 28);
+        assert_eq!(entry.extract_ppn(0), 0);
+        assert_eq!(entry.extract_ppn(1), 0);
+        assert_eq!(entry.extract_ppn(2), 0x3FFFFFF);
+    }
+
+    #[test]
+    fn test_entry_ppn_all() {
+        // Full 44-bit PPN
+        let ppn_all: usize = 0xFFF_FFFFFFFF; // 44 bits all set
+        let entry = Entry::new(ppn_all << 10);
+        assert_eq!(entry.extract_ppn_all(), ppn_all);
+    }
+
+    #[test]
+    fn test_entry_set_ppn() {
+        let mut entry = Entry::new(VALID | READ);
+        let paddr = PhysicalAddr::new(0x8020_0000); // typical kernel address
+
+        entry.set_ppn(paddr);
+
+        // Verify PPN was set correctly (paddr >> 12 = PPN)
+        assert_eq!(entry.extract_ppn_all(), 0x8020_0000 >> 12);
+        // Verify flags were preserved
+        assert!(entry.is_valid());
+        assert!(entry.is_read());
+    }
+
+    #[test]
+    fn test_entry_set_flags_preserves_ppn() {
+        let mut entry = Entry::new(0);
+        let paddr = PhysicalAddr::new(0x8020_0000);
+
+        entry.set_ppn(paddr);
+        entry.set_flags(VALID | READ | WRITE);
+
+        // PPN should still be intact
+        assert_eq!(entry.extract_ppn_all(), 0x8020_0000 >> 12);
+        assert!(entry.is_valid());
+        assert!(entry.is_read());
+        assert!(entry.is_write());
+    }
 }

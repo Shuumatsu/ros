@@ -24,7 +24,7 @@ unsafe fn enable(intr_id: usize) {
     let bit = 1 << intr_id;
     // 似乎 qemu 是运行在 context 0？
     let ptr = PLIC_ENABLE_BASE as *mut u32;
-    ptr.write_volatile(ptr.read_volatile() | bit);
+    unsafe { ptr.write_volatile(ptr.read_volatile() | bit) };
 }
 
 unsafe fn set_priority(intr_id: usize, mut prio: u32) {
@@ -32,24 +32,24 @@ unsafe fn set_priority(intr_id: usize, mut prio: u32) {
 
     let tsh = {
         let ptr = PLIC_THRESHOLD_BASE as *mut u32;
-        ptr.read_volatile()
+        unsafe { ptr.read_volatile() }
     };
     prio = max(prio, tsh);
 
     let ptr = PLIC_PRIORITY_BASE as *mut u32;
-    ptr.add(intr_id).write_volatile(prio);
+    unsafe { ptr.add(intr_id).write_volatile(prio) };
 }
 
 unsafe fn set_threshold(threshold: u32) {
     let ptr = PLIC_THRESHOLD_BASE as *mut u32;
-    ptr.write_volatile(threshold)
+    unsafe { ptr.write_volatile(threshold) }
 }
 
 /// See if a given interrupt id is pending.
 unsafe fn is_pending(intr_id: u32) -> bool {
     let ptr = PLIC_PENDING_BASE as *const u32;
 
-    let bits = ptr.read_volatile();
+    let bits = unsafe { ptr.read_volatile() };
     (1 << intr_id) & bits != 0
 }
 
@@ -58,7 +58,7 @@ unsafe fn is_pending(intr_id: u32) -> bool {
 unsafe fn claim() -> Option<usize> {
     let ptr = PLIC_CLAIM_BASE as *const u32;
 
-    match ptr.read_volatile() {
+    match unsafe { ptr.read_volatile() } {
         0 => None,
         intr_id => Some(intr_id as usize),
     }
@@ -68,25 +68,25 @@ unsafe fn claim() -> Option<usize> {
 // If the completion ID does not match an interrupt source that is currently enabled for the target, the completion is silently ignored.
 unsafe fn complete(intr_id: usize) {
     let ptr = PLIC_CLAIM_BASE as *mut u32;
-    ptr.write_volatile(intr_id as u32)
+    unsafe { ptr.write_volatile(intr_id as u32) }
 }
 
 pub unsafe fn init() {
     println!("enable plic interrupts");
-    sie::set_sext();
+    unsafe { sie::set_sext() };
 
-    enable(UART0_IRQ);
+    unsafe { enable(UART0_IRQ) };
     // permits all interrupts with non-zero priority
-    set_threshold(0);
-    set_priority(UART0_IRQ, 1);
+    unsafe { set_threshold(0) };
+    unsafe { set_priority(UART0_IRQ, 1) };
 }
 
 pub unsafe fn handler(tf: &TrapFrame) {
-    if let Some(intr_id) = claim() {
+    if let Some(intr_id) = unsafe { claim() } {
         match intr_id {
             UART0_IRQ => {
                 panic!("qqq");
-                complete(UART0_IRQ);
+                unsafe { complete(UART0_IRQ) };
             }
             _ => {
                 unimplemented!()

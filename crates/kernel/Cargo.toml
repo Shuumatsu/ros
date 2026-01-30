@@ -1,8 +1,11 @@
+cargo-features = ["per-package-target"]
+
 [package]
 name = "kernel"
 version = "0.1.0"
 authors = ["curry <VanishingDante@gmail.com>"]
 edition = "2024"
+forced-target = "riscv64imac-unknown-none-elf"
 
 [[bin]]
 name = "kernel"

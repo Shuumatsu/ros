@@ -13,10 +13,10 @@ const_assert_eq!(size_of::<Option<Node>>(), 32);
 impl Node {
     unsafe fn isolate(&mut self) {
         if let Some(prev) = self.prev {
-            (*prev).next = self.next;
+            unsafe { (*prev).next = self.next };
         }
         if let Some(next) = self.next {
-            (*next).prev = self.prev;
+            unsafe { (*next).prev = self.prev };
         }
     }
 }
@@ -43,8 +43,10 @@ impl MemList {
 
     pub unsafe fn push(&mut self, ptr: *mut u8) {
         let node = ptr as *mut Node;
-        (*node).prev = None;
-        (*node).next = self.0;
+        unsafe {
+            (*node).prev = None;
+            (*node).next = self.0;
+        }
 
         self.0 = Some(node);
     }
@@ -54,7 +56,7 @@ impl MemList {
             self.0 = node.next;
         }
 
-        node.isolate();
+        unsafe { node.isolate() };
     }
 
     pub fn iter_mut(&mut self) -> IterMut { IterMut { curr: self.0 } }

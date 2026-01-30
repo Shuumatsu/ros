@@ -29,7 +29,7 @@ pub unsafe fn init() {
 pub unsafe fn handler(intr: Interrupt, tf: &mut TrapFrame) {
     match intr {
         Interrupt::SupervisorTimer => clint::timer::handler(tf),
-        Interrupt::SupervisorExternal => plic::handler(tf),
+        Interrupt::SupervisorExternal => unsafe { plic::handler(tf) },
         _ => unimplemented!(),
     }
 }

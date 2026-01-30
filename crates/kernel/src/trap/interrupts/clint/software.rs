@@ -6,5 +6,5 @@ use crate::{print, println};
 // each CPU has a separate source of software interrupts.
 pub unsafe fn init() {
     println!("enable supervisor software interrupts");
-    sie::set_ssoft();
+    unsafe { sie::set_ssoft() };
 }

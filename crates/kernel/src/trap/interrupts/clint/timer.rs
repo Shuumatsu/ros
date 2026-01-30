@@ -5,8 +5,8 @@ use core::ptr::addr_of_mut;
 use crossbeam_utils::CachePadded;
 use riscv::register::{mie, mscratch, mstatus, mtvec};
 
-use crate::arch::{riscv64::hart_id, NCPU};
-use crate::platform::{clint_mtimecmp, CLINT_MTIME};
+use crate::arch::{NCPU, riscv64::hart_id};
+use crate::platform::{CLINT_MTIME, clint_mtimecmp};
 use crate::trap::TrapFrame;
 
 pub const INTERVAL: u64 = 10_0000;
@@ -20,7 +20,7 @@ type Scratch = (u64, u64, u64, u64, u64);
 const_assert_eq!(size_of::<Scratch>(), 5 * size_of::<u64>());
 static mut TIMER_SCRATCH: [CachePadded<Scratch>; NCPU] = [CachePadded::new((0, 0, 0, 0, 0)); NCPU];
 
-#[naked]
+#[unsafe(naked)]
 unsafe extern "C" fn timervec() {
     naked_asm!(
         "
@@ -60,21 +60,23 @@ unsafe extern "C" fn timervec() {
 pub unsafe fn init() {
     let hart = hart_id();
 
-    let scratch: *mut CachePadded<Scratch> = addr_of_mut!(TIMER_SCRATCH[hart]);
-    (*scratch).0 = clint_mtimecmp(hart) as u64;
-    (*scratch).1 = INTERVAL;
-    mscratch::write(scratch as usize);
+    let scratch: *mut CachePadded<Scratch> = unsafe { addr_of_mut!(TIMER_SCRATCH[hart]) };
+    unsafe {
+        (&mut *scratch).0 = clint_mtimecmp(hart) as u64;
+        (&mut *scratch).1 = INTERVAL;
+        mscratch::write(scratch as usize);
+    }
 
     // RISC-V uses 2 memory-mapped registers mtime and mtimecmp to control timer interrupts.
     // ask the CLINT for a timer interrupt.
     let mtimecmp = clint_mtimecmp(hart) as *mut u64;
     let mtime = CLINT_MTIME as *const u64;
-    mtimecmp.write_volatile(mtime.read_volatile() + INTERVAL);
+    unsafe { mtimecmp.write_volatile(mtime.read_volatile() + INTERVAL) };
 
-    mtvec::write(mtvec::Mtvec::new(timervec as usize, mtvec::TrapMode::Direct));
+    unsafe { mtvec::write(mtvec::Mtvec::new(timervec as *const () as usize, mtvec::TrapMode::Direct)) };
 
-    mstatus::set_mie();
-    mie::set_mtimer();
+    unsafe { mstatus::set_mie() };
+    unsafe { mie::set_mtimer() };
 }
 
 pub fn handler(tf: &mut TrapFrame) { unimplemented!() }

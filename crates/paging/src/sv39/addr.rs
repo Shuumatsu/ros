@@ -199,3 +199,158 @@ impl PhysicalAddr {
 
     pub const fn extract_offset(&self) -> usize { extract_value(self.0, (1 << 12) - 1, 0) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sv39::PAGE_SIZE;
+
+    mod virtual_addr_tests {
+        use super::*;
+
+        #[test]
+        fn test_vaddr_new() {
+            let vaddr = VirtualAddr::new(0x8000_0000);
+            assert_eq!(vaddr.extract_bits(), 0x8000_0000);
+        }
+
+        #[test]
+        fn test_vaddr_vpn_extraction() {
+            // VirtualAddr layout for Sv39:
+            // VPN[0]: bits [20:12] (9 bits) - index into level 0 table
+            // VPN[1]: bits [29:21] (9 bits) - index into level 1 table
+            // VPN[2]: bits [38:30] (9 bits) - index into level 2 table
+            // Offset: bits [11:0] (12 bits)
+
+            // Address: 0x8200_1ABC
+            // Binary breakdown:
+            //   VPN[2] = (0x8200_1ABC >> 30) & 0x1FF = 2
+            //   VPN[1] = (0x8200_1ABC >> 21) & 0x1FF = 16 (0x10)
+            //   VPN[0] = (0x8200_1ABC >> 12) & 0x1FF = 1
+            //   Offset = 0x8200_1ABC & 0xFFF = 0xABC
+
+            let vaddr = VirtualAddr::new(0x8200_1ABC);
+            assert_eq!(vaddr.extract_vpn(2), 2);
+            assert_eq!(vaddr.extract_vpn(1), 16);
+            assert_eq!(vaddr.extract_vpn(0), 1);
+            assert_eq!(vaddr.extract_offset(), 0xABC);
+        }
+
+        #[test]
+        fn test_vaddr_from_vpn_offset() {
+            // Construct address from VPN and offset
+            let vpn = (2 << 18) | (16 << 9) | 1; // VPN[2]=2, VPN[1]=16, VPN[0]=1
+            let offset = 0xABC;
+            let vaddr = VirtualAddr::from(vpn, offset);
+
+            assert_eq!(vaddr.extract_vpn(2), 2);
+            assert_eq!(vaddr.extract_vpn(1), 16);
+            assert_eq!(vaddr.extract_vpn(0), 1);
+            assert_eq!(vaddr.extract_offset(), 0xABC);
+        }
+
+        #[test]
+        fn test_vaddr_max_vpn_values() {
+            // Each VPN field is 9 bits, max value = 511 (0x1FF)
+            let max_vpn = (0x1FF << 18) | (0x1FF << 9) | 0x1FF;
+            let vaddr = VirtualAddr::from(max_vpn, 0xFFF);
+
+            assert_eq!(vaddr.extract_vpn(2), 0x1FF);
+            assert_eq!(vaddr.extract_vpn(1), 0x1FF);
+            assert_eq!(vaddr.extract_vpn(0), 0x1FF);
+            assert_eq!(vaddr.extract_offset(), 0xFFF);
+        }
+
+        #[test]
+        fn test_vaddr_alignment() {
+            let page_aligned = VirtualAddr::new(0x8000_0000);
+            assert!(page_aligned.is_aligned(PAGE_SIZE));
+
+            let not_aligned = VirtualAddr::new(0x8000_0001);
+            assert!(!not_aligned.is_aligned(PAGE_SIZE));
+
+            // 2MB (megapage) alignment
+            let mega_aligned = VirtualAddr::new(0x8020_0000);
+            assert!(mega_aligned.is_aligned(2 * 1024 * 1024));
+        }
+
+        #[test]
+        fn test_vaddr_zero() {
+            let vaddr = VirtualAddr::new(0);
+            assert_eq!(vaddr.extract_vpn(0), 0);
+            assert_eq!(vaddr.extract_vpn(1), 0);
+            assert_eq!(vaddr.extract_vpn(2), 0);
+            assert_eq!(vaddr.extract_offset(), 0);
+        }
+    }
+
+    mod physical_addr_tests {
+        use super::*;
+
+        #[test]
+        fn test_paddr_new() {
+            let paddr = PhysicalAddr::new(0x8000_0000);
+            assert_eq!(paddr.extract_bits(), 0x8000_0000);
+        }
+
+        #[test]
+        fn test_paddr_ppn_extraction() {
+            // PhysicalAddr layout for Sv39:
+            // PPN[0]: bits [20:12] (9 bits)
+            // PPN[1]: bits [29:21] (9 bits)
+            // PPN[2]: bits [55:30] (26 bits)
+            // Offset: bits [11:0] (12 bits)
+
+            let paddr = PhysicalAddr::new(0x8200_1ABC);
+            assert_eq!(paddr.extract_ppn(2), 2);
+            assert_eq!(paddr.extract_ppn(1), 16);
+            assert_eq!(paddr.extract_ppn(0), 1);
+            assert_eq!(paddr.extract_offset(), 0xABC);
+        }
+
+        #[test]
+        fn test_paddr_ppn_all() {
+            let paddr = PhysicalAddr::new(0x8020_1ABC);
+            // PPN_all = address >> 12
+            assert_eq!(paddr.extract_ppn_all(), 0x8020_1ABC >> 12);
+        }
+
+        #[test]
+        fn test_paddr_from_ppn_offset() {
+            let ppn = 0x80201; // full PPN
+            let offset = 0xABC;
+            let paddr = PhysicalAddr::from(ppn, offset);
+
+            assert_eq!(paddr.extract_ppn_all(), ppn);
+            assert_eq!(paddr.extract_offset(), offset);
+            assert_eq!(paddr.extract_bits(), (ppn << 12) | offset);
+        }
+
+        #[test]
+        fn test_paddr_alignment() {
+            let page_aligned = PhysicalAddr::new(0x8000_0000);
+            assert!(page_aligned.is_aligned(PAGE_SIZE));
+
+            let not_aligned = PhysicalAddr::new(0x8000_0001);
+            assert!(!not_aligned.is_aligned(PAGE_SIZE));
+        }
+
+        #[test]
+        fn test_paddr_roundtrip() {
+            // Verify that from(ppn, offset) and extract work together
+            for ppn in [0, 1, 0x80201, 0xFFF_FFFFFFFF_u64 as usize] {
+                for offset in [0, 1, 0xFFF] {
+                    // Only test valid 44-bit PPNs
+                    let ppn = ppn & ((1 << 44) - 1);
+                    let paddr = PhysicalAddr::from(ppn, offset);
+                    assert_eq!(paddr.extract_ppn_all(), ppn, "PPN mismatch for ppn={ppn:#x}");
+                    assert_eq!(
+                        paddr.extract_offset(),
+                        offset,
+                        "Offset mismatch for offset={offset:#x}"
+                    );
+                }
+            }
+        }
+    }
+}

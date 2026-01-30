@@ -12,7 +12,7 @@ static INTERVAL: u64 = 10_0000;
 #[unsafe(no_mangle)]
 unsafe extern "C" fn start() {
     // disable paging for now.
-    satp::set(satp::Mode::Bare, 0, 0);
+    unsafe { satp::set(satp::Mode::Bare, 0, 0) };
 
     let hart = arch::hart_id();
     if hart == 0 {
@@ -20,20 +20,20 @@ unsafe extern "C" fn start() {
     }
 
     println!("initializing traps...");
-    trap::init();
+    unsafe { trap::init() };
     println!("initializing traps completed");
 
     println!("setting csrs for switching to supervisor mode...");
     // next mode is supervisor mode
-    mstatus::set_mpp(mstatus::MPP::Supervisor);
+    unsafe { mstatus::set_mpp(mstatus::MPP::Supervisor) };
 
     // mret jump to kmain or kmain_ap
     let main = if arch::hart_id() == 0 { kmain } else { kmain_ap };
     println!("setting mepc to main at {:#x}...", main as usize);
-    mepc::write(main as usize);
+    unsafe { mepc::write(main as usize) };
 
     println!("switching to supervisor mode...");
-    asm!("mret");
+    unsafe { asm!("mret") };
 
     unreachable!();
 }
@@ -50,7 +50,7 @@ unsafe extern "C" fn kmain() -> ! {
 
     println!("This is my operating system!");
 
-    asm!("ebreak", options(nomem, nostack));
+    unsafe { asm!("ebreak", options(nomem, nostack)) };
 
     // crate::echo::echo();
 

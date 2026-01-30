@@ -32,7 +32,7 @@ pub unsafe fn map_range<F: Fn(VirtualAddr) -> PhysicalAddr>(
     for curr in (start..end).step_by(PAGE_SIZE) {
         let vaddr = VirtualAddr::new(curr);
         let paddr = f(vaddr);
-        paging::map(root, vaddr, paddr, bits);
+        unsafe { paging::map(root, vaddr, paddr, bits) };
     }
 
     println!(
@@ -41,8 +41,8 @@ pub unsafe fn map_range<F: Fn(VirtualAddr) -> PhysicalAddr>(
     );
 }
 
-pub unsafe fn id_map_range(root: *mut Table, mut start: usize, mut end: usize, bits: usize) {
-    map_range(root, start, end, |vaddr| PhysicalAddr::new(vaddr.extract_bits()), bits);
+pub unsafe fn id_map_range(root: *mut Table, start: usize, end: usize, bits: usize) {
+    unsafe { map_range(root, start, end, |vaddr| PhysicalAddr::new(vaddr.extract_bits()), bits) };
 }
 
 pub static ROOT_TABLE: Lazy<Mutex<Box<Table>>> = Lazy::new(|| unsafe {
@@ -155,7 +155,7 @@ pub unsafe fn init() {
     let ppn = PhysicalAddr::new(addr).extract_ppn_all();
 
     println!("[paging::init] set satp register, mode: {:?}, ppn: {:#x}", satp::Mode::Sv39, ppn);
-    satp::set(satp::Mode::Sv39, 0, ppn);
+    unsafe { satp::set(satp::Mode::Sv39, 0, ppn) };
     println!("[paging::init] set satp register completed");
 
     println!("[paging::init] sfence_vma_all");

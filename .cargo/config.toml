@@ -1,9 +1,6 @@
-[build]
+[target.riscv64imac-unknown-none-elf]
 # https://doc.rust-lang.org/nightly/rustc/platform-support.html
 # Target: RISC-V 64-bit, I+M+A+C extensions, bare metal, no OS
-target = "riscv64imac-unknown-none-elf"
-
-[target.riscv64imac-unknown-none-elf]
 rustflags = [
     '-Clink-arg=-Tcrates/kernel/kernel.ld',  # Use custom linker script
     '--cfg=riscv64',                # Define cfg flag for conditional compilation

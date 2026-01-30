@@ -66,8 +66,8 @@ where
     let mut ptr = range.start;
     println!("{:?}", range);
     while ptr < range.end {
-        core::ptr::write_volatile(ptr, T::from(0));
-        ptr = ptr.offset(1);
+        unsafe { core::ptr::write_volatile(ptr, T::from(0)) };
+        ptr = unsafe { ptr.offset(1) };
     }
 }
 
