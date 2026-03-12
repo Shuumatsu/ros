@@ -8,7 +8,6 @@ use crate::memory;
 use crate::trap;
 
 // static mut KERNEL_STARTED: bool = false;
-static INTERVAL: u64 = 10_0000;
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn start() {
@@ -34,29 +33,49 @@ unsafe extern "C" fn start() {
     println!("setting mepc to main at {:#x}...", main as usize);
     unsafe { mepc::write(main as usize) };
 
+    // Configure PMP to allow S-mode access to all physical memory.
+    // Without PMP entries, S-mode has no memory access on RISC-V.
+    // NAPOT mode with all address bits set = match entire address space.
+    // pmpcfg0[7:0] = 0x1f: R=1, W=1, X=1, A=NAPOT(11), L=0
+    unsafe {
+        asm!(
+            "li {tmp}, 0x3fffffffffffff",
+            "csrw pmpaddr0, {tmp}",
+            "li {tmp}, 0x1f",
+            "csrw pmpcfg0, {tmp}",
+            tmp = out(reg) _,
+        );
+    }
+
     println!("switching to supervisor mode...");
     unsafe { asm!("mret") };
 
     unreachable!();
 }
 
+#[repr(align(4096))]
+struct UserStack([u8; 4096]);
+static USER_STACK: UserStack = UserStack([0u8; 4096]);
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
-    crate::memory::init();
-    println!("enter kmain");
-    // println!("initializing paging...");
-    // memory::paging::init();
-    // println!("initializing paging completed");
-
-    // KERNEL_STARTED = true;
+    kprintln!("enter kmain");
 
     println!("This is my operating system!");
 
-    unsafe { asm!("ebreak", options(nomem, nostack)) };
+    // Launch a hardcoded user-space program to demonstrate U-mode ecall handling.
+    let entry = &crate::user_program::USER_PROGRAM as *const _ as usize;
+    let user_sp = USER_STACK.0.as_ptr_range().end as usize;
+    println!("jumping to user program at {:#x}, user sp = {:#x}", entry, user_sp);
+    unsafe { trap::run_user_program(entry, user_sp) };
 
-    // crate::echo::echo();
+    let mut i = 0;
+    while i < 10 {
+        unsafe { trap::run_user_program(entry, user_sp) };
+        i += 1;
+    }
 
-    scheduler();
+    unreachable!();
 }
 
 #[unsafe(no_mangle)]
