@@ -24,6 +24,7 @@ mod proc;
 mod sbi;
 mod start;
 mod trap;
+mod user_program;
 mod utils;
 
 global_asm!(include_str!("boot.S"));

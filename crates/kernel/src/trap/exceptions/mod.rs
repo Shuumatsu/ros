@@ -5,6 +5,7 @@ use riscv::interrupt::supervisor::Exception;
 use crate::trap::TrapFrame;
 
 mod breakpoint;
+mod ecall;
 
 pub unsafe fn init() {
     unsafe {
@@ -17,6 +18,7 @@ pub unsafe fn init() {
 pub fn handler(e: Exception, tf: &mut TrapFrame) {
     match e {
         Exception::Breakpoint => breakpoint::handler(e, tf),
-        _ => panic!("unexpected exception"),
+        Exception::UserEnvCall => ecall::handler(tf),
+        _ => panic!("unexpected exception: {:?}", e),
     }
 }
