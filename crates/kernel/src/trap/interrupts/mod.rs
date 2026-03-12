@@ -18,11 +18,12 @@ pub unsafe fn init() {
         sie::set_stimer();
         sie::set_ssoft();
 
-        clint::init();
-        plic::init();
+        // TODO: re-enable once we need timer/external interrupts
+        // clint::init();
+        // plic::init();
 
-        println!("enable supervisor interrupts");
-        sstatus::set_sie();
+        // println!("enable supervisor interrupts");
+        // sstatus::set_sie();
     }
 }
 
