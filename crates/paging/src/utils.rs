@@ -35,6 +35,9 @@ pub fn set_range(bits: usize, val: usize, start_pos: usize, end_pos: usize) -> u
 }
 
 pub const KILOBYTE: usize = 1024;
+pub const MEGABYTE: usize = 1024 * KILOBYTE;
+pub const GIGABYTE: usize = 1024 * MEGABYTE;
+pub const TERABYTE: usize = 1024 * GIGABYTE;
 
 #[inline]
 pub const fn align_down(addr: usize, align: usize) -> usize {

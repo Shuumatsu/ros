@@ -1,6 +1,6 @@
+use crate::println;
 use buddy_system_allocator::LockedHeap;
 use core::alloc::Layout;
-use crate::println;
 
 pub mod layout;
 pub mod paging;
@@ -25,12 +25,10 @@ fn alloc_error(layout: Layout) -> ! {
 pub fn init() {
     let start = layout::heap_start();
     let end = layout::memory_end();
-    let size = end - start;
 
     unsafe {
-        HEAP.lock().init(start, size);
+        HEAP.lock().add_to_heap(start, end);
     }
 
-    println!("[memory] heap initialized: {:#x} - {:#x} ({} MB)",
-             start, end, size / 1024 / 1024);
+    println!("[memory] heap initialized: {:#x} - {:#x} ({} MB)", start, end, (end - start) / 1024 / 1024);
 }

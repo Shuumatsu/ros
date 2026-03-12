@@ -4,6 +4,7 @@ use riscv::register::*;
 
 use crate::arch::riscv64 as arch;
 use crate::cpu;
+use crate::memory;
 use crate::trap;
 
 // static mut KERNEL_STARTED: bool = false;
@@ -11,13 +12,14 @@ static INTERVAL: u64 = 10_0000;
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn start() {
-    // disable paging for now.
-    unsafe { satp::set(satp::Mode::Bare, 0, 0) };
-
     let hart = arch::hart_id();
     if hart == 0 {
         cpu::print_info();
     }
+
+    println!("initializing memory...");
+    memory::init();
+    println!("initializing memory completed");
 
     println!("initializing traps...");
     unsafe { trap::init() };

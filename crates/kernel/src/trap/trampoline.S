@@ -140,7 +140,7 @@ trap_entry:
     STORE_ALL
 
     mv a0, sp
-    jal trap_handler
+    call trap_handler
 
 trap_ret:
     RESTORE_ALL

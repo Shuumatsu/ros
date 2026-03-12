@@ -1,11 +1,12 @@
 //! Page table type for Sv39 paging.
 
-use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+use alloc::alloc::{Layout, alloc_zeroed, dealloc};
 use core::mem::size_of;
 
 use super::addr::{PhysicalAddr, VirtualAddr};
 use super::entry::Entry;
 use super::{ENTRIES_PER_PAGE, PAGE_SIZE};
+use crate::utils::{align_down, align_up};
 
 #[derive(Debug)]
 #[repr(transparent)]
@@ -108,13 +109,54 @@ impl Table {
                 if !is_leaf {
                     let ppn = entry.extract_ppn_all();
                     // SAFETY: entry points to a table allocated with alloc_zeroed
-                    dealloc(
-                        PhysicalAddr::from(ppn, 0).as_mut_ptr::<u8>(),
-                        Layout::new::<Table>(),
-                    );
+                    dealloc(PhysicalAddr::from(ppn, 0).as_mut_ptr::<u8>(), Layout::new::<Table>());
                 }
             });
         }
+    }
+
+    /// Map a single page: vaddr -> paddr with given flags.
+    ///
+    /// # Safety
+    ///
+    /// - `root` must be a valid pointer to a page table.
+    pub unsafe fn map(root: *mut Self, vaddr: VirtualAddr, paddr: PhysicalAddr, flags: usize) {
+        let entry = unsafe { Self::walk_to_leaf(root, vaddr) };
+        entry.set_ppn(paddr);
+        entry.set_flags(flags);
+        entry.set_valid();
+    }
+
+    /// Map a range of pages using a custom address translation function.
+    ///
+    /// # Safety
+    ///
+    /// - `root` must be a valid pointer to a page table.
+    pub unsafe fn map_range<F: Fn(VirtualAddr) -> PhysicalAddr>(
+        root: *mut Self,
+        start: usize,
+        end: usize,
+        f: F,
+        flags: usize,
+    ) {
+        let start = align_down(start, PAGE_SIZE);
+        let end = align_down(end, PAGE_SIZE);
+        for curr in (start..end).step_by(PAGE_SIZE) {
+            let vaddr = VirtualAddr::new(curr);
+            let paddr = f(vaddr);
+            unsafe { Self::map(root, vaddr, paddr, flags) };
+        }
+    }
+
+    /// Identity map a range (vaddr == paddr).
+    ///
+    /// # Safety
+    ///
+    /// - `root` must be a valid pointer to a page table.
+    pub unsafe fn id_map_range(root: *mut Self, start: usize, end: usize, flags: usize) {
+        unsafe {
+            Self::map_range(root, start, end, |v| PhysicalAddr::new(v.extract_bits()), flags)
+        };
     }
 }
 

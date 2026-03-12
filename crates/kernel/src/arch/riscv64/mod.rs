@@ -1,4 +1,3 @@
-pub mod paging;
 pub mod sbi;
 
 use core::arch::asm;

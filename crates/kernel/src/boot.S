@@ -40,7 +40,7 @@ _boot:
     bltu    a0, a1, 1b
 
 2:    
-    # stack grows from bottom to top, so we put the stack pointer to the very end of the stack range.
+    # stack grows higher memory to lower memory , so we put the stack pointer to the very end of the stack range.
     la      sp, _kernel_stack_start
 
     # Allocate 64kb stack for each hart
