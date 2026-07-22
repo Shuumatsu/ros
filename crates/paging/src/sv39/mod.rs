@@ -1,17 +1,63 @@
-//! Sv39 paging mode implementation.
+//! Sv39 paging mode.
 //!
-//! Sv39 uses a 39-bit virtual address space with three levels of page tables.
+//! Sv39 maps a 39-bit virtual address space through three levels of page
+//! tables. This module owns the *geometry* of that layout — the level count,
+//! the field widths and the page sizes — so that [`addr`], [`entry`] and
+//! [`table`] all derive their shifts and masks from one place.
+//!
+//! ```text
+//! Virtual address (39 significant bits, sign-extended to 64):
+//!   | VPN[2] 38:30 | VPN[1] 29:21 | VPN[0] 20:12 | offset 11:0 |
+//! Physical address (56 bits):
+//!   | PPN[2] 55:30 | PPN[1] 29:21 | PPN[0] 20:12 | offset 11:0 |
+//! Page-table entry:
+//!   | PPN[2] 53:28 | PPN[1] 27:19 | PPN[0] 18:10 | RSW | DAGUXWRV |
+//! ```
 
 pub mod addr;
 pub mod entry;
 pub mod table;
 
 pub use addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
-pub use entry::*;
+pub use entry::{Entry, PteFlags};
 pub use table::Table;
 
-use crate::utils::KILOBYTE;
+use crate::utils::{KILOBYTE, MEGABYTE};
 
+/// Bits of byte offset within a base page.
+pub const PAGE_OFFSET_BITS: usize = 12;
+/// Size of a base page in bytes.
 pub const PAGE_SIZE: usize = 4 * KILOBYTE;
+
+/// Virtual-page-number index bits consumed per level.
+pub const VPN_BITS: usize = 9;
+/// Number of page-table levels walked (Sv39 → 3).
+pub const LEVELS: usize = 3;
+/// Index of the root level, where every table walk begins.
+pub const ROOT_LEVEL: usize = LEVELS - 1;
+
+/// Size of one page-table entry in bytes.
 pub const ENTRY_SIZE: usize = core::mem::size_of::<u64>();
-pub const ENTRIES_PER_PAGE: usize = PAGE_SIZE / ENTRY_SIZE;
+/// Number of entries in a single page table (fills exactly one page).
+pub const ENTRIES_PER_PAGE: usize = 1 << VPN_BITS;
+
+/// Total width of a physical page number (PPN[2:0]).
+pub const PPN_BITS: usize = 44;
+/// Width of each `PPN[i]` field. `PPN[2]` is wider to reach the 56-bit
+/// physical address space; `VPN[i]` fields are always [`VPN_BITS`] wide.
+pub const PPN_FIELD_BITS: [usize; LEVELS] = [9, 9, 26];
+
+/// Number of bytes mapped by a leaf entry installed at `level`
+/// (4 KiB at level 0, 2 MiB at level 1, 1 GiB at level 2).
+#[inline]
+pub const fn page_size_at(level: usize) -> usize {
+    debug_assert!(level < LEVELS, "level out of range");
+    1 << (PAGE_OFFSET_BITS + VPN_BITS * level)
+}
+
+const_assert_eq!(ENTRIES_PER_PAGE, 512);
+const_assert_eq!(ENTRIES_PER_PAGE * ENTRY_SIZE, PAGE_SIZE);
+const_assert_eq!(page_size_at(0), PAGE_SIZE);
+const_assert_eq!(page_size_at(1), 2 * MEGABYTE);
+// The 39 virtual bits are exactly the offset plus one VPN field per level.
+const_assert_eq!(PAGE_OFFSET_BITS + VPN_BITS * LEVELS, 39);

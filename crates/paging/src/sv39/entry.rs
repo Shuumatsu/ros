@@ -1,117 +1,121 @@
-//! Page table entry type and flag constants for Sv39 paging.
+//! Page-table entry type and permission flags for Sv39.
 
-use crate::utils::{extract_value, set_range};
+use bitflags::bitflags;
 use core::fmt;
 use core::mem::size_of;
 
-use super::ENTRY_SIZE;
 use super::addr::PhysicalAddr;
+use super::{ENTRY_SIZE, PPN_BITS, PPN_FIELD_BITS, VPN_BITS};
+use crate::utils::{field, with_field};
 
-// +----------+---------+---------+---------+-------+---+---+---+---+---+---+---+---+
-// | Not Used | PPN[2]  | PPN[1]  | PPN[0]  | RSW   | D | A | G | U | X | W | R | V |
-// +----------+---------+---------+---------+-------+---+---+---+---+---+---+---+---+
-// | 63 - 54  | 53 - 28 | 27 - 19 | 18 - 10 | 9 - 8 | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 |
-// +----------+---------+---------+---------+-------+---+---+---+---+---+---+---+---+
+/// Bit position at which the PPN begins inside a PTE.
+const PTE_PPN_SHIFT: usize = 10;
+/// Number of permission/status flag bits at the bottom of a PTE.
+const FLAG_BITS: usize = 8;
 
-pub const VALID: usize = 1 << 0;
-pub const READ: usize = 1 << 1;
-pub const WRITE: usize = 1 << 2;
-pub const EXECUTE: usize = 1 << 3;
-pub const USER: usize = 1 << 4;
-pub const GLOBAL: usize = 1 << 5;
-pub const ACCESS: usize = 1 << 6;
-pub const DIRTY: usize = 1 << 7;
-
-pub const READ_WRITE: usize = READ | WRITE;
-pub const READ_EXECUTE: usize = READ | EXECUTE;
-pub const READ_WRITE_EXECUTE: usize = READ | WRITE | EXECUTE;
-
-pub const USER_READ_WRITE: usize = READ_WRITE | USER;
-pub const USER_READ_EXECUTE: usize = READ_EXECUTE | USER;
-pub const USER_READ_WRITE_EXECUTE: usize = READ_WRITE_EXECUTE | USER;
-
-macro_rules! define_flag_methods {
-    ($(($is:ident, $set:ident, $clear:ident, $flag:ident)),* $(,)?) => {
-        $(
-            pub const fn $is(&self) -> bool { (self.0 & $flag) != 0 }
-            pub fn $set(&mut self) { self.0 |= $flag; }
-            pub fn $clear(&mut self) { self.0 &= !$flag; }
-        )*
-    };
+bitflags! {
+    /// The low-8 permission and status bits of a page-table entry.
+    ///
+    /// A *leaf* entry sets at least one of R/W/X; a *branch* (pointer to the
+    /// next level) sets none of them. `W` without `R` is a reserved encoding.
+    #[repr(transparent)]
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct PteFlags: usize {
+        const VALID   = 1 << 0;
+        const READ    = 1 << 1;
+        const WRITE   = 1 << 2;
+        const EXECUTE = 1 << 3;
+        const USER    = 1 << 4;
+        const GLOBAL  = 1 << 5;
+        const ACCESS  = 1 << 6;
+        const DIRTY   = 1 << 7;
+    }
 }
 
-#[derive(Copy, Clone)]
+impl PteFlags {
+    /// The R/W/X permission bits. Their presence distinguishes leaf from branch.
+    pub const PERMS: Self = Self::READ.union(Self::WRITE).union(Self::EXECUTE);
+
+    pub const READ_WRITE: Self = Self::READ.union(Self::WRITE);
+    pub const READ_EXECUTE: Self = Self::READ.union(Self::EXECUTE);
+    pub const READ_WRITE_EXECUTE: Self = Self::PERMS;
+
+    pub const USER_READ_WRITE: Self = Self::READ_WRITE.union(Self::USER);
+    pub const USER_READ_EXECUTE: Self = Self::READ_EXECUTE.union(Self::USER);
+    pub const USER_READ_WRITE_EXECUTE: Self = Self::PERMS.union(Self::USER);
+
+    /// True if these flags describe a leaf mapping (any of R/W/X set).
+    #[inline]
+    pub const fn is_leaf(self) -> bool {
+        self.bits() & Self::PERMS.bits() != 0
+    }
+
+    /// True if the R/W/X combination is architecturally legal (W implies R).
+    #[inline]
+    pub const fn is_legal_leaf(self) -> bool {
+        self.bits() & Self::WRITE.bits() == 0 || self.bits() & Self::READ.bits() != 0
+    }
+}
+
+/// A single Sv39 page-table entry.
+#[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Entry(usize);
 const_assert_eq!(size_of::<Entry>(), ENTRY_SIZE);
 
 impl fmt::Debug for Entry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!(
-            "Entry({:#x}, ppn[2]: {}, ppn[1]: {}, ppn[0]: {}, flags: {:#010b})",
-            self.0,
-            self.extract_ppn(2),
-            self.extract_ppn(1),
-            self.extract_ppn(0),
-            extract_value(self.0, (1 << 8) - 1, 0)
-        ))
+        write!(f, "Entry({:#x}, ppn={:#x}, {:?})", self.0, self.ppn(), self.flags())
     }
 }
 
-unsafe impl Send for Entry {}
-
 impl Entry {
-    pub const fn new(bits: usize) -> Self { Entry(bits) }
+    /// An empty (invalid, all-zero) entry.
+    pub const fn empty() -> Self { Self(0) }
 
-    pub fn set_bits(&mut self, bits: usize) { self.0 = bits }
+    /// Wrap a raw entry word.
+    pub const fn new(bits: usize) -> Self { Self(bits) }
 
-    pub fn set_flags(&mut self, flags: usize) { self.0 = set_range(self.0, flags, 0, 8); }
+    pub const fn bits(self) -> usize { self.0 }
 
-    pub const fn extract_ppn(&self, idx: usize) -> usize {
-        match idx {
-            0 => extract_value(self.0, (1 << 9) - 1, 10),
-            1 => extract_value(self.0, (1 << 9) - 1, 19),
-            2 => extract_value(self.0, (1 << 26) - 1, 28),
-            _ => panic!("[entry.extract_ppn] idx should be one of 0..=2"),
-        }
+    pub const fn flags(self) -> PteFlags {
+        PteFlags::from_bits_truncate(field(self.0, 0, FLAG_BITS))
     }
 
-    pub const fn extract_ppn_all(&self) -> usize { extract_value(self.0, (1 << 44) - 1, 10) }
+    pub fn set_flags(&mut self, flags: PteFlags) {
+        self.0 = with_field(self.0, 0, FLAG_BITS, flags.bits());
+    }
 
+    /// The full 44-bit physical page number this entry carries.
+    pub const fn ppn(self) -> usize { field(self.0, PTE_PPN_SHIFT, PPN_BITS) }
+
+    /// One `PPN[level]` sub-field (level 2 is 26 bits wide, others 9).
+    pub const fn ppn_field(self, level: usize) -> usize {
+        debug_assert!(level < super::LEVELS, "ppn level out of range");
+        field(self.0, PTE_PPN_SHIFT + VPN_BITS * level, PPN_FIELD_BITS[level])
+    }
+
+    /// Store the physical frame `paddr` points into (its offset is ignored).
     pub fn set_ppn(&mut self, paddr: PhysicalAddr) {
-        self.0 = set_range(self.0, paddr.extract_ppn_all(), 10, 54)
+        self.0 = with_field(self.0, PTE_PPN_SHIFT, PPN_BITS, paddr.ppn());
     }
 
-    // A leaf has one or more RWX bits set
-    pub const fn is_leaf(&self) -> bool { (self.0 & (READ | WRITE | EXECUTE)) != 0 }
-    pub const fn is_branch(&self) -> bool { !self.is_leaf() }
+    /// The page-aligned physical address this entry targets.
+    pub const fn target(self) -> PhysicalAddr { PhysicalAddr::from_ppn(self.ppn()) }
 
-    define_flag_methods!(
-        (is_valid, set_valid, clear_valid, VALID),
-        (is_read, set_read, clear_read, READ),
-        (is_write, set_write, clear_write, WRITE),
-        (is_execute, set_execute, clear_execute, EXECUTE),
-        (is_user, set_user, clear_user, USER),
-        (is_global, set_global, clear_global, GLOBAL),
-        (is_access, set_access, clear_access, ACCESS),
-        (is_dirty, set_dirty, clear_dirty, DIRTY),
-        (is_read_write, set_read_write, clear_read_write, READ_WRITE),
-        (is_read_execute, set_read_execute, clear_read_execute, READ_EXECUTE),
-        (
-            is_read_write_execute,
-            set_read_write_execute,
-            clear_read_write_execute,
-            READ_WRITE_EXECUTE
-        ),
-        (is_user_read_write, set_user_read_write, clear_user_read_write, USER_READ_WRITE),
-        (is_user_read_execute, set_user_read_execute, clear_user_read_execute, USER_READ_EXECUTE),
-        (
-            is_user_read_write_execute,
-            set_user_read_write_execute,
-            clear_user_read_write_execute,
-            USER_READ_WRITE_EXECUTE
-        ),
-    );
+    pub const fn is_valid(self) -> bool {
+        field(self.0, 0, FLAG_BITS) & PteFlags::VALID.bits() != 0
+    }
+
+    /// A valid entry that maps a page (has R/W/X).
+    pub const fn is_leaf(self) -> bool {
+        self.is_valid() && self.flags().is_leaf()
+    }
+
+    /// A valid entry that points to a next-level table (no R/W/X).
+    pub const fn is_branch(self) -> bool {
+        self.is_valid() && !self.flags().is_leaf()
+    }
 }
 
 #[cfg(test)]
@@ -119,130 +123,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_entry_new_and_bits() {
-        let entry = Entry::new(0);
-        assert!(!entry.is_valid());
-        assert!(!entry.is_read());
-        assert!(!entry.is_write());
-        assert!(!entry.is_execute());
-
-        let entry = Entry::new(0b11111111); // all flags set
-        assert!(entry.is_valid());
-        assert!(entry.is_read());
-        assert!(entry.is_write());
-        assert!(entry.is_execute());
-        assert!(entry.is_user());
-        assert!(entry.is_global());
-        assert!(entry.is_access());
-        assert!(entry.is_dirty());
+    fn flag_bit_positions() {
+        assert_eq!(PteFlags::VALID.bits(), 1 << 0);
+        assert_eq!(PteFlags::READ.bits(), 1 << 1);
+        assert_eq!(PteFlags::WRITE.bits(), 1 << 2);
+        assert_eq!(PteFlags::EXECUTE.bits(), 1 << 3);
+        assert_eq!(PteFlags::USER.bits(), 1 << 4);
+        assert_eq!(PteFlags::DIRTY.bits(), 1 << 7);
     }
 
     #[test]
-    fn test_entry_flag_constants() {
-        // Verify flag bit positions match RISC-V spec
-        assert_eq!(VALID, 1 << 0);
-        assert_eq!(READ, 1 << 1);
-        assert_eq!(WRITE, 1 << 2);
-        assert_eq!(EXECUTE, 1 << 3);
-        assert_eq!(USER, 1 << 4);
-        assert_eq!(GLOBAL, 1 << 5);
-        assert_eq!(ACCESS, 1 << 6);
-        assert_eq!(DIRTY, 1 << 7);
+    fn leaf_vs_branch_flags() {
+        assert!(!PteFlags::VALID.is_leaf(), "V-only is a branch");
+        assert!(PteFlags::READ.is_leaf(), "R is a leaf");
+        assert!(PteFlags::EXECUTE.is_leaf(), "X is a leaf");
+        assert!(PteFlags::READ_WRITE.is_legal_leaf(), "RW is legal");
+        assert!(!PteFlags::WRITE.is_legal_leaf(), "W-only is reserved");
     }
 
     #[test]
-    fn test_entry_set_clear_flags() {
-        let mut entry = Entry::new(0);
+    fn entry_validity_and_kind() {
+        assert!(!Entry::empty().is_valid(), "zeroed entry is invalid");
 
-        // Test one flag to verify macro correctness
-        entry.set_valid();
-        assert!(entry.is_valid());
-        entry.clear_valid();
-        assert!(!entry.is_valid());
-    }
-
-    #[test]
-    fn test_entry_leaf_vs_branch() {
-        // Branch: V=1, R=W=X=0 (points to next level table)
-        let branch = Entry::new(VALID);
-        assert!(branch.is_branch());
+        let mut branch = Entry::empty();
+        branch.set_flags(PteFlags::VALID);
+        assert!(branch.is_branch(), "valid + no perms = branch");
         assert!(!branch.is_leaf());
 
-        // Leaf: has at least one of R, W, X set
-        let leaf_r = Entry::new(VALID | READ);
-        assert!(leaf_r.is_leaf());
-        assert!(!leaf_r.is_branch());
+        let mut leaf = Entry::empty();
+        leaf.set_flags(PteFlags::VALID | PteFlags::READ);
+        assert!(leaf.is_leaf(), "valid + R = leaf");
+        assert!(!leaf.is_branch());
 
-        let leaf_w = Entry::new(VALID | WRITE);
-        assert!(leaf_w.is_leaf());
-
-        let leaf_x = Entry::new(VALID | EXECUTE);
-        assert!(leaf_x.is_leaf());
-
-        let leaf_rwx = Entry::new(VALID | READ | WRITE | EXECUTE);
-        assert!(leaf_rwx.is_leaf());
+        // R/W/X set but not valid → neither leaf nor branch (e.g. after unmap).
+        let stale = Entry::new(PteFlags::READ.bits());
+        assert!(!stale.is_leaf(), "invalid entry is never a leaf");
+        assert!(!stale.is_branch(), "invalid entry is never a branch");
     }
 
     #[test]
-    fn test_entry_ppn_extraction() {
-        // PTE layout: bits [53:10] = PPN
-        // PPN[0]: bits [18:10] (9 bits)
-        // PPN[1]: bits [27:19] (9 bits)
-        // PPN[2]: bits [53:28] (26 bits)
+    fn ppn_storage_preserves_flags() {
+        let mut entry = Entry::empty();
+        entry.set_flags(PteFlags::VALID | PteFlags::READ | PteFlags::WRITE);
+        entry.set_ppn(PhysicalAddr::new(0x8020_0000));
 
-        // Set PPN[0] = 0x1FF (max 9-bit value)
+        assert_eq!(entry.ppn(), 0x8020_0000 >> 12, "ppn stored");
+        assert_eq!(entry.target(), PhysicalAddr::new(0x8020_0000), "target is page-aligned frame");
+        assert_eq!(entry.flags(), PteFlags::VALID | PteFlags::READ | PteFlags::WRITE, "flags kept");
+    }
+
+    #[test]
+    fn ppn_field_split() {
+        // PPN[2] is 26 bits at PTE bit 28; PPN[0] is 9 bits at bit 10.
+        let entry = Entry::new(0x3FF_FFFF << 28);
+        assert_eq!(entry.ppn_field(2), 0x3FF_FFFF, "26-bit PPN[2]");
+        assert_eq!(entry.ppn_field(0), 0);
+
         let entry = Entry::new(0x1FF << 10);
-        assert_eq!(entry.extract_ppn(0), 0x1FF);
-        assert_eq!(entry.extract_ppn(1), 0);
-        assert_eq!(entry.extract_ppn(2), 0);
-
-        // Set PPN[1] = 0x1FF
-        let entry = Entry::new(0x1FF << 19);
-        assert_eq!(entry.extract_ppn(0), 0);
-        assert_eq!(entry.extract_ppn(1), 0x1FF);
-        assert_eq!(entry.extract_ppn(2), 0);
-
-        // Set PPN[2] = 0x3FFFFFF (max 26-bit value)
-        let entry = Entry::new(0x3FFFFFF_usize << 28);
-        assert_eq!(entry.extract_ppn(0), 0);
-        assert_eq!(entry.extract_ppn(1), 0);
-        assert_eq!(entry.extract_ppn(2), 0x3FFFFFF);
-    }
-
-    #[test]
-    fn test_entry_ppn_all() {
-        // Full 44-bit PPN
-        let ppn_all: usize = 0xFFF_FFFFFFFF; // 44 bits all set
-        let entry = Entry::new(ppn_all << 10);
-        assert_eq!(entry.extract_ppn_all(), ppn_all);
-    }
-
-    #[test]
-    fn test_entry_set_ppn() {
-        let mut entry = Entry::new(VALID | READ);
-        let paddr = PhysicalAddr::new(0x8020_0000); // typical kernel address
-
-        entry.set_ppn(paddr);
-
-        // Verify PPN was set correctly (paddr >> 12 = PPN)
-        assert_eq!(entry.extract_ppn_all(), 0x8020_0000 >> 12);
-        // Verify flags were preserved
-        assert!(entry.is_valid());
-        assert!(entry.is_read());
-    }
-
-    #[test]
-    fn test_entry_set_flags_preserves_ppn() {
-        let mut entry = Entry::new(0);
-        let paddr = PhysicalAddr::new(0x8020_0000);
-
-        entry.set_ppn(paddr);
-        entry.set_flags(VALID | READ | WRITE);
-
-        // PPN should still be intact
-        assert_eq!(entry.extract_ppn_all(), 0x8020_0000 >> 12);
-        assert!(entry.is_valid());
-        assert!(entry.is_read());
-        assert!(entry.is_write());
+        assert_eq!(entry.ppn_field(0), 0x1FF, "9-bit PPN[0]");
+        assert_eq!(entry.ppn_field(2), 0);
     }
 }

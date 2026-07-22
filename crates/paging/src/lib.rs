@@ -15,3 +15,5 @@ pub mod sv39;
 pub mod utils;
 
 pub use sv39::addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
+pub use sv39::entry::{Entry, PteFlags};
+pub use sv39::table::Table;
