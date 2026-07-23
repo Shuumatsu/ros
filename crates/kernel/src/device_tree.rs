@@ -7,8 +7,10 @@
 //! before `memory::init` brings the allocator up — in fact before *anything*
 //! prints, because the console itself learns the UART address from here.
 //!
-//! [`discover`] fills the device table silently; [`dump`] prints it once the
-//! console is up. Everything the rest of the kernel needs — RAM extent, UART
+//! [`init`] parses the blob once and populates the device table (including the
+//! UART base, which is what backs the console). [`summary`] prints the resolved
+//! map from that stored state — no re-parse, so printing is decoupled from
+//! discovery. Everything the rest of the kernel needs — RAM extent, UART
 //! base/irq, PLIC and CLINT bases — comes from the accessors below, not from
 //! hardcoded platform constants.
 
@@ -145,17 +147,20 @@ fn find_irq(fdt: &Fdt, compatibles: &[&str]) -> Option<usize> {
     None
 }
 
-/// Parse the device tree at `dtb_ptr` and record the hardware the kernel needs.
+/// Parse the device tree at `dtb_ptr` and record the hardware the kernel needs
+/// (RAM extent, UART, PLIC, CLINT). Populating the UART base here is what backs
+/// the console, so this must run before the first print — but `init` does not
+/// print itself; call [`summary`] for that.
 ///
-/// Runs before the console is up, so it does not print. A usable device tree is
-/// part of the boot contract: a null pointer, an unparseable blob, a `/memory`
-/// with no region covering [`platform::DRAM_BASE`], or a missing UART all
-/// **panic** rather than let the kernel limp on wrong addresses.
+/// A usable device tree is part of the boot contract: a null pointer, an
+/// unparseable blob, a `/memory` with no region covering [`platform::DRAM_BASE`],
+/// or a missing UART all **panic** rather than let the kernel limp on wrong
+/// addresses. (Such a panic is still visible via the earlycon UART default.)
 ///
 /// # Safety
 /// `dtb_ptr` must be the address of a valid, readable FDT blob (as passed in
 /// `a1`), and the blob must stay mapped and unmodified — we borrow it in place.
-pub unsafe fn discover(dtb_ptr: usize) {
+pub unsafe fn init(dtb_ptr: usize) {
     if dtb_ptr == 0 {
         panic!("[dtb] no device tree pointer in a1 — previous boot stage violated the boot contract");
     }
@@ -165,6 +170,9 @@ pub unsafe fn discover(dtb_ptr: usize) {
         Err(e) => panic!("[dtb] failed to parse FDT at {:#x}: {:?}", dtb_ptr, e),
     };
     DTB_ADDR.store(dtb_ptr, Ordering::Relaxed);
+
+    // ---- Populate the device table (no printing yet: the console needs the
+    //      UART base we are about to store). ----
 
     // Physical RAM: the region covering the DRAM base backs the kernel + heap.
     let mut ram_found = false;
@@ -206,37 +214,14 @@ pub unsafe fn discover(dtb_ptr: usize) {
     }
 }
 
-/// Print the device table [`discover`] built. Safe to call once the console is
-/// up; re-borrows the blob (zero-copy) to print header/chosen details.
-pub fn dump() {
-    let dtb = DTB_ADDR.load(Ordering::Relaxed);
-    if dtb == 0 {
-        return;
-    }
-    let fdt = match unsafe { Fdt::from_ptr(dtb as *mut u8) } {
-        Ok(fdt) => fdt,
-        Err(_) => return,
-    };
-
-    let h = fdt.header();
-    println!(
-        "[dtb] found at {:#x}: version {}, {} bytes, boot hart {}",
-        dtb, h.version, h.totalsize, h.boot_cpuid_phys
-    );
-
+/// Print the resolved device map. Reads only the stored table — no re-parse —
+/// so printing is fully decoupled from [`init`]. Call once the console is up,
+/// i.e. after `init` (which is what backs the console with the real UART).
+pub fn summary() {
+    println!("[dtb] blob at {:#x}", DTB_ADDR.load(Ordering::Relaxed));
     if let (Some(base), Some(end)) = (ram_base(), ram_end()) {
         println!("[dtb] ram:   {:#x}..{:#x} ({} MiB)", base, end, (end - base) / (1024 * 1024));
     }
-
-    if let Some(chosen) = fdt.chosen() {
-        if let Some(args) = chosen.bootargs() {
-            println!("[dtb] bootargs: {:?}", args);
-        }
-        if let Some(path) = chosen.stdout_path() {
-            println!("[dtb] stdout-path: {}", path);
-        }
-    }
-
     println!("[dtb] uart:  {:#x} (size {:#x}, irq {})", uart_base(), uart_size(), uart_irq());
     if PLIC_BASE.load(Ordering::Relaxed) != 0 {
         println!("[dtb] plic:  {:#x} (size {:#x})", plic_base(), plic_size());

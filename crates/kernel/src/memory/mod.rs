@@ -24,11 +24,11 @@ fn alloc_error(layout: Layout) -> ! {
 /// Initialize the memory subsystem
 pub fn init() {
     let start = layout::heap_start();
-    // The RAM top is discovered from the device tree by `device_tree::discover`,
+    // The RAM top is discovered from the device tree by `device_tree::init`,
     // which panics if the tree is unusable — so by the time we get here it is
     // authoritative. No compile-time fallback: a wrong size corrupts the heap.
     let end = crate::device_tree::ram_end()
-        .expect("device tree RAM region not discovered; call device_tree::discover before memory::init");
+        .expect("device tree RAM region not discovered; call device_tree::init before memory::init");
 
     unsafe {
         HEAP.lock().add_to_heap(start, end);

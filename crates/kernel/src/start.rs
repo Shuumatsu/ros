@@ -13,12 +13,13 @@ use crate::trap;
 unsafe extern "C" fn start(dtb: usize) {
     let hart = arch::hart_id();
     if hart == 0 {
-        // Discover hardware from the DTB the previous stage handed us in a1,
-        // BEFORE anything prints: the console itself learns the UART base from
-        // here. Zero-allocation, so it is safe to run before the heap exists.
-        unsafe { crate::device_tree::discover(dtb) };
+        // Parse the DTB the previous stage handed us in a1: it populates the
+        // device table (the console learns the UART base from here). Zero-
+        // allocation, so it is safe to run before the heap exists. Printing is
+        // a separate concern — `summary` dumps the resolved map afterwards.
+        unsafe { crate::device_tree::init(dtb) };
+        crate::device_tree::summary();
         cpu::print_info();
-        crate::device_tree::dump();
     }
 
     println!("initializing memory...");
