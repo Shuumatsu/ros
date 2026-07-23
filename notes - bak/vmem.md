@@ -1,14 +1,16 @@
 os mem subsystem init
 1. os starting without pagetable
-2. setup temporary directmapping page table
-3. turn on paging
-4. setup kernel page table
+2. load mem addrs from dtb
+2.5 create a physical memory allocator
+- can we just use rust global_alloc trait or something i forget the name? but would this continue working between switching page tables?
+3. init kernel page table
   - direct mapping for texts, per cpu stack, global var
   - setup mapping for mmio devices/interrupts
   - setup mapping area for heap
   - setup trampoline page for process
+  - setup kernel stack areas (or this is just dynamically allocated, so just use heap area?)
   - ?else
-5. switch page table
+3. turn on paging
 
 
 # Virtual Memory (RISC-V Sv39, Linux model)

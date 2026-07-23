@@ -8,21 +8,17 @@ stores the address of _start as the "entry point"
 */
 ENTRY( _boot )
 
-MEMORY {
-    /* we have "ram" that contains a section that is
-    'w' (writeable), 'x' (executable), and 'a' (allocatable).
+/* The kernel is linked to run from the base of RAM. This base is the one
+unavoidable compile-time hardware fact for a fixed-address (non-relocatable)
+kernel: it is *where we are loaded*, not how much RAM exists.
 
-    LENGTH is ONLY a link-time bound so the linker can flag section overflow.
-    It is NOT the runtime RAM size — that is discovered from the device tree
-    (/memory) at boot (see device_tree.rs). Keep it comfortably large. */
-    ram  (wxa) : ORIGIN = 0x80000000, LENGTH = 128M
-}
-
-/* _memory_start = the address we are linked/loaded at. We use ORIGIN(ram) so it
-tracks whatever we set the origin of ram to. The RAM *top* deliberately has no
-linker symbol: sizing anything from LENGTH would re-introduce a hardcoded RAM
-size, which is exactly what the device tree replaces. */
-PROVIDE(_memory_start = ORIGIN(ram));
+There is deliberately NO MEMORY region and NO length/size here. A region would
+force a LENGTH, and any length is a fiction: the linker cannot know the real RAM
+top — that is the RAM extent the device tree reports at runtime (see
+device_tree.rs). So instead of `>ram` with a bogus bound, we simply flow the
+sections from the location counter starting at this base. The kernel image is a
+few MiB; its usable top is enforced at runtime, not here. */
+_memory_start = 0x8000_0000;
 
 /*
 PHDRS is short for "program headers", which we specify three here:
@@ -48,6 +44,9 @@ in C++ and Rust,
     - global uninitialized variables go into bss.
 */
 SECTIONS {
+    /* Flow everything from the load base; VMA == LMA (identity loaded). */
+    . = _memory_start;
+
     .text : {
         PROVIDE(_text_start = .);
         /*
@@ -76,26 +75,10 @@ SECTIONS {
         *(.text.init) *(.text .text.*)
 
         PROVIDE(_text_end = .);
-    /*
-    The portion after the right brace is in an odd format. However, this is telling the
-    linker what memory portion to put it in. We labeled our RAM, ram, with the constraints
-    that it is writeable, allocatable, and executable. The linker will make sure with this
-    that we can do all of those things.
-
-        >ram - This just tells the linker script to put this entire section (.text) into the
-                ram region of memory. To my knowledge, the '>' does not mean "greater than". Instead,
-            it is a symbol to let the linker know we want to put this in ram.
-
-        AT>ram - This sets the LMA (load memory address) region to the same thing. LMA is the final
-                    translation of a VMA (virtual memory address). With this linker script, we're loading
-                everything into its physical location. We'll let the kernel copy and sort out the 
-                virtual memory. That's why >ram and AT>ram are continually the same thing.
-
-        :text  - This tells the linker script to put this into the :text program header. We've only
-                    defined three: text, data, and bss. In this case, we're telling the linker script
-                to go into the text section.
-    */
-    } >ram AT>ram :text
+    /* No MEMORY region: sections flow from the location counter, so VMA == LMA
+       (each section is loaded at its physical address). ":text" assigns this
+       section to the text program header declared in PHDRS. */
+    } :text
 
     .rodata : {
         . = ALIGN(4096);
@@ -114,7 +97,7 @@ SECTIONS {
         . = . + 4096;
 
         PROVIDE(_rodata_end = .);
-    } >ram AT>ram :text
+    } :text
 
     .data : {
         . = ALIGN(4096);
@@ -128,7 +111,7 @@ SECTIONS {
         . = . + 4096;
 
         PROVIDE(_data_end = .);
-    } >ram AT>ram :data
+    } :data
 
     .bss : {
         . = ALIGN(4096);
@@ -142,7 +125,7 @@ SECTIONS {
         . = . + 4096;
 
         PROVIDE(_bss_end = .);
-    } >ram AT>ram :bss
+    } :bss
 
 
     /*
