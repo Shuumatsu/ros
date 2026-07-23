@@ -18,6 +18,7 @@ mod isa;
 mod lang_items;
 #[macro_use]
 mod console;
+mod device_tree;
 mod memory;
 mod platform;
 mod proc;

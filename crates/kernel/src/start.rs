@@ -10,10 +10,13 @@ use crate::trap;
 // static mut KERNEL_STARTED: bool = false;
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn start() {
+unsafe extern "C" fn start(dtb: usize) {
     let hart = arch::hart_id();
     if hart == 0 {
         cpu::print_info();
+        // Discover hardware from the device tree the previous stage handed us in a1.
+        // Zero-allocation, so it is safe to run before the heap exists.
+        unsafe { crate::device_tree::init(dtb) };
     }
 
     println!("initializing memory...");

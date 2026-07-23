@@ -1,3 +1,18 @@
+[alias]
+# `cargo krun` boots the kernel in QEMU; `cargo kbuild` just builds it.
+#
+# The explicit --target is REQUIRED, not cosmetic: the kernel sets a per-package
+# `forced-target`, which drives the *build* but NOT cargo's *runner* selection.
+# Without --target, `cargo run` builds the riscv ELF and then tries to exec it on
+# the host, dying with "cannot execute binary file". Passing --target makes cargo
+# resolve the [target.riscv64imac-unknown-none-elf].runner below.
+#
+# We deliberately do NOT set a global [build] target to achieve the same effect:
+# that would force `paging`'s host unit tests onto the riscv target too, breaking
+# `cargo test -p paging`.
+krun = "run -p kernel --target riscv64imac-unknown-none-elf"
+kbuild = "build -p kernel --target riscv64imac-unknown-none-elf"
+
 [target.riscv64imac-unknown-none-elf]
 # https://doc.rust-lang.org/nightly/rustc/platform-support.html
 # Target: RISC-V 64-bit, I+M+A+C extensions, bare metal, no OS

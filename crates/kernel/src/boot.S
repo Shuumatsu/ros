@@ -7,7 +7,13 @@
 _boot:
     # SATP should be zero, but let's make sure
     csrw    satp, zero
-    
+
+    # The previous stage (QEMU with -bios none, or an SBI firmware) passes the
+    # physical address of the device tree blob (DTB) in a1. We clobber a1 as a
+    # scratch register below (BSS zeroing, stack sizing), so stash it now in s1,
+    # which nothing touches until `call start`, and hand it to start() as arg0.
+    mv      s1, a1
+
     # ".option push" is used to save all existing settings for options 
     # so that you can change something temporarily.
     .option push
@@ -50,4 +56,6 @@ _boot:
     mul     a0, a0, a1
     add     sp, sp, a0
 
+    # start(dtb: usize) — pass the DTB pointer we preserved in s1 as arg0 (a0).
+    mv      a0, s1
     call start
