@@ -1,16 +1,11 @@
-os mem subsystem init
-1. os starting without pagetable
-2. load mem addrs from dtb
-2.5 create a physical memory allocator
-- can we just use rust global_alloc trait or something i forget the name? but would this continue working between switching page tables?
-3. init kernel page table
-  - direct mapping for texts, per cpu stack, global var
-  - setup mapping for mmio devices/interrupts
-  - setup mapping area for heap
-  - setup trampoline page for process
-  - setup kernel stack areas (or this is just dynamically allocated, so just use heap area?)
-  - ?else
-3. turn on paging
+0. Linker script: page-align sections, export _stext.._end
+1. Boot asm: set sp (per-hart stack), zero .bss, keep a0=hartid a1=dtb, call rust_main
+2. Init kernel heap (static .bss array + GlobalAlloc)   → now alloc/Vec works
+3. Parse DTB → RAM ranges, MMIO, reserved, hart count
+4. Init frame allocator over (kernel_end .. ram_end) minus reserved
+5. Build kernel page table: (A) kernel sections fine-grained, (B) linear map, MMIO
+6. Enable paging: write satp, sfence.vma  ← handle the transition here
+7. Later: per-process page tables, kernel stacks w/ guard pages, (trampoline only if xv6 model)
 
 
 # Virtual Memory (RISC-V Sv39, Linux model)

@@ -18,7 +18,7 @@ top — that is the RAM extent the device tree reports at runtime (see
 device_tree.rs). So instead of `>ram` with a bogus bound, we simply flow the
 sections from the location counter starting at this base. The kernel image is a
 few MiB; its usable top is enforced at runtime, not here. */
-_memory_start = 0x8000_0000;
+_memory_start = 0x80000000;
 
 /*
 PHDRS is short for "program headers", which we specify three here:
