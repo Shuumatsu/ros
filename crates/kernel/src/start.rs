@@ -69,6 +69,10 @@ unsafe extern "C" fn kmain() -> ! {
 
     println!("This is my operating system!");
 
+    // Prove we can turn on Sv39 and execute from the kernel's high-half alias,
+    // then fall back to bare addressing (plan B: verify the mechanism only).
+    unsafe { crate::memory::paging::verify_high_half() };
+
     // Launch a hardcoded user-space program to demonstrate U-mode ecall handling.
     let entry = &crate::user_program::USER_PROGRAM as *const _ as usize;
     let user_sp = USER_STACK.0.as_ptr_range().end as usize;

@@ -10,6 +10,13 @@ use crate::memory::layout::{
 
 pub use paging::sv39::{PAGE_SIZE, PhysicalAddr, PteFlags, Table, VirtualAddr};
 
+/// Base of the kernel's high-half alias: the bottom of the Sv39 high canonical
+/// half. A kernel virtual address equals its physical address plus
+/// [`KERNEL_VA_OFFSET`].
+pub const KERNEL_VA_BASE: usize = 0xffff_ffc0_0000_0000;
+/// High VA = physical address + this offset (`KERNEL_VA_BASE - DRAM_BASE`).
+pub const KERNEL_VA_OFFSET: usize = KERNEL_VA_BASE - crate::platform::DRAM_BASE;
+
 /// Sanity-check that `addr` identity-maps to itself in `table`.
 fn verify_id_map(table: &Table, addr: usize) {
     let expected = Some(PhysicalAddr::new(addr));
@@ -49,6 +56,23 @@ pub static ROOT_TABLE: Lazy<Mutex<Box<Table>>> = Lazy::new(|| {
         t.id_map_range(kernel_stack_start(), kernel_stack_end() + PAGE_SIZE, PteFlags::READ_WRITE);
         t.id_map_range(heap_start(), ram_end, PteFlags::READ_WRITE);
 
+        // High-half alias of the kernel image: the SAME physical frames are also
+        // reachable at KERNEL_VA_BASE+, so the PC can be moved into the high half
+        // once paging is on (see `verify_high_half`). Physical target of a high
+        // VA is `va - KERNEL_VA_OFFSET`.
+        let to_phys = |v: VirtualAddr| PhysicalAddr::new(v.bits().wrapping_sub(KERNEL_VA_OFFSET));
+        let hi = |lo: usize| lo.wrapping_add(KERNEL_VA_OFFSET);
+        t.map_range(hi(text_start()), hi(text_end()), to_phys, PteFlags::READ_EXECUTE);
+        t.map_range(hi(rodata_start()), hi(rodata_end()), to_phys, PteFlags::READ);
+        t.map_range(hi(data_start()), hi(data_end()), to_phys, PteFlags::READ_WRITE);
+        t.map_range(hi(bss_start()), hi(bss_end()), to_phys, PteFlags::READ_WRITE);
+        t.map_range(
+            hi(kernel_stack_start()),
+            hi(kernel_stack_end() + PAGE_SIZE),
+            to_phys,
+            PteFlags::READ_WRITE,
+        );
+
         // Spot-check one address in every region.
         for addr in [
             uart_base,
@@ -63,6 +87,13 @@ pub static ROOT_TABLE: Lazy<Mutex<Box<Table>>> = Lazy::new(|| {
         ] {
             verify_id_map(t, addr);
         }
+
+        // The high-half alias must resolve back to the physical frame it shadows.
+        assert_eq!(
+            t.translate(VirtualAddr::new(hi(text_start()))),
+            Some(PhysicalAddr::new(text_start())),
+            "high-half alias of text_start does not map to its physical frame"
+        );
     }
     Mutex::new(table)
 });
@@ -80,4 +111,49 @@ pub unsafe fn init() {
     // SAFETY: the caller guarantees the running kernel stays mapped across the switch.
     unsafe { satp::set(satp::Mode::Sv39, 0, root_pa.ppn()) };
     sfence_vma_all();
+}
+
+/// Transition smoke test (plan B): turn on Sv39 with the identity + high-half
+/// alias table, jump the PC into the high-half alias to prove the same code runs
+/// there, then turn paging back off.
+///
+/// It deliberately does NOT leave the higher-half kernel installed — that needs
+/// the kernel linked at high VAs — it only proves the alias-map + jump mechanism
+/// works. The identity map keeps the current (low-linked) PC, stack and data
+/// valid across the `satp` flip; PC-relative calls made from the high alias
+/// resolve to high aliases too, which are mapped, while device MMIO is reached
+/// through the identity map.
+///
+/// # Safety
+/// Must run in S-mode after the heap is up (`ROOT_TABLE` allocates its frames on
+/// the heap). Restores Bare mode before returning, so the rest of boot continues
+/// with physical addressing unchanged.
+pub unsafe fn verify_high_half() {
+    unsafe { init() };
+
+    let low_pc: usize;
+    unsafe { core::arch::asm!("auipc {}, 0", out(reg) low_pc) };
+    println!("[paging] Sv39 on; still at low VA {:#x} via identity map", low_pc);
+
+    // Jump into the high-half alias of `high_half_probe` and run it there.
+    let probe_hi = (high_half_probe as usize).wrapping_add(KERNEL_VA_OFFSET);
+    let probe: extern "C" fn() = unsafe { core::mem::transmute(probe_hi) };
+    probe();
+
+    // Restore bare (physical) addressing so the rest of boot — linked and
+    // running at low addresses — continues unchanged.
+    unsafe {
+        satp::set(satp::Mode::Bare, 0, 0);
+        sfence_vma_all();
+    }
+    println!("[paging] Sv39 off; back to bare physical addressing");
+}
+
+/// Runs from the kernel's high-half alias (see [`verify_high_half`]); prints its
+/// own PC, which must be `>= KERNEL_VA_BASE`.
+#[inline(never)]
+extern "C" fn high_half_probe() {
+    let pc: usize;
+    unsafe { core::arch::asm!("auipc {}, 0", out(reg) pc) };
+    println!("[paging] >>> executing at HIGH-HALF VA {:#x} <<<", pc);
 }
