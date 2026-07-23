@@ -9,15 +9,20 @@ stores the address of _start as the "entry point"
 ENTRY( _boot )
 
 MEMORY {
-    /* we have "ram" that contains a section that is 
-    'w' (writeable), 'x' (executable), and 'a' (allocatable). */
+    /* we have "ram" that contains a section that is
+    'w' (writeable), 'x' (executable), and 'a' (allocatable).
+
+    LENGTH is ONLY a link-time bound so the linker can flag section overflow.
+    It is NOT the runtime RAM size — that is discovered from the device tree
+    (/memory) at boot (see device_tree.rs). Keep it comfortably large. */
     ram  (wxa) : ORIGIN = 0x80000000, LENGTH = 128M
 }
 
-/* _memory_start will be set to 0x8000_0000 here. We use ORIGIN(ram) so that it will take
-whatever we set the origin of ram to.  */
+/* _memory_start = the address we are linked/loaded at. We use ORIGIN(ram) so it
+tracks whatever we set the origin of ram to. The RAM *top* deliberately has no
+linker symbol: sizing anything from LENGTH would re-introduce a hardcoded RAM
+size, which is exactly what the device tree replaces. */
 PROVIDE(_memory_start = ORIGIN(ram));
-PROVIDE(_memory_end = ORIGIN(ram) + LENGTH(ram));
 
 /*
 PHDRS is short for "program headers", which we specify three here:
@@ -152,9 +157,9 @@ SECTIONS {
     PROVIDE(_kernel_stack_end = .);
     
 
-    /* our heap starts right after the kernel stack */
-    /* we don't align here because we let the kernel determine how it wants to do this. */
+    /* our heap starts right after the kernel stack. Its END is not a linker
+    symbol: the heap runs up to the RAM top discovered from the device tree at
+    runtime (see memory::init), not to a compile-time LENGTH. */
     . = ALIGN(4096);
     PROVIDE(_heap_start = _kernel_stack_end + 4096);
-    PROVIDE(_heap_size = _memory_end - _heap_start);
 }

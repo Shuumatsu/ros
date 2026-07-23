@@ -6,10 +6,23 @@ use crossbeam_utils::CachePadded;
 use riscv::register::{mie, mscratch, mstatus, mtvec};
 
 use crate::arch::{NCPU, riscv64::hart_id};
-use crate::platform::{CLINT_MTIME, clint_mtimecmp};
+use crate::device_tree::clint_base;
+use crate::platform::{CLINT_MTIME_OFFSET, CLINT_MTIMECMP_OFFSET};
 use crate::trap::TrapFrame;
 
 pub const INTERVAL: u64 = 10_0000;
+
+/// Address of this hart's `mtimecmp` register (CLINT base from the device tree).
+#[inline]
+fn mtimecmp_addr(hart: usize) -> usize {
+    clint_base() + CLINT_MTIMECMP_OFFSET + 8 * hart
+}
+
+/// Address of the CLINT `mtime` register.
+#[inline]
+fn mtime_addr() -> usize {
+    clint_base() + CLINT_MTIME_OFFSET
+}
 
 // prepare information in scratch[] for timervec.
 // scratch[0]: address of CLINT MTIMECMP register.
@@ -62,15 +75,15 @@ pub unsafe fn init() {
 
     let scratch: *mut CachePadded<Scratch> = unsafe { addr_of_mut!(TIMER_SCRATCH[hart]) };
     unsafe {
-        (&mut *scratch).0 = clint_mtimecmp(hart) as u64;
+        (&mut *scratch).0 = mtimecmp_addr(hart) as u64;
         (&mut *scratch).1 = INTERVAL;
         mscratch::write(scratch as usize);
     }
 
     // RISC-V uses 2 memory-mapped registers mtime and mtimecmp to control timer interrupts.
     // ask the CLINT for a timer interrupt.
-    let mtimecmp = clint_mtimecmp(hart) as *mut u64;
-    let mtime = CLINT_MTIME as *const u64;
+    let mtimecmp = mtimecmp_addr(hart) as *mut u64;
+    let mtime = mtime_addr() as *const u64;
     unsafe { mtimecmp.write_volatile(mtime.read_volatile() + INTERVAL) };
 
     unsafe { mtvec::write(mtvec::Mtvec::new(timervec as *const () as usize, mtvec::TrapMode::Direct)) };

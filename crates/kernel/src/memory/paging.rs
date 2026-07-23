@@ -2,11 +2,11 @@ use alloc::boxed::Box;
 use riscv::{asm::sfence_vma_all, register::satp};
 use spin::{Lazy, Mutex};
 
+use crate::device_tree;
 use crate::memory::layout::{
     bss_end, bss_start, data_end, data_start, heap_start, kernel_stack_end, kernel_stack_start,
-    memory_end, rodata_end, rodata_start, text_end, text_start,
+    rodata_end, rodata_start, text_end, text_start,
 };
-use crate::platform::{CLINT_BASE, CLINT_SIZE, PLIC_BASE, PLIC_END, UART0_BASE};
 
 pub use paging::sv39::{PAGE_SIZE, PhysicalAddr, PteFlags, Table, VirtualAddr};
 
@@ -28,10 +28,13 @@ pub static ROOT_TABLE: Lazy<Mutex<Box<Table>>> = Lazy::new(|| {
     {
         let t = table.as_mut();
 
-        // Memory-mapped devices.
-        t.id_map_range(UART0_BASE, UART0_BASE + PAGE_SIZE, PteFlags::READ_WRITE);
-        t.id_map_range(CLINT_BASE, CLINT_BASE + CLINT_SIZE, PteFlags::READ_WRITE);
-        t.id_map_range(PLIC_BASE, PLIC_END, PteFlags::READ_WRITE);
+        // Memory-mapped devices, all discovered from the device tree.
+        let uart_base = device_tree::uart_base();
+        let clint_base = device_tree::clint_base();
+        let plic_base = device_tree::plic_base();
+        t.id_map_range(uart_base, uart_base + PAGE_SIZE, PteFlags::READ_WRITE);
+        t.id_map_range(clint_base, clint_base + device_tree::clint_size(), PteFlags::READ_WRITE);
+        t.id_map_range(plic_base, plic_base + device_tree::plic_size(), PteFlags::READ_WRITE);
 
         // Kernel image sections, each with its natural permissions.
         t.id_map_range(text_start(), text_end(), PteFlags::READ_EXECUTE);
@@ -39,15 +42,18 @@ pub static ROOT_TABLE: Lazy<Mutex<Box<Table>>> = Lazy::new(|| {
         t.id_map_range(data_start(), data_end(), PteFlags::READ_WRITE);
         t.id_map_range(bss_start(), bss_end(), PteFlags::READ_WRITE);
 
-        // Kernel stack (with a page of slack) and the heap.
+        // Kernel stack (with a page of slack) and the heap. The heap runs up to
+        // the RAM top the device tree reported, matching `memory::init`.
+        let ram_end = crate::device_tree::ram_end()
+            .expect("device tree RAM region not discovered before building the page table");
         t.id_map_range(kernel_stack_start(), kernel_stack_end() + PAGE_SIZE, PteFlags::READ_WRITE);
-        t.id_map_range(heap_start(), memory_end(), PteFlags::READ_WRITE);
+        t.id_map_range(heap_start(), ram_end, PteFlags::READ_WRITE);
 
         // Spot-check one address in every region.
         for addr in [
-            UART0_BASE,
-            CLINT_BASE,
-            PLIC_BASE,
+            uart_base,
+            clint_base,
+            plic_base,
             text_start(),
             rodata_start(),
             data_start(),

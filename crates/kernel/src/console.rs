@@ -3,10 +3,11 @@ use spin::{Lazy, Mutex};
 use uart_16550::MmioSerialPort;
 
 use crate::arch::riscv64::hart_id;
-use crate::platform::UART0_BASE;
 
 pub static UART: Lazy<Mutex<MmioSerialPort>> = Lazy::new(|| {
-    let mut serial = unsafe { MmioSerialPort::new(UART0_BASE) };
+    // Base comes from the device tree (`device_tree::discover` runs before the
+    // first print); the earlycon default only applies before discovery.
+    let mut serial = unsafe { MmioSerialPort::new(crate::device_tree::uart_base()) };
     serial.init();
     Mutex::new(serial)
 });
@@ -16,8 +17,9 @@ struct KernelStdout;
 
 impl fmt::Write for KernelStdout {
     fn write_str(&mut self, s: &str) -> fmt::Result {
+        let uart = crate::device_tree::uart_base() as *mut u8;
         for c in s.bytes() {
-            unsafe { (UART0_BASE as *mut u8).write_volatile(c) };
+            unsafe { uart.write_volatile(c) };
         }
         Ok(())
     }

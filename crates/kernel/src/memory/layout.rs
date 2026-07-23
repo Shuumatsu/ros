@@ -29,6 +29,4 @@ linker_symbol!(
     kernel_stack_start => _kernel_stack_start,
     kernel_stack_end   => _kernel_stack_end,
     heap_start         => _heap_start,
-    heap_size          => _heap_size,
-    memory_end         => _memory_end,
 );
