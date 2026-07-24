@@ -1,5 +1,3 @@
-use core::arch::asm;
-
 use riscv::interrupt::supervisor::Interrupt;
 use riscv::register::{sie, sstatus};
 
@@ -10,20 +8,16 @@ mod plic;
 
 pub unsafe fn init() {
     unsafe {
-        println!("delegate all interrupts to supervisor mode");
-        asm!("li t0, 0xffff");
-        asm!("csrw mideleg, t0");
-
-        sie::set_sext();
+        // Delegation (`mideleg`) is the SBI firmware's job in M-mode. Bring up
+        // the supervisor timer: arm the first tick via SBI, enable the S-timer
+        // source, then unmask supervisor interrupts globally. Now that the
+        // handler re-arms `set_timer` (which clears the pending bit), the Sstc
+        // "always pending at stimecmp=0" trap that bit us in Phase 0 is gone.
+        clint::timer::init();
         sie::set_stimer();
-        sie::set_ssoft();
+        sstatus::set_sie();
 
-        // TODO: re-enable once we need timer/external interrupts
-        // clint::init();
-        // plic::init();
-
-        // println!("enable supervisor interrupts");
-        // sstatus::set_sie();
+        // TODO: plic::init() + sie::set_sext() for external interrupts.
     }
 }
 

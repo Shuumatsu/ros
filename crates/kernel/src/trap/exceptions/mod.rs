@@ -1,5 +1,3 @@
-use core::arch::asm;
-
 use riscv::interrupt::supervisor::Exception;
 
 use crate::trap::TrapFrame;
@@ -7,13 +5,10 @@ use crate::trap::TrapFrame;
 mod breakpoint;
 mod ecall;
 
-pub unsafe fn init() {
-    unsafe {
-        println!("delegate all exceptions to supervisor mode");
-        asm!("li t0, 0xffff");
-        asm!("csrw medeleg, t0");
-    }
-}
+/// Exception setup. Delegation (`medeleg`) is done by the SBI firmware in
+/// M-mode, so in S-mode there is nothing to configure here — the trap vector is
+/// installed by `trap::init`.
+pub unsafe fn init() {}
 
 pub fn handler(e: Exception, tf: &mut TrapFrame) {
     match e {

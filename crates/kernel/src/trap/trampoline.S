@@ -29,8 +29,10 @@
         csrr sp, sscratch
     
     save_registers:
-        # 为 TrapFrame 预留空间
-        addi sp, sp, -32 * XLENB
+        # 为 TrapFrame 预留空间。TrapFrame 有 33 个字段（x0-x31 + sepc = 264 B），
+        # 必须预留至少 33 个槽；取 34 槽（272 B）以保持 sp 16 字节对齐。
+        # 早前只留 32 槽会让 sepc（槽 32）写到帧外、破坏被中断上下文的栈。
+        addi sp, sp, -34 * XLENB
 
         # save general registers except sp(x2)
         # 因为现在的 sp 指向中断处理时需要用到的 sp 而不是中断来源处的 sp
@@ -86,8 +88,9 @@
         andi s2, s0, 1 << 8     # sstatus.SPP = 1?
         bnez s2, restore_registers     # s0 = back to kernel?
     back_to_user:
-        # 如果是回到用户态，根据规定需要还原当前 sp 到 sscratch
-        addi s0, sp, 32*XLENB
+        # 如果是回到用户态，根据规定需要还原当前 sp 到 sscratch。
+        # 偏移必须与 STORE_ALL 的帧大小一致（34 槽）。
+        addi s0, sp, 34*XLENB
         csrw sscratch, s0         # sscratch = kernel-sp
     restore_registers:
         # 和保存时相反的顺序，避免覆盖，这里我们先还原 sepc，因为这需要用到通用寄存器

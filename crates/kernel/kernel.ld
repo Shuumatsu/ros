@@ -6,19 +6,31 @@ OUTPUT_ARCH( "riscv" )
 stores the address of _start as the "entry point"
 (or where CPU instructions should start executing.
 */
-ENTRY( _boot )
+ENTRY( _start )
 
-/* The kernel is linked to run from the base of RAM. This base is the one
-unavoidable compile-time hardware fact for a fixed-address (non-relocatable)
-kernel: it is *where we are loaded*, not how much RAM exists.
+/* Higher-half kernel: linked to *run* at high virtual addresses, but *loaded*
+at physical 0x8020_0000 (RAM base + text_offset; the SBI firmware occupies the
+first 2 MiB). So VMA (where symbols resolve) and LMA (where bytes are loaded)
+differ by a fixed offset: VA = PA + _va_offset. Each section sets its LMA with
+AT(ADDR(.x) - _va_offset) below; boot.S maps VA->PA and jumps high before Rust
+runs.
 
-There is deliberately NO MEMORY region and NO length/size here. A region would
-force a LENGTH, and any length is a fiction: the linker cannot know the real RAM
-top — that is the RAM extent the device tree reports at runtime (see
-device_tree.rs). So instead of `>ram` with a bogus bound, we simply flow the
-sections from the location counter starting at this base. The kernel image is a
-few MiB; its usable top is enforced at runtime, not here. */
-_memory_start = 0x80000000;
+Still NO MEMORY region / LENGTH: the RAM top is a runtime fact from the device
+tree, not a compile-time constant (see device_tree.rs). */
+/* SINGLE SOURCE OF TRUTH for the kernel's memory layout. Three genuine inputs;
+   everything else is derived, so there are no composite magic numbers to keep in
+   sync. `_va_offset` is used only here, for the sections' LMA (`AT(...)`); the
+   *runtime* VA<->PA offset is measured by boot.S (linked VMA - real PMA) and is
+   not hardcoded in Rust or asm. `_text_offset` is consumed by the Image header
+   in boot.S. (`_dram_base` mirrors platform::DRAM_BASE in Rust — the one value
+   the linker and Rust cannot share without build-time codegen.) */
+_dram_base      = 0x80000000;               /* RAM base */
+_kernel_va_base = 0xffffffc000000000;       /* bottom of the Sv39 high half */
+_text_offset    = 0x200000;                 /* SBI reserves the first 2 MiB */
+
+_phys_base    = _dram_base + _text_offset;      /* 0x80200000: where we load */
+_va_offset    = _kernel_va_base - _dram_base;   /* 0xffffffbf80000000 */
+_memory_start = _phys_base + _va_offset;        /* 0xffffffc000200000: virtual base */
 
 /*
 PHDRS is short for "program headers", which we specify three here:
@@ -44,10 +56,11 @@ in C++ and Rust,
     - global uninitialized variables go into bss.
 */
 SECTIONS {
-    /* Flow everything from the load base; VMA == LMA (identity loaded). */
+    /* VMA starts at the high virtual base; each section's LMA is AT(VMA - offset)
+       = its physical load address. */
     . = _memory_start;
 
-    .text : {
+    .text : AT(ADDR(.text) - _va_offset) {
         PROVIDE(_text_start = .);
         /*
         We are going to layout all text sections here, starting with 
@@ -75,12 +88,9 @@ SECTIONS {
         *(.text.init) *(.text .text.*)
 
         PROVIDE(_text_end = .);
-    /* No MEMORY region: sections flow from the location counter, so VMA == LMA
-       (each section is loaded at its physical address). ":text" assigns this
-       section to the text program header declared in PHDRS. */
     } :text
 
-    .rodata : {
+    .rodata : AT(ADDR(.rodata) - _va_offset) {
         . = ALIGN(4096);
         PROVIDE(_global_pointer = .);
         PROVIDE(_rodata_start = .);
@@ -99,7 +109,7 @@ SECTIONS {
         PROVIDE(_rodata_end = .);
     } :text
 
-    .data : {
+    .data : AT(ADDR(.data) - _va_offset) {
         . = ALIGN(4096);
         PROVIDE(_data_start = .);
 
@@ -113,7 +123,7 @@ SECTIONS {
         PROVIDE(_data_end = .);
     } :data
 
-    .bss : {
+    .bss : AT(ADDR(.bss) - _va_offset) {
         . = ALIGN(4096);
         PROVIDE(_bss_start = .);
 
@@ -146,3 +156,9 @@ SECTIONS {
     . = ALIGN(4096);
     PROVIDE(_heap_start = _kernel_stack_end + 4096);
 }
+
+/* Effective image size for the RISC-V Image header: everything the loader must
+   reserve for the kernel — loaded image + BSS + kernel stack. This is an
+   absolute symbol (a constant difference), so `.8byte _image_size` in boot.S
+   emits its value, not an address. */
+_image_size = _kernel_stack_end - _memory_start;

@@ -1,22 +1,24 @@
 use core::arch::asm;
 
-use riscv::register::*;
-
-use crate::arch::riscv64 as arch;
 use crate::cpu;
 use crate::memory;
 use crate::trap;
 
 // static mut KERNEL_STARTED: bool = false;
 
+/// Kernel entry, called from `boot.S`. Entered in **S-mode** by the SBI firmware
+/// (OpenSBI): `a0 = hartid`, `a1 = dtb`. All M-mode setup (PMP, trap delegation,
+/// timer) was done by the SBI, so there is no `mret` here — we are already in
+/// supervisor mode.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn start(dtb: usize) {
-    let hart = arch::hart_id();
-    if hart == 0 {
-        // Parse the DTB the previous stage handed us in a1: it populates the
-        // device table (the console learns the UART base from here). Zero-
-        // allocation, so it is safe to run before the heap exists. Printing is
-        // a separate concern — `summary` dumps the resolved map afterwards.
+unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
+    // Record the VA↔PA offset boot.S measured, before anything translates.
+    memory::set_va_offset(va_offset);
+
+    if hartid == 0 {
+        // Parse the DTB the SBI handed us in a1: it populates the device table
+        // (the console learns the UART base from here). Zero-allocation, so it
+        // is safe to run before the heap exists.
         unsafe { crate::device_tree::init(dtb) };
         crate::device_tree::summary();
         cpu::print_info();
@@ -30,62 +32,25 @@ unsafe extern "C" fn start(dtb: usize) {
     unsafe { trap::init() };
     println!("initializing traps completed");
 
-    println!("setting csrs for switching to supervisor mode...");
-    // next mode is supervisor mode
-    unsafe { mstatus::set_mpp(mstatus::MPP::Supervisor) };
-
-    // mret jump to kmain or kmain_ap
-    let main = if arch::hart_id() == 0 { kmain } else { kmain_ap };
-    println!("setting mepc to main at {:#x}...", main as usize);
-    unsafe { mepc::write(main as usize) };
-
-    // Configure PMP to allow S-mode access to all physical memory.
-    // Without PMP entries, S-mode has no memory access on RISC-V.
-    // NAPOT mode with all address bits set = match entire address space.
-    // pmpcfg0[7:0] = 0x1f: R=1, W=1, X=1, A=NAPOT(11), L=0
-    unsafe {
-        asm!(
-            "li {tmp}, 0x3fffffffffffff",
-            "csrw pmpaddr0, {tmp}",
-            "li {tmp}, 0x1f",
-            "csrw pmpcfg0, {tmp}",
-            tmp = out(reg) _,
-        );
+    // Already in S-mode — go straight into the kernel.
+    if hartid == 0 {
+        unsafe { kmain() }
+    } else {
+        unsafe { kmain_ap() }
     }
-
-    println!("switching to supervisor mode...");
-    unsafe { asm!("mret") };
-
-    unreachable!();
 }
-
-#[repr(align(4096))]
-struct UserStack([u8; 4096]);
-static USER_STACK: UserStack = UserStack([0u8; 4096]);
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
     kprintln!("enter kmain");
 
     println!("This is my operating system!");
+    println!("[kmain] higher-half kernel is live at high VAs — parking.");
 
-    // Prove we can turn on Sv39 and execute from the kernel's high-half alias,
-    // then fall back to bare addressing (plan B: verify the mechanism only).
-    unsafe { crate::memory::paging::verify_high_half() };
-
-    // Launch a hardcoded user-space program to demonstrate U-mode ecall handling.
-    let entry = &crate::user_program::USER_PROGRAM as *const _ as usize;
-    let user_sp = USER_STACK.0.as_ptr_range().end as usize;
-    println!("jumping to user program at {:#x}, user sp = {:#x}", entry, user_sp);
-    unsafe { trap::run_user_program(entry, user_sp) };
-
-    let mut i = 0;
-    while i < 10 {
-        unsafe { trap::run_user_program(entry, user_sp) };
-        i += 1;
-    }
-
-    unreachable!();
+    // Nothing to run yet. The next milestone is user-process support (per-process
+    // page tables + U=1 user pages + a real syscall path), which will replace the
+    // old in-place ecall demo. Park until then; the timer keeps ticking.
+    crate::arch::riscv64::wait_forever()
 }
 
 #[unsafe(no_mangle)]

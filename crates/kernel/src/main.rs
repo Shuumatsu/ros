@@ -2,7 +2,6 @@
 #![no_main]
 #![feature(lang_items)]
 #![feature(alloc_error_handler)]
-#![feature(naked_functions)]
 
 extern crate alloc;
 
@@ -25,7 +24,6 @@ mod proc;
 mod sbi;
 mod start;
 mod trap;
-mod user_program;
 mod utils;
 
 global_asm!(include_str!("boot.S"));
