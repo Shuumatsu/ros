@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/paging", "crates/kernel"]
+members = ["crates/paging", "crates/kernel", "crates/blockdev", "crates/rfs", "crates/mkfs"]
 resolver = "3"
 
 [profile.dev]

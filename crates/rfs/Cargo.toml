@@ -1,0 +1,13 @@
+[package]
+name = "rfs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blockdev = { path = "../blockdev" }
+bytemuck = { version = "1", features = ["derive"], default-features = false }
+spin = "0.10.0"
+static_assertions = "1.1.0"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
