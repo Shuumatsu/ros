@@ -5,6 +5,7 @@ use paging::sv39::PAGE_SIZE;
 
 pub mod direct_map;
 pub mod frame;
+pub mod kernel_table;
 pub mod layout;
 
 /// ORDER determines max allocation size: 2^(ORDER-1) bytes

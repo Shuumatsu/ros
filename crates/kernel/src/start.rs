@@ -31,6 +31,9 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
 
     println!("initializing memory...");
     memory::init();
+    // Replace boot.S's blanket-RWX gigapage table with a real one: per-section
+    // rights and W^X. Must follow memory::init — it allocates frames.
+    memory::kernel_table::init();
     println!("initializing memory completed");
 
     println!("initializing traps...");

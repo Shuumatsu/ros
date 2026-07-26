@@ -217,14 +217,83 @@ lists here)… `frame`'s `BTreeSet`s included." That was the dead
 `init()` doc 30 lines below it. Commit `a7c9cd9` fixed the code and left the
 comment lying.
 
+### E. Stage 3 — the kernel's own page table, with W^X
+
+The kernel no longer runs on the boot table. `memory/kernel_table.rs` builds a
+real one and switches `satp` to it during `memory::init`.
+
+| Region | rights | granularity |
+|---|---|---|
+| `.text` | **r-x** | 4 KiB |
+| `.rodata` | **r--** | 4 KiB |
+| `.data` / `.bss` / kernel stack / frame-pool head | rw- | 4 KiB |
+| bulk direct map | rw- | **2 MiB** |
+| MMIO (low 1 GiB) | rw- | 1 GiB |
+
+Before this, *every* mapping was a 1 GiB `RWX` gigapage: `.text` was writable and
+`.rodata` executable. Paging was on and buying nothing.
+
+**Enabling change in `frame-allocator` (commit `9bcdb1f`).** `deallocate_at(start,
+order)` — freeing by address, for a caller whose only surviving handle is a PTE.
+Built on a private `block_at` that reconstructs the node index as the exact
+inverse of `allocate`'s position arithmetic, then hands the rebuilt token to
+`deallocate`, so coalescing and the accounting guard stay in one place. What it
+can and cannot catch is the interesting part:
+
+- double free → `AlreadyFree` (the ancestor scan finds whatever swallowed the
+  block when it coalesced)
+- unmanaged frame, order beyond its root → `ForeignBlock`, the latter checked
+  *before* any `1 << order` so an absurd order cannot overflow the shift
+- start that cannot begin that order → new `UnalignedFrame`
+- **order not matching the original allocation → undetectable.** The bitmap
+  records the extent of *free* blocks, never allocated ones. This is why the
+  function is `unsafe` and why the token-based `deallocate` remains the default.
+
+**Design points worth keeping:**
+
+- **One layout, consumed twice.** `regions()` computes the layout once; it is
+  iterated to *install* and again to *verify*. A separate list of expectations
+  would be a second encoding free to drift, and the drift wouldn't surface until
+  something faulted.
+- **Verification precedes the switch, and covers every page** — not a sample.
+  `Mapper::entry_of` (added for this: `translate` discards the flags) checks
+  level, flags and target frame for all ~570 pages, plus the stack/heap guard is
+  still a hole, plus the **running PC and SP** read out of the live machine with
+  `auipc`/`mv`. Mis-mapping `.text` faults on the instruction *after* `csrw satp`
+  with the old table gone — unrecoverable and nearly undiagnosable.
+- **The kernel image's superpage slot is mapped at 4 KiB, everything above it at
+  2 MiB.** The image lives *inside* the direct map, so a gigapage over it would
+  make per-section rights impossible (`Mapper` would return `SuperpageInPath`).
+- **OpenSBI's RAM is deliberately not mapped.** Its PMP dump says
+  `0x80000000-0x8004ffff … S/U: ()` — no S-mode access at all. The direct map
+  starts at the kernel image, not at `ram_base`.
+- `A` is pre-set everywhere so the walker never writes back into a table; `D`
+  only where writable, since it means "has been written".
+- `GLOBAL` deliberately omitted — a TLB optimisation whose correctness depends on
+  address spaces that don't exist yet.
+- Interrupts are masked across `csrw satp; sfence.vma` so no trap observes a
+  half-switched translation. (Timer interrupts *are* live by then.)
+
+**W^X was verified empirically, not assumed.** A temporary probe writing to
+`_text_start` after the switch produced `scause 15` / `StorePageFault`, and the
+"probe failed" line never printed. Under the boot table that write would have
+silently succeeded. Probe reverted and the binary re-verified.
+
+Two guard pages fall out of the layout for free, because the region list simply
+doesn't cover them: the `.rodata`/`.data` alignment slack, and the page the
+linker reserves between the kernel stack and the heap
+(`_heap_start = _kernel_stack_end + 4096`). Only the latter is asserted — it is a
+deliberate linker decision, whereas the former is incidental and would be a
+fragile thing to pin.
+
 ---
 
 ## 3. Verified state
 
 ```
-cargo test -p paging --features std     # 39 passed  (NOTE: --features std is required;
+cargo test -p paging --features std     # 40 passed  (NOTE: --features std is required;
                                         #  without it the crate is no_std → 0 tests run)
-cargo test -p frame-allocator           # 13 passed
+cargo test -p frame-allocator           # 20 passed
 cargo build -p paging                   # no_std, host        ) both, to keep the
 cargo build -p paging --target riscv64imac-unknown-none-elf   ) crate honest
 cargo kbuild                            # builds; 34 warnings, all pre-existing
@@ -237,13 +306,28 @@ PA `0x80800000` + `VA_OFFSET`, i.e. the linear map, where it used to be
 `0xffffffc0_00800000`.
 
 ```
-[hart 0] initializing memory...
-[hart 0] [memory] direct map: PA 0x0..0x100000000 -> VA 0xffffffc000000000.. (4 GiB)
-[hart 0] [memory] frames: 0x80325000..0x88000000 (124 MiB, physical)
-[hart 0] [memory] frame allocator self-test passed
-[hart 0] [memory] heap:   0xffffffc080800000..0xffffffc081000000 (8 MiB, virtual)
-[hart 0] enter kmain
+[memory] direct map: PA 0x0..0x100000000 -> VA 0xffffffc000000000.. (4 GiB)
+[memory] frames: 0x80329000..0x88000000 (124 MiB, physical)
+[memory] frame allocator self-test passed
+[memory] heap:   0xffffffc080800000..0xffffffc081000000 (8 MiB, virtual)
+[memory] kernel page table root at 0x8032b000:
+[memory]   mmio                       0xffffffc000000000 -> 0x0000000000  rw-     1 x 1GiB
+[memory]   mmio (identity, temporary) 0x0000000000000000 -> 0x0000000000  rw-     1 x 1GiB
+[memory]   text                       0xffffffc080200000 -> 0x0080200000  r-x    23 x 4KiB
+[memory]   rodata                     0xffffffc080217000 -> 0x0080217000  r--    13 x 4KiB
+[memory]   data                       0xffffffc080224000 -> 0x0080224000  rw-     2 x 4KiB
+[memory]   bss                        0xffffffc080226000 -> 0x0080226000  rw-     2 x 4KiB
+[memory]   kernel stack               0xffffffc080228000 -> 0x0080228000  rw-   256 x 4KiB
+[memory]   frame pool head            0xffffffc080329000 -> 0x0080329000  rw-   215 x 4KiB
+[memory]   direct map                 0xffffffc080400000 -> 0x0080400000  rw-    62 x 2MiB
+[memory] kernel page table live (satp 0x800000000008032b); boot table retired
+enter kmain
+[timer] tick 1
 ```
+
+The `direct map tail` region is absent because this platform's RAM top is already
+superpage-aligned, so it is empty and skipped. `tick 1` is the proof traps still
+work *after* the switch.
 
 ELF facts verified by inspection after the relink (`llvm-readelf`, `llvm-nm`,
 and a byte-level dump of the table out of the image):
@@ -284,93 +368,108 @@ Environment facts established by inspection:
 
 ---
 
-## 4. OPEN — Stage 3: a real kernel page table, and a `Mapper` adopter
+## 4. OPEN — Stage 4: drop the identity map, reserve the DTB, then user processes
 
-Stage 2 removed the split-brain and gave the kernel a correct, uniform direct
-map. What it did **not** do is refine the mapping: the kernel still runs on the
-boot table, where everything is a 1 GiB `RWX` gigapage.
+Stage 3 gave the kernel real protection. Three things are queued behind it, in
+increasing size.
 
-### 4.1 The remaining Stage-2 item, deliberately deferred
+### 4.1 Drop the last identity mapping (small, well-scoped)
 
-The previous handoff listed **"a kernel `FrameSource` impl wrapping
-`frame::alloc()`"** as needed in Stage 2. It was skipped on purpose, and the
-reason should not be forgotten:
+The kernel table still identity-maps the low gigabyte, purely so `console.rs` can
+keep handing the raw device-tree UART base to `MmioSerialPort`. Everything needed
+to remove it is already in place — `phys_to_virt` is valid for MMIO under the
+linear map, and the same gigabyte is already mapped there.
 
-`FrameSource` has two methods. `alloc_zeroed` is a one-liner over
-`frame::alloc()`. `free(frame: PhysicalAddr)` **cannot be implemented at all**
-today — `frame::free` consumes a move-only `Frames` token and `frame-allocator`
-has no free-by-address (§5 debt #3). So the impl would ship with a panicking
-hole, and nothing in the kernel constructs a `Mapper` to call it.
+Two call sites:
 
-Writing it now buys a dead API with a landmine in it. It lands in Stage 3
-together with `deallocate_at` on the crate and its first real caller.
+1. `console.rs:17` — `MmioSerialPort::new(base)` → `new(phys_to_virt(base))`. Note
+   the port is **cached** in a `static`, so the raw pointer would survive the
+   change if missed.
+2. `plic.rs` — seven `(plic_base() + OFFSET) as *mut u32`. Currently dead code
+   (`plic::init()` is a TODO and the offsets are unused-const warnings), but it
+   must be converted at the same time or it will be wrong the day it wakes up.
 
-### 4.2 What Stage 3 actually needs
+Then delete the `"mmio (identity, temporary)"` region. **Safety net:** the panic
+path writes via the SBI console, which needs no address, so even a total MMIO-UART
+failure still prints.
 
-1. **`deallocate_at(frame, order)` on `frame-allocator`.** Needed to free a page
-   whose only remaining handle is its PTE. Note a buddy bitmap *can* recover the
-   order by scanning up from 0, but for page-table frames the order is always 0,
-   so the narrow version is enough to start.
-2. **A kernel `FrameSource`** over `frame::alloc()` / `deallocate_at`, plus a
-   `PhysAccess` — which is now trivially `LinearOffset(direct_map::VA_OFFSET)`,
-   exactly the impl `paging` already ships. (Note Stage 1 built `LinearOffset`
-   for a skewed offset that could not have worked for MMIO; Stage 2's linear map
-   is what makes it correct.)
-3. **Build the refined kernel table** with `Mapper`: `.text` R+X, `.rodata` R,
-   `.data`/`.bss`/stack R+W, the direct map R+W (no X), and 4 KiB or 2 MiB leaves
-   instead of one blanket gigapage. All the linker symbols are already exposed by
-   `memory/layout.rs`.
-4. **Switch `satp`** to it — `Satp::sv39` exists now, so this is a `csrw` from
-   Rust plus an `sfence.vma`, no asm.
-5. **Then drop the identity map.** This is the payoff Stage 2 unlocked: with a
-   linear map, `phys_to_virt` is valid for MMIO, so nothing needs raw physical
-   addresses as pointers any more. Today `console.rs` still uses the device-tree
-   UART base directly, which only works because of the identity half — that is
-   the one call site to convert first.
+### 4.2 Reserve the device-tree blob (now confirmed live, not theoretical)
 
-Sequencing note: 3 and 4 must be one atomic step. Installing a table that
-mis-maps `.text` faults on the instruction after `csrw satp`, so the refined
-table wants a `translate()` self-check over each section *before* it goes live —
-`Mapper` already has `translate`.
+§5 debt #1 used to be speculative. It is not: the boot log shows the DTB at
+**`0x87e00000`**, which is inside the frame allocator's managed range
+(`0x80329000..0x88000000`). The allocator can hand out the blob's frames today.
+
+It is harmless *only* because `dtb_addr()` has no callers and nothing re-reads the
+raw blob after `device_tree::init`. Verified by grep, not assumed. Anything that
+starts re-reading it — a second FDT pass, handing the DTB to a userspace init —
+breaks first and silently.
+
+Fix: reserve `[dtb, dtb + totalsize)` in `frame::init`. Note the frame allocator
+has no "reserve a sub-range" operation yet; the cheap version is to allocate over
+it at init and never free, the honest version is a reservation list.
+
+### 4.3 User processes (the real next milestone)
+
+- `proc/mod.rs` is still 100% commented out against the old heap-allocated `Table`
+  API. Rewrite against `Mapper` — `TableFrames` and
+  `LinearOffset(direct_map::VA_OFFSET)` are exactly the policies it needs, and are
+  now proven in the kernel table.
+- Per-process root tables, `U=1` user pages, a real syscall path.
+- Teardown needs `Mapper::free_subtables` (exists) plus `frame::free_at` for the
+  leaf pages (exists now, via `deallocate_at`). The pieces are in place.
+- A VMA / address-space manager still has **no owner** (see §1) — that is what
+  decides *legal or not* on a fault before anything allocates.
+
+Sequencing note: user paging is the first thing that will exercise
+`FrameSource::free`, which Stage 3 wired up but nothing calls yet.
 
 
 ## 5. Known debt (flagged, not silently ignored)
 
-1. **DTB not reserved.** `frame::init`'s managed range can still span the
-   device-tree blob. Pre-existing (the old buddy allocator had the same gap);
-   there is a `TODO` in `frame::init`. Harmless today because nothing re-reads the
-   raw DTB after `device_tree::init`, but it must be reserved before that changes.
+1. **DTB not reserved — CONFIRMED LIVE.** The blob sits at `0x87e00000`, *inside*
+   `frame::init`'s managed range `0x80329000..0x88000000`, so the allocator can
+   hand out its frames. Harmless only because `dtb_addr()` has no callers
+   (grep-verified) and nothing re-reads the raw blob after `device_tree::init`.
+   `TODO` in `frame::init`. See §4.2.
 2. **RAM above the direct-map window is dropped.** Warned loudly, never silently
-   truncated. The bound is now one constant — `direct_map::WINDOW_GIGAPAGES` — so
+   truncated. The bound is one constant — `direct_map::WINDOW_GIGAPAGES` — so
    lifting it is a one-line change plus a re-check that the table still fits (it
-   does: 512 root entries, 8 in use).
-3. **No free-by-PFN.** `frame-allocator` frees via a move-only `FrameBlock` token.
-   Reclaiming a mapped page from just its PTE will need a
-   `deallocate_at(frame, order)` method on the crate. Today's only consumers
-   (permanent heap + self-test) don't need it; **it is now the blocker for the
-   kernel `FrameSource` impl** — see §4.1.
+   does: 512 root entries, 8 in use). `frame::init` also asserts the case the
+   absolute window genuinely cannot serve, rather than failing later with a
+   confusing "range empty after alignment".
+3. ~~No free-by-PFN.~~ **Done** — `deallocate_at` (§2.E). One residual sharp edge:
+   the *order* passed to it cannot be validated, so it is `unsafe` and the
+   token-based `deallocate` stays the default. `frame::free_at` hardcodes order 0,
+   which is correct for every caller it documents accepting.
 4. **`proc/mod.rs` is entirely commented out** and references the old
    heap-allocated `Table` API. It must be rewritten against `Mapper` when process
-   support lands.
-5. **`Mapper` still has no kernel adopter.** Stage 1 built the API; Stage 2 needed
-   only `Table::map_gigapage`, which is deliberately *below* `Mapper`. First
-   adopter is Stage 3 (§4.2).
-6. **The kernel still runs on the boot table** — everything is a 1 GiB `RWX`
-   gigapage, so `.text` is writable and `.rodata` is executable. No W^X, no
-   guard pages. This is the headline reason Stage 3 exists.
-7. **The identity map is still installed and still needed**, because `console.rs`
-   uses the raw device-tree UART base as a pointer. Stage 2 made it *possible* to
-   drop (`phys_to_virt` is valid for MMIO now); actually dropping it is Stage 3.5.
-8. **~34 pre-existing dead-code warnings** in `plic`/`utils`/`trap`/`proc`.
-   Untouched, unrelated — the count did not move across Stage 2.
+   support lands (§4.3).
+5. ~~`Mapper` has no kernel adopter.~~ **Done** — `memory/kernel_table.rs` (§2.E).
+6. ~~The kernel runs on the boot table.~~ **Done** — W^X kernel table, verified by
+   a `StorePageFault` probe against `.text` (§2.E).
+7. **One identity mapping survives**, for MMIO only, because `console.rs` caches an
+   `MmioSerialPort` built from the raw device-tree base. Narrowed from the boot
+   table's low 4 GiB `RWX` to a single `rw-` gigabyte. Removing it is §4.1.
+8. **`FrameSource::free` has no caller yet.** Stage 3 wired it up and it is
+   correct, but the kernel table is permanent, so nothing ever tears down a tree.
+   User paging (§4.3) is what will first exercise it.
+9. **Single-hart only.** `memory::init` and `kernel_table::init` are called by
+   every hart that reaches `start`, which is fine at `-smp 1` and wrong beyond it:
+   secondary harts must *install* the kernel table, not rebuild it. Pre-existing
+   for `memory::init`; `kernel_table` inherits the same assumption and says so.
+10. **No `GLOBAL` bit on kernel mappings** — a TLB optimisation deliberately
+    deferred to when address spaces exist.
+11. **~34 pre-existing dead-code warnings** in `plic`/`utils`/`trap`/`proc`.
+    Untouched, unrelated — the count did not move across Stages 2 or 3.
+
 
 ---
 
 ## 6. Commands
 
 ```bash
-cargo test -p paging --features std   # 39 — the --features std is NOT optional
-cargo test -p frame-allocator         # 13
+cargo test -p paging --features std   # 40 — the --features std is NOT optional
+cargo test -p frame-allocator         # 20
 cargo kbuild                          # build kernel (riscv64imac-unknown-none-elf)
 cargo krun                            # boot under QEMU + OpenSBI (Ctrl-A X to exit)
 
@@ -392,7 +491,21 @@ llvm-objdump -d --start-address=0xffffffc080200040 \
              --stop-address=0xffffffc080200088 "$ELF"               # pre-paging path
 ```
 
+Probing whether a protection actually holds — the boot log stating `r-x` is not
+proof the hardware agrees. Inject a temporary write into `kmain`, expect
+`scause 15` / `StorePageFault`, then revert and re-check the disassembly:
+
+```rust
+// TEMP: writing to .text must fault once the kernel table is live.
+unsafe { core::ptr::write_volatile(crate::memory::layout::text_start() as *mut u8, 0u8) };
+kprintln!("PROBE FAILED: the write to .text succeeded");
+```
+
+Same trick verifies the `direct_map::verify` guard: add `addi a2, a2, 8` after
+`boot.S`'s `sub a2, t1, t0` to corrupt the measurement without touching the
+mapping. Always confirm the revert by disassembly, not by reading the source.
+
 Relevant files: `crates/kernel/src/boot.S`, `crates/kernel/kernel.ld`,
-`crates/kernel/src/memory/{mod,direct_map,frame,layout}.rs`,
+`crates/kernel/src/memory/{mod,direct_map,kernel_table,frame,layout}.rs`,
 `crates/paging/src/satp.rs`, `crates/paging/src/sv39/*`,
 `crates/frame-allocator/src/*`.

@@ -174,11 +174,17 @@ impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
         Ok(())
     }
 
-    /// Translate a virtual address, honouring leaf mappings at any level.
+    /// Find the leaf entry that maps `vaddr`, with the level it was found at.
     ///
-    /// Returns `None` if the walk hits an invalid entry, or a branch where a
-    /// leaf must be.
-    pub fn translate(&self, vaddr: VirtualAddr) -> Option<PhysicalAddr> {
+    /// Returns `None` if the walk hits an invalid entry, or a branch where a leaf
+    /// must be.
+    ///
+    /// Exposed so a caller can audit *permissions*, not just addresses:
+    /// [`translate`](Self::translate) discards the flags, and checking that a
+    /// freshly built kernel table is actually W^X needs them. The level comes back
+    /// too, because a leaf at level 1 or 2 is a superpage and "which page size did
+    /// this region really get" is part of the audit.
+    pub fn entry_of(&self, vaddr: VirtualAddr) -> Option<(Entry, usize)> {
         let mut table: *const Table = self.root;
         for level in (0..LEVELS).rev() {
             // SAFETY: `table` is the root or a child from a valid branch entry.
@@ -187,12 +193,20 @@ impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
                 return None;
             }
             if entry.is_leaf() {
-                return Some(leaf_to_phys(entry, vaddr, level));
+                return Some((entry, level));
             }
             table = self.access.ptr::<Table>(entry.target());
         }
         // Fell off the bottom without a leaf: a branch at level 0 is malformed.
         None
+    }
+
+    /// Translate a virtual address, honouring leaf mappings at any level.
+    ///
+    /// Returns `None` if the walk hits an invalid entry, or a branch where a
+    /// leaf must be.
+    pub fn translate(&self, vaddr: VirtualAddr) -> Option<PhysicalAddr> {
+        self.entry_of(vaddr).map(|(entry, level)| leaf_to_phys(entry, vaddr, level))
     }
 
     /// Map every 4 KiB page overlapping `[start, end)`, taking each physical
@@ -314,6 +328,50 @@ mod tests {
     }
 
     const RWX: PteFlags = PteFlags::READ_WRITE_EXECUTE;
+
+    /// `entry_of` is what lets a caller audit permissions rather than trust them,
+    /// so it must report the flags and the level a mapping actually landed at —
+    /// not the ones that were requested.
+    #[test]
+    fn entry_of_reports_the_flags_and_level_a_mapping_landed_at() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+
+        let text = VirtualAddr::new(4 << 21);
+        let data = VirtualAddr::new(5 << 21);
+        let giga = VirtualAddr::new(3 << 30);
+        mapper
+            .map(text, PhysicalAddr::new(0x8000_0000), PteFlags::READ_EXECUTE)
+            .expect("R+X page must map");
+        mapper
+            .map_at_level(data, PhysicalAddr::new(0x8020_0000), 1, PteFlags::READ_WRITE)
+            .expect("R+W superpage must map");
+        mapper
+            .map_at_level(giga, PhysicalAddr::new(0), ROOT_LEVEL, PteFlags::READ)
+            .expect("R gigapage must map");
+
+        let (entry, level) = mapper.entry_of(text).expect("mapped page must have an entry");
+        assert_eq!(level, 0, "a 4 KiB mapping must be reported at level 0");
+        assert_eq!(
+            entry.flags(),
+            PteFlags::READ_EXECUTE | PteFlags::VALID,
+            "R+X flags must survive the round trip"
+        );
+        assert!(!entry.flags().contains(PteFlags::WRITE), "executable page must not be writable");
+
+        let (entry, level) = mapper.entry_of(data).expect("mapped superpage must have an entry");
+        assert_eq!(level, 1, "a 2 MiB mapping must be reported at level 1");
+        assert!(!entry.flags().contains(PteFlags::EXECUTE), "writable page must not be executable");
+
+        let (_, level) = mapper.entry_of(giga).expect("mapped gigapage must have an entry");
+        assert_eq!(level, ROOT_LEVEL, "a 1 GiB mapping must be reported at the root level");
+
+        // An unmapped address — a guard page, say — must be reported as a hole,
+        // which is how a self-check proves a gap was left deliberately.
+        let hole = VirtualAddr::new(6 << 21);
+        assert_eq!(mapper.entry_of(hole), None, "unmapped address must have no entry");
+        assert_eq!(mapper.translate(hole), None, "translate must agree with entry_of");
+    }
 
     #[test]
     fn maps_and_translates_a_four_kib_page() {

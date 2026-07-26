@@ -33,7 +33,7 @@ use frame_allocator::{FrameAllocator, FrameBlock, FrameRange, metadata_layout};
 use spin::Mutex;
 
 use paging::MemoryAddr;
-use paging::sv39::{PAGE_SIZE, PhysicalAddr};
+use paging::sv39::{FrameSource, PAGE_SIZE, PhysicalAddr};
 
 use crate::memory::phys_to_virt;
 
@@ -149,6 +149,62 @@ pub unsafe fn free(frames: Frames) {
     // SAFETY: forwarded from this function's contract; `frames` is a move-only
     // token minted by this allocator, so it is neither foreign nor double-freed.
     unsafe { allocator.deallocate(frames.0).expect("frame deallocation failed") };
+}
+
+/// Release a single frame identified only by its address.
+///
+/// The counterpart to [`free`] for a frame whose [`Frames`] token is gone because
+/// something else became its record of ownership — in practice a page-table entry.
+///
+/// # Safety
+///
+/// The frame must have come from [`alloc`], i.e. been allocated *singly*: this
+/// frees one frame, so calling it on the base of an [`alloc_contiguous`] run
+/// leaks the rest. It must no longer be reachable through any live mapping,
+/// pointer or DMA operation, and must not already have been freed. A double free
+/// is detected rather than silently corrupting the pool, but do not rely on that.
+pub unsafe fn free_at(frame: PhysicalAddr) {
+    assert!(
+        frame.is_aligned(PAGE_SIZE),
+        "frame {frame:?} is not page aligned; its page number would be silently rounded down"
+    );
+    let mut guard = FRAME_ALLOCATOR.lock();
+    let allocator = guard.as_mut().expect("frame allocator used before init");
+    // SAFETY: forwarded from this function's contract. Order 0 because `alloc`
+    // vends exactly one frame, which is what this function documents accepting.
+    unsafe {
+        allocator.deallocate_at(frame.ppn(), 0).expect("frame deallocation failed");
+    }
+}
+
+/// Supplies the frames that intermediate page tables live in.
+///
+/// # Why the token is dropped
+///
+/// [`FrameSource::alloc_zeroed`] returns a bare [`PhysicalAddr`] and lets the
+/// [`Frames`] token go. That is not an accidental leak, it is the handoff: the
+/// moment the frame is installed as a branch PTE, the *page table* becomes its
+/// record of ownership. Reclaiming it later means walking to that entry and
+/// passing the address it holds to [`free_at`] — which is exactly what
+/// [`FrameSource::free`] does below, and why [`free_at`] has to exist at all.
+pub struct TableFrames;
+
+// SAFETY: `alloc` returns a page-aligned frame, freshly zeroed (see the module
+// docs — zeroing is this module's policy, and a zeroed frame is what makes a new
+// table read as "all entries invalid"), owned exclusively by the caller until it
+// comes back through `free_at`.
+unsafe impl FrameSource for TableFrames {
+    fn alloc_zeroed(&mut self) -> Option<PhysicalAddr> {
+        alloc().map(|frames| frames.base())
+    }
+
+    unsafe fn free(&mut self, frame: PhysicalAddr) {
+        // SAFETY: forwarded from the trait's contract, which requires the frame
+        // to have come from this source and to be unreachable from any live page
+        // table. `alloc_zeroed` only ever vends single frames, satisfying
+        // `free_at`'s order-0 requirement.
+        unsafe { free_at(frame) };
+    }
 }
 
 /// Smoke-test the allocator immediately after init. A broken frame allocator
