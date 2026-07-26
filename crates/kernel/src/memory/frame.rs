@@ -21,8 +21,9 @@
 //! The allocator core never touches frame contents; zeroing is our policy here.
 //!
 //! # Addressing
-//! `boot.S` maps RAM both identity and high-half. Kernel-side accesses in this
-//! module (the bitmap, zeroing) go through the high-half mapping via
+//! `boot.S` maps physical memory both identity and into the kernel's direct map
+//! (see [`crate::memory::direct_map`]). Kernel-side accesses in this module (the
+//! bitmap, zeroing) go through the direct map via
 //! [`crate::memory::phys_to_virt`] — the kernel's durable home, which survives
 //! the eventual removal of the boot identity map.
 
@@ -59,18 +60,31 @@ impl Frames {
 /// Bring the allocator up over free physical RAM `[free_start, ram_end)`.
 ///
 /// The bitmap is reserved from the front of the range and excluded from the
-/// managed frames. RAM above the 1 GiB window `boot.S` maps is dropped (loudly),
+/// managed frames. RAM above the window `boot.S` maps is dropped (loudly),
 /// because its frames would not be addressable through either boot mapping.
 pub fn init(free_start: usize, ram_end: usize) {
-    let ram_base = crate::device_tree::ram_base().expect("device tree RAM base not discovered");
-    // boot.S maps a single 1 GiB RAM gigapage; frames past it are unmapped and
-    // must not be handed out. No silent truncation — say what we drop.
-    let window_end = ram_base + (1usize << 30);
+    // Frames past the boot mappings are unreachable and must not be handed out.
+    // The bound comes from the module that *builds* those mappings — this used to
+    // re-derive it as `ram_base + 1 GiB`, an independent re-encoding of boot.S's
+    // decision that would have kept clamping at 1 GiB if the window ever grew.
+    // No silent truncation either — say what we drop.
+    let window_end = crate::memory::direct_map::WINDOW_END;
+    // The window is absolute (from PA 0), not RAM-relative, so state the case it
+    // cannot serve rather than letting `FrameRange::new` below fail with a
+    // confusing "range empty after alignment". Unreachable on any platform that
+    // got this far — the kernel itself would be outside the mapping — but the
+    // diagnostic is what makes that obvious instead of mysterious.
+    assert!(
+        free_start < window_end,
+        "kernel image top {free_start:#x} lies outside the {window_end:#x} boot mapping window; \
+         the direct map does not reach this platform's RAM (see memory::direct_map)"
+    );
     let usable_end = ram_end.min(window_end);
     if ram_end > window_end {
         println!(
-            "[memory] WARNING: {} MiB of RAM above the 1 GiB boot window is unmanaged",
-            (ram_end - window_end) / 1024 / 1024
+            "[memory] WARNING: {} MiB of RAM above the {:#x} boot window is unmanaged",
+            (ram_end - window_end) / 1024 / 1024,
+            window_end
         );
     }
 

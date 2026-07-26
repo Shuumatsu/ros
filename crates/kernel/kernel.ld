@@ -12,25 +12,28 @@ ENTRY( _start )
 at physical 0x8020_0000 (RAM base + text_offset; the SBI firmware occupies the
 first 2 MiB). So VMA (where symbols resolve) and LMA (where bytes are loaded)
 differ by a fixed offset: VA = PA + _va_offset. Each section sets its LMA with
-AT(ADDR(.x) - _va_offset) below; boot.S maps VA->PA and jumps high before Rust
-runs.
+AT(ADDR(.x) - _va_offset) below; boot.S installs the page table and jumps high
+before Rust runs.
 
 Still NO MEMORY region / LENGTH: the RAM top is a runtime fact from the device
 tree, not a compile-time constant (see device_tree.rs). */
 /* SINGLE SOURCE OF TRUTH for the kernel's memory layout. Three genuine inputs;
    everything else is derived, so there are no composite magic numbers to keep in
-   sync. `_va_offset` is used only here, for the sections' LMA (`AT(...)`); the
-   *runtime* VA<->PA offset is measured by boot.S (linked VMA - real PMA) and is
-   not hardcoded in Rust or asm. `_text_offset` is consumed by the Image header
-   in boot.S. (`_dram_base` mirrors platform::DRAM_BASE in Rust — the one value
-   the linker and Rust cannot share without build-time codegen.) */
-_dram_base      = 0x80000000;               /* RAM base */
-_kernel_va_base = 0xffffffc000000000;       /* bottom of the Sv39 high half */
+   sync. `_text_offset` is consumed by the Image header in boot.S.
+
+   `_va_offset` is the base of the kernel's DIRECT MAP: VA = PA + _va_offset holds
+   for all of physical memory, not just for the kernel image, so it is a pure
+   constant and NOT skewed by _dram_base. That is what lets Rust express the same
+   value as a `const` (memory::direct_map::VA_OFFSET) and translate at compile
+   time. It is the one value the linker and Rust cannot share directly; boot.S
+   measures the real VMA-PMA skew at boot and direct_map::verify() asserts the two
+   agree, so the duplicate cannot ship diverged. */
+_dram_base      = 0x80000000;               /* RAM base: where the loader puts us */
+_va_offset      = 0xffffffc000000000;       /* bottom of the Sv39 high half */
 _text_offset    = 0x200000;                 /* SBI reserves the first 2 MiB */
 
 _phys_base    = _dram_base + _text_offset;      /* 0x80200000: where we load */
-_va_offset    = _kernel_va_base - _dram_base;   /* 0xffffffbf80000000 */
-_memory_start = _phys_base + _va_offset;        /* 0xffffffc000200000: virtual base */
+_memory_start = _phys_base + _va_offset;        /* 0xffffffc080200000: virtual base */
 
 /*
 PHDRS is short for "program headers", which we specify three here:

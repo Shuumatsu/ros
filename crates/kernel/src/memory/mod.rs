@@ -1,27 +1,11 @@
 use buddy_system_allocator::LockedHeap;
 use core::alloc::Layout;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 use paging::sv39::PAGE_SIZE;
 
+pub mod direct_map;
 pub mod frame;
 pub mod layout;
-
-/// The kernel VA↔PA offset (`VA = PA + offset`), measured by `boot.S` as the
-/// linked virtual address minus the real physical load address and handed to
-/// `start`. Recorded here once so it is never hardcoded — the layout's single
-/// source is `kernel.ld`, and this is derived from it at boot.
-static VA_OFFSET: AtomicUsize = AtomicUsize::new(0);
-
-/// Record the VA↔PA offset `boot.S` derived. Call once, before any translation.
-pub fn set_va_offset(offset: usize) {
-    VA_OFFSET.store(offset, Ordering::Relaxed);
-}
-
-#[inline]
-fn va_offset() -> usize {
-    VA_OFFSET.load(Ordering::Relaxed)
-}
 
 /// ORDER determines max allocation size: 2^(ORDER-1) bytes
 /// ORDER=32 supports up to 2GB allocations
@@ -30,24 +14,29 @@ const ORDER: usize = 32;
 #[global_allocator]
 static HEAP: LockedHeap<ORDER> = LockedHeap::empty();
 
-/// Bytes carved off the top of the kernel image for the kernel heap. Kept
-/// bounded on purpose: the *rest* of RAM — the bulk — belongs to the physical
-/// frame allocator (`frame`), which cannot exist until this heap does (it keeps
-/// its free lists here). The heap holds only kernel bookkeeping, `frame`'s
-/// `BTreeSet`s included; 8 MiB is ample. Prefer `frame` for anything page-sized;
-/// grow this only if you must `Box` large buffers.
+/// Bytes carved out of the physical frame allocator for the kernel heap.
+///
+/// Kept bounded on purpose: the *rest* of RAM — the bulk — stays with `frame`,
+/// which owns all of physical memory and comes up first. The heap is merely its
+/// first customer, and holds only kernel bookkeeping that is not page-shaped;
+/// 8 MiB is ample. Prefer `frame` for anything page-sized (page tables, user
+/// pages, DMA buffers); grow this only if you must `Box` large buffers.
 const KERNEL_HEAP_SIZE: usize = 8 * 1024 * 1024;
 
 /// Translate a physical address to its kernel virtual address (`VA = PA + OFFSET`).
-/// Valid for RAM, which the kernel maps in its high half (and, for now, also
-/// identity-maps). The offset's single source is `kernel.ld`'s `_va_offset`.
-pub fn phys_to_virt(pa: usize) -> usize {
-    pa.wrapping_add(va_offset())
+///
+/// A compile-time add, and valid for *every* physical address — RAM and MMIO
+/// alike — because the kernel's map is linear. See [`direct_map`].
+#[inline]
+pub const fn phys_to_virt(pa: usize) -> usize {
+    pa.wrapping_add(direct_map::VA_OFFSET)
 }
 
-/// Translate a kernel virtual address back to physical (`PA = VA - OFFSET`).
-pub fn virt_to_phys(va: usize) -> usize {
-    va.wrapping_sub(va_offset())
+/// Translate a kernel direct-map virtual address back to physical
+/// (`PA = VA - OFFSET`).
+#[inline]
+pub const fn virt_to_phys(va: usize) -> usize {
+    va.wrapping_sub(direct_map::VA_OFFSET)
 }
 
 #[alloc_error_handler]
@@ -70,6 +59,13 @@ fn alloc_error(layout: Layout) -> ! {
 /// RAM top, the heap as a fixed [`KERNEL_HEAP_SIZE`] slice of those frames — so
 /// nothing here is a compile-time guess about how much RAM exists.
 pub fn init() {
+    println!(
+        "[memory] direct map: PA 0x0..{:#x} -> VA {:#x}.. ({} GiB)",
+        direct_map::WINDOW_END,
+        direct_map::VA_OFFSET,
+        direct_map::WINDOW_END / (1024 * 1024 * 1024)
+    );
+
     // 1. Physical frames FIRST: [free_start, ram_end). `free_start` is the top
     //    of the kernel image (a high VA); the allocator vends *physical*
     //    addresses, so convert it back to physical. `ram_end` from the device

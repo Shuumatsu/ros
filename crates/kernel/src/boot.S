@@ -33,52 +33,30 @@ _boot:
     # an absolute symbol load. a0/a1 are preserved untouched until `call start`.
     mv      tp, a0              # hart_id() reads tp
 
-    # ---- Build a minimal early page table: three Sv39 gigapages (1 GiB each) ----
-    #   root[0]    VA [0,1G)     -> PA [0,1G)    identity: MMIO devices
-    #   root[ram]  VA [ram,+1G)  -> PA [ram,+1G) identity: RAM (kernel, heap, dtb)
-    #   root[256]  VA [high,+1G) -> PA [ram,+1G) the kernel's high-half home
-    # The RAM base and its root index are DERIVED from where we actually run
-    # (round _start down to 1 GiB) — no hardcoded RAM address. Leaf gigapage
-    # PTE = (PA>>12 << 10) | V|R|W|X|A|D. (This 1 GiB window covers the QEMU
-    # sizes we run; >1 GiB RAM would need more entries.)
-    lla     t0, early_pgtable   # physical address of the table (PC-relative)
-
-    lla     t2, _start
-    srli    t2, t2, 30
-    slli    t2, t2, 30          # t2 = RAM base, 1 GiB-aligned
-    srli    t3, t2, 2           # t3 = (base>>12)<<10 ...
-    ori     t3, t3, 0xcf        #      | V R W X A D = RAM gigapage leaf PTE
-    srli    t4, t2, 30          # t4 = identity root index (RAM base >> 30)
-
-    li      t1, 0xcf            # root[0]: identity low 1 GiB (MMIO devices), PA 0
-    sd      t1, 0(t0)
-
-    slli    t5, t4, 3           # root[ram]: identity RAM
-    add     t5, t0, t5
-    sd      t3, 0(t5)
-
-    li      t5, 8*256           # root[256]: high-half home (bottom of the Sv39
-    add     t5, t0, t5          #            high half), same frame as RAM
-    sd      t3, 0(t5)
-
-    # ---- Enable Sv39 translation ----
-    srli    t1, t0, 12          # PPN of the table
-    li      t2, 8
-    slli    t2, t2, 60          # MODE = 8 (Sv39)
-    or      t1, t1, t2
+    # ---- Install the early page table ----
+    # The table is CONST-BUILT IN RUST (see memory::direct_map) and loaded as
+    # ordinary data, so no PTE format, no RAM base and no translation mode
+    # appears here — this code only points satp at it. Both symbols are reached
+    # PC-relative: pre-paging the PC is physical and the image's VMA-LMA skew is
+    # uniform, so `lla` yields their PHYSICAL addresses.
+    lla     t0, EARLY_PGTABLE   # PA of the root table
+    lla     t1, EARLY_SATP_TEMPLATE
+    ld      t1, 0(t1)           # MODE=Sv39, ASID=0, PPN=0 — composed by `paging`
+    srli    t2, t0, 12          # satp.PPN = the table's page number: the one
+    or      t1, t1, t2          #   field a const cannot know (a link-time fact)
     csrw    satp, t1
     sfence.vma                  # new translation active; PC still physical,
-                                # kept alive by the RAM identity mapping
+                                # kept alive by the identity half of the map
 
-    # ---- Derive the VA offset, then jump high. The kernel is linked high, so
-    # the linker knows this continuation's virtual address; subtracting its
-    # physical address (where we actually run) yields VA - PA. We hand that to
-    # start() so the offset is never hardcoded in Rust or asm — it is measured
-    # from the linked layout vs. the real load address. ----
+    # ---- Jump high. The kernel is linked high, so the linker knows this
+    # continuation's virtual address; subtracting the physical address we
+    # actually reached it at yields the real VA - PA skew. That goes to start()
+    # purely as a CROSS-CHECK against direct_map::VA_OFFSET (which the linker
+    # cannot read) — translation itself no longer depends on measuring it. ----
     lla     t0, .Lhigh_entry
     ld      t1, 0(t0)           # t1 = VMA(1f)  (linker-provided absolute high VA)
     lla     t0, 1f              # t0 = PMA(1f)  (where we actually are)
-    sub     a2, t1, t0          # a2 = va_offset = VMA - PMA  -> start()'s 3rd arg
+    sub     a2, t1, t0          # a2 = measured VA - PA  -> start()'s 3rd arg
     jr      t1                  # enter the high half
 .balign 8
 .Lhigh_entry:
@@ -106,12 +84,5 @@ _boot:
     mul     t0, t0, t1
     add     sp, sp, t0
 
-    # start(hartid = a0, dtb = a1)
+    # start(hartid = a0, dtb = a1, measured va_offset = a2)
     call    start
-
-# 4 KiB-aligned, zero-filled early page table. Lives in .data (PROGBITS) so it
-# is loaded pre-zeroed from the image and reachable physically before paging.
-.section .data
-.align 12
-early_pgtable:
-    .space 4096

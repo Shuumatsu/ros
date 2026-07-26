@@ -10,10 +10,15 @@ use crate::trap;
 /// (OpenSBI): `a0 = hartid`, `a1 = dtb`. All M-mode setup (PMP, trap delegation,
 /// timer) was done by the SBI, so there is no `mret` here — we are already in
 /// supervisor mode.
+///
+/// `va_offset` is the VA↔PA skew `boot.S` measured from the linked-vs-real
+/// address of its high-half jump. It is not used to translate — that is a
+/// compile-time constant now — only to prove reality matches it.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
-    // Record the VA↔PA offset boot.S measured, before anything translates.
-    memory::set_va_offset(va_offset);
+    // Fail loudly and immediately if the linker script and Rust disagree about
+    // where the direct map lives; every address below depends on it.
+    memory::direct_map::verify(va_offset);
 
     if hartid == 0 {
         // Parse the DTB the SBI handed us in a1: it populates the device table
