@@ -17,9 +17,10 @@ before Rust runs.
 
 Still NO MEMORY region / LENGTH: the RAM top is a runtime fact from the device
 tree, not a compile-time constant (see device_tree.rs). */
-/* SINGLE SOURCE OF TRUTH for the kernel's memory layout. Three genuine inputs;
-   everything else is derived, so there are no composite magic numbers to keep in
-   sync. `_text_offset` is consumed by the Image header in boot.S.
+/* SINGLE SOURCE OF TRUTH for the kernel's memory layout. Four genuine inputs —
+   one architectural (`_page_size`) and three platform facts; everything else is
+   derived, so there are no composite magic numbers to keep in sync.
+   `_text_offset` is consumed by the Image header in boot.S.
 
    `_va_offset` is the base of the kernel's DIRECT MAP: VA = PA + _va_offset holds
    for all of physical memory, not just for the kernel image, so it is a pure
@@ -27,7 +28,14 @@ tree, not a compile-time constant (see device_tree.rs). */
    value as a `const` (memory::direct_map::VA_OFFSET) and translate at compile
    time. It is the one value the linker and Rust cannot share directly; boot.S
    measures the real VMA-PMA skew at boot and direct_map::verify() asserts the two
-   agree, so the duplicate cannot ship diverged. */
+   agree, so the duplicate cannot ship diverged.
+
+   `_page_size` is named rather than repeated: the eight places below that align or
+   pad by a page then say *why*. Rust cannot read it (a small absolute linker symbol
+   is not reachable PC-relative), so it keeps its own `paging::sv39::PAGE_SIZE`, and
+   `memory::layout::check()` pins the two together at boot by measuring a gap the
+   linker built — the same duplicate-and-verify arrangement as `_va_offset`. */
+_page_size      = 4096;                     /* architectural: Sv39 base page */
 _dram_base      = 0x80000000;               /* RAM base: where the loader puts us */
 _va_offset      = 0xffffffc000000000;       /* bottom of the Sv39 high half */
 _text_offset    = 0x200000;                 /* SBI reserves the first 2 MiB */
@@ -94,7 +102,7 @@ SECTIONS {
     } :text
 
     .rodata : AT(ADDR(.rodata) - _va_offset) {
-        . = ALIGN(4096);
+        . = ALIGN(_page_size);
         PROVIDE(_global_pointer = .);
         PROVIDE(_rodata_start = .);
 
@@ -107,13 +115,13 @@ SECTIONS {
         *(.rodata .rodata.*)
 
         /* in case rodata section is empty, ensure it occupys at least one page */
-        . = . + 4096;
+        . = . + _page_size;
 
         PROVIDE(_rodata_end = .);
     } :text
 
     .data : AT(ADDR(.data) - _va_offset) {
-        . = ALIGN(4096);
+        . = ALIGN(_page_size);
         PROVIDE(_data_start = .);
 
         *(.sdata .sdata.*) 
@@ -121,13 +129,13 @@ SECTIONS {
         *(.data .data.*)
 
         /* in case data section is empty, ensure it occupys at least one page */
-        . = . + 4096;
+        . = . + _page_size;
 
         PROVIDE(_data_end = .);
     } :data
 
     .bss : AT(ADDR(.bss) - _va_offset) {
-        . = ALIGN(4096);
+        . = ALIGN(_page_size);
         PROVIDE(_bss_start = .);
 
         *(.sbss .sbss.*)
@@ -135,7 +143,7 @@ SECTIONS {
         *(.bss .bss.*)
 
         /* in case bss section is empty, ensure it occupys at least one page */
-        . = . + 4096;
+        . = . + _page_size;
 
         PROVIDE(_bss_end = .);
     } :bss
@@ -155,23 +163,35 @@ SECTIONS {
            start + stride*(h+1)
        so boot.S needs only the stride.
 
-       Only the *total* size is reserved here. The subdivision — how big a guard is,
-       how big a stack is — belongs to `memory::stack`, which derives the hart count
-       from this size, so growing the area grows the hart count and the two cannot
-       disagree. (It has to be this way round: Rust can read these two addresses,
-       but not a small absolute linker symbol, because the reference would be
-       PC-relative and 4096 is nowhere near the code.) */
-    . = ALIGN(4096);
-    PROVIDE(_kernel_stack_start = .);
-    . = . + 0x110000;   /* memory::stack divides this into 16 x (4 KiB + 64 KiB) */
-    PROVIDE(_kernel_stack_end = .);
+       NO SIZE APPEARS HERE. `memory::stack` declares the whole area as one
+       `.hart_stacks` static sized `STRIDE * MAX_HARTS`, and this section merely
+       places it — so the size comes from the section itself and the guard size, the
+       stack size and the hart count are stated exactly once, in Rust, where they can
+       be read and checked.
+
+       Writing the total by hand instead (`. = . + 0x110000`) is a composite magic
+       number: it silently encodes all three values, nothing can verify it, and
+       changing the stack size in Rust would leave it stale while quietly altering
+       the hart count. `memory::stack::check_layout` asserts at boot that the section
+       landed with the span the geometry expects.
+
+       NOLOAD because these are uninitialised stacks: reserve the address space, but
+       put no zeros in the image. */
+    . = ALIGN(_page_size);
+    .hart_stacks (NOLOAD) : {
+        PROVIDE(_kernel_stack_start = .);
+        /* KEEP: nothing in Rust references the static, so --gc-sections would
+           otherwise discard the kernel's stacks. */
+        KEEP(*(.hart_stacks))
+        PROVIDE(_kernel_stack_end = .);
+    } :bss
     
 
     /* our heap starts right after the kernel stack. Its END is not a linker
     symbol: the heap runs up to the RAM top discovered from the device tree at
     runtime (see memory::init), not to a compile-time LENGTH. */
-    . = ALIGN(4096);
-    PROVIDE(_heap_start = _kernel_stack_end + 4096);
+    . = ALIGN(_page_size);
+    PROVIDE(_heap_start = _kernel_stack_end + _page_size);
 }
 
 /* Effective image size for the RISC-V Image header: everything the loader must

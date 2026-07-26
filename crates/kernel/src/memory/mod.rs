@@ -66,6 +66,11 @@ fn alloc_error(layout: Layout) -> ! {
 /// RAM top, the heap as a fixed [`KERNEL_HEAP_SIZE`] slice of those frames — so
 /// nothing here is a compile-time guess about how much RAM exists.
 pub fn init() {
+    // Before anything derives an address from the linker symbols: confirm the linker
+    // script and Rust agree about the page size and that every section it lays out is
+    // page aligned.
+    layout::check();
+
     println!(
         "[memory] direct map: PA 0x0..{:#x} -> VA {:#x}.. ({} GiB)",
         direct_map::WINDOW_END,

@@ -1,5 +1,7 @@
 //! Kernel memory layout symbols from the linker script.
 
+use paging::sv39::PAGE_SIZE;
+
 /// Declares an extern linker symbol and creates an accessor function.
 macro_rules! linker_symbol {
     ($($fn_name:ident => $sym_name:ident),* $(,)?) => {
@@ -36,3 +38,35 @@ linker_symbol!(
 // is nowhere near the code, so it fails to link with `R_RISCV_PCREL_HI20 out of
 // range`. Sizes therefore live in Rust and are derived from the addresses above;
 // see `memory::stack`.
+
+/// Assert the linker script's view of the layout matches Rust's.
+///
+/// `kernel.ld` has its own `_page_size` because it cannot read
+/// [`paging::sv39::PAGE_SIZE`] (see the note above). The duplicate is unavoidable,
+/// so it is verified instead — not by reading the symbol, but by measuring something
+/// the linker *built* with it: the gap it left between the stack area and the heap is
+/// exactly one page. If the two ever disagree, this catches it at boot rather than
+/// letting sections land unaligned and the guard pages drift out of position.
+///
+/// Call once, before anything derives an address from these symbols.
+pub fn check() {
+    let guard = heap_start() - kernel_stack_end();
+    assert_eq!(
+        guard, PAGE_SIZE,
+        "kernel.ld padded {guard:#x} bytes between the stacks and the heap, but Rust's \
+         PAGE_SIZE is {PAGE_SIZE:#x}; the linker's _page_size and PAGE_SIZE disagree"
+    );
+
+    // Every section the kernel maps separately must start on a page, or its region
+    // would either overlap its neighbour or need rounding that swallows a guard.
+    for (name, addr) in [
+        ("_memory_start", memory_start()),
+        ("_rodata_start", rodata_start()),
+        ("_data_start", data_start()),
+        ("_bss_start", bss_start()),
+        ("_kernel_stack_start", kernel_stack_start()),
+        ("_heap_start", heap_start()),
+    ] {
+        assert_eq!(addr % PAGE_SIZE, 0, "{name} = {addr:#x} is not page aligned");
+    }
+}

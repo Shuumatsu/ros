@@ -519,6 +519,76 @@ hart's stack is already mapped so the switch is safe from any hart with a reserv
 stack. Still unreachable — no `hart_start` caller — but the split is now explicit
 rather than a comment.
 
+### I. AGENTS.md compliance pass on §2.H — the magic number
+
+§2.H claimed the stack geometry had "exactly one definition". It did not. The linker
+script reserved the area with a bare literal:
+
+```
+. = . + 0x110000;   /* memory::stack divides this into 16 x (4 KiB + 64 KiB) */
+```
+
+That is a **composite** magic number: `0x110000` silently encodes all three of
+`MAX_HARTS`, `GUARD_SIZE` and `SIZE`. Deriving `max_harts` in Rust made the two
+*consistent* but not single-sourced — and arguably made it worse, because the number
+became unverifiable. Change `stack::SIZE` to 32 KiB and `max_harts()` would quietly
+become `0x110000 / 0x9000 = 18`, with 8 KiB wasted and the comment now a lie. The
+comment itself restated a subdivision the linker did not own.
+
+**Fixed by inverting who declares the size.** `memory::stack` declares the whole
+area as one static:
+
+```rust
+#[used]
+#[unsafe(link_section = ".hart_stacks")]
+static HART_STACKS: HartStacks = HartStacks(UnsafeCell::new([0; STRIDE * MAX_HARTS]));
+```
+
+and `kernel.ld` merely *places* it, taking the size from the section:
+
+```
+.hart_stacks (NOLOAD) : {
+    PROVIDE(_kernel_stack_start = .);
+    KEEP(*(.hart_stacks))
+    PROVIDE(_kernel_stack_end = .);
+} :bss
+```
+
+No size appears in the linker script at all. `NOLOAD` keeps the 1 MiB out of the
+image (verified: `.hart_stacks` is `NOBITS`, and the flat image stayed 168 KiB);
+`KEEP` is required because nothing in Rust references the static, so `--gc-sections`
+would otherwise discard the kernel's stacks. `UnsafeCell` because the bytes are
+written by hardware via `sp`, never through the item.
+
+Proven non-vacuous by mutation: setting `stack::SIZE = 32 * 1024` resized the section
+to `0x90000` on its own and the boot log reported `16 x 32 KiB` — no stale total
+anywhere.
+
+**The page size, too.** `4096` appeared eight times in `kernel.ld`. Now a single
+`_page_size` symbol. It still cannot be shared with Rust's `PAGE_SIZE` (same
+PC-relative limitation), so `memory::layout::check()` pins them together at boot —
+not by reading the symbol, but by measuring something the linker *built* with it: the
+gap it left between the stacks and the heap must equal `PAGE_SIZE`. It also asserts
+every separately-mapped section starts on a page. Mutation-tested: setting
+`_page_size = 8192` trips
+
+```
+kernel.ld padded 0x2000 bytes between the stacks and the heap, but Rust's
+PAGE_SIZE is 0x1000; the linker's _page_size and PAGE_SIZE disagree
+```
+
+**And one more coupled constant:** `MAX_REGIONS = 48` was a guess that happened to
+be big enough for 16 harts. Now `stack::MAX_HARTS + 16`, so raising the hart count
+cannot silently overflow the region list.
+
+The `_page_size` rename was verified to move nothing: stack span, heap guard and all
+section alignments are byte-identical before and after (the absolute addresses shift
+by one page only because the new assertions grew `.text`).
+
+Remaining literals in `kernel.ld` are the four documented inputs — `_page_size`
+(architectural) plus `_dram_base`, `_va_offset`, `_text_offset` (platform facts) —
+and `ALIGN(16)`, the sub-page alignment inside a section.
+
 ---
 
 ## 3. Verified state

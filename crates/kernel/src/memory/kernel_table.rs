@@ -84,10 +84,14 @@ const READ_WRITE: PteFlags =
 /// Bytes mapped by one leaf at the middle level.
 const SUPERPAGE: usize = page_size_at(1);
 
-/// Upper bound on the region list: eight kernel regions, one per device window,
-/// and one per hart stack. Generous, and a compile-time bound beats a heap
-/// allocation in the code that builds page tables.
-const MAX_REGIONS: usize = 48;
+/// Upper bound on the region list, derived rather than guessed: one region per hart
+/// stack, plus headroom for the fixed entries (4 kernel sections, 3 direct-map
+/// pieces) and however many device windows the tree describes.
+///
+/// Tied to [`stack::MAX_HARTS`] on purpose — a bare constant would silently become
+/// too small the moment the hart count grew, and the failure would be a panic during
+/// page-table construction rather than anything obvious.
+const MAX_REGIONS: usize = stack::MAX_HARTS + 16;
 
 /// A direct-map region: `VA` and `PA` differ by the fixed offset, so the physical
 /// side is *derived* rather than restated and given a chance to disagree.
@@ -110,6 +114,10 @@ fn direct(
 
 /// Compute the kernel's address-space layout.
 fn regions() -> Vec<Region, MAX_REGIONS> {
+    // The stack geometry is declared in Rust but placed by the linker; confirm the
+    // two agree before building regions out of it.
+    stack::check_layout();
+
     let mut regions = Vec::new();
     let mut push = |region: Region| {
         regions.push(region).unwrap_or_else(|_| {
