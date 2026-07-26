@@ -141,15 +141,29 @@ SECTIONS {
     } :bss
 
 
-    /*
-    the stack grows from higher memory to lower memory (bottom to top).
-    we set the stack at the very bottom of its allocated slot.
-    */
-    /* our kernel stack starts at the end of the bss segment (_bss_end). */
+    /* Per-hart kernel stacks. Stacks grow DOWN, so each hart's usable stack sits
+       immediately above an unmapped guard page: an overflow walks off the bottom
+       into the guard and faults, instead of silently eating whatever is below it
+       (hart 0's neighbour is .bss; every other hart's is the previous hart's
+       stack). The guards are holes because memory::kernel_table maps each stack
+       as its own region and never the guards.
+
+       Layout for hart h, with stride = guard + stack:
+           guard  [start + stride*h,         start + stride*h + guard)
+           stack  [start + stride*h + guard, start + stride*(h+1))
+       which makes the stack top — and therefore sp — simply
+           start + stride*(h+1)
+       so boot.S needs only the stride.
+
+       Only the *total* size is reserved here. The subdivision — how big a guard is,
+       how big a stack is — belongs to `memory::stack`, which derives the hart count
+       from this size, so growing the area grows the hart count and the two cannot
+       disagree. (It has to be this way round: Rust can read these two addresses,
+       but not a small absolute linker symbol, because the reference would be
+       PC-relative and 4096 is nowhere near the code.) */
     . = ALIGN(4096);
     PROVIDE(_kernel_stack_start = .);
-    /* we're allocating 0x80000 bytes (512 KiB) to our kernel stack. */
-    . = . + 0x100000;
+    . = . + 0x110000;   /* memory::stack divides this into 16 x (4 KiB + 64 KiB) */
     PROVIDE(_kernel_stack_end = .);
     
 

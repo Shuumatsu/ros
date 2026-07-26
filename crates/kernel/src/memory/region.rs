@@ -176,21 +176,52 @@ fn human(bytes: usize) -> (usize, &'static str) {
 /// Worth the lines: it puts the protection policy in the boot log, where it can be
 /// read off a failing run, instead of leaving it to be inferred from the source.
 /// The rights come from [`PteFlags::rwx`] rather than being spelled out here.
+///
+/// A run of adjacent regions sharing a name is collapsed into one line with the
+/// run's total page count and a `xN` marker. That is not cosmetic: the per-hart
+/// stacks are one region each — which is what leaves their guard pages unmapped —
+/// and printing sixteen identical lines would bury everything else.
 pub fn report(regions: &[Region]) {
-    for region in regions {
+    let mut index = 0;
+    while index < regions.len() {
+        let region = &regions[index];
         if region.is_empty() {
+            index += 1;
             continue;
         }
+
+        // Consume the whole run of same-named, non-empty regions.
+        let mut run = 1;
+        let mut pages = region.pages();
+        while let Some(next) = regions.get(index + run) {
+            if next.name != region.name || next.is_empty() {
+                break;
+            }
+            pages += next.pages();
+            run += 1;
+        }
+
         let (size, unit) = human(region.page_size());
         println!(
-            "[memory]   {:<22} {:#018x} -> {:#012x}  {} {:>5} x {}{}",
+            "[memory]   {:<22} {:#018x} -> {:#012x}  {} {:>5} x {}{}{}",
             region.name,
             region.va,
             region.pa,
             region.flags.rwx(),
-            region.pages(),
+            pages,
             size,
-            unit
+            unit,
+            Run(run)
         );
+        index += run;
+    }
+}
+
+/// Renders ` (xN)` for a collapsed run, and nothing for a single region.
+struct Run(usize);
+
+impl core::fmt::Display for Run {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.0 > 1 { write!(f, " (x{})", self.0) } else { Ok(()) }
     }
 }

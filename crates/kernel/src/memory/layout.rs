@@ -30,3 +30,9 @@ linker_symbol!(
     kernel_stack_end   => _kernel_stack_end,
     heap_start         => _heap_start,
 );
+
+// NOTE: only *address* symbols belong here. A small absolute linker symbol (a size
+// like 4096) cannot be read this way — the reference is PC-relative and the value
+// is nowhere near the code, so it fails to link with `R_RISCV_PCREL_HI20 out of
+// range`. Sizes therefore live in Rust and are derived from the addresses above;
+// see `memory::stack`.

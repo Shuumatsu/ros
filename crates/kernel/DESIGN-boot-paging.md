@@ -411,6 +411,114 @@ Verified empirically in both directions:
 | raw physical UART read | `scause 13` / `LoadPageFault`, "probe failed" never printed |
 | reservation actually withholds | mutating `reserve` to a no-op trips `reserving 2 device-tree frames did not remove them from the pool` |
 
+### H. Stage 5 — the boot hart is not hart 0, and stacks have guard pages
+
+Two items that were queued as "hardening for SMP that doesn't exist yet". One of
+them turned out to be a **live, flaky bug**.
+
+#### The boot hart is chosen by a lottery
+
+`start()` gated one-time setup on `hartid == 0`. OpenSBI does not promise that: it
+runs a lottery among the harts, so *which* hart enters the kernel varies from boot
+to boot. Measured on the committed code at `-smp 4`, 8 runs:
+
+```
+run 1: boot hart=0  -> ok            run 5: boot hart=0  -> ok
+run 2: boot hart=0  -> ok            run 6: boot hart=2  -> PANIC
+run 3: boot hart=1  -> PANIC         run 7: boot hart=2  -> PANIC
+run 4: boot hart=3  -> PANIC         run 8: boot hart=0  -> ok
+```
+
+`PANIC` is `device tree RAM region not discovered` — with `hartid != 0` the kernel
+skipped `device_tree::init` entirely and then failed in `memory::init` for a
+seemingly unrelated reason. **5 of 8 boots were broken.** It went unnoticed only
+because `-smp 1` is what `scripts/run.sh` passes, and with one hart the lottery has
+one entrant.
+
+Fixed with `cpu::claim_boot_hart(hartid)` — a compare-exchange that exactly one
+caller wins, so the role belongs to whoever actually arrived rather than to a hart
+id guessed in advance. After: 8/8 pass, with harts 0, 1, 2 and 3 all observed
+winning.
+
+The boot hart is now printed at boot, because it is not a constant and a
+hart-dependent failure should not be a mystery.
+
+#### The same assumption had a second instance: the BSS
+
+`boot.S` had `bnez a0, 3f` guarding the BSS-zeroing loop. So on every one of those
+boots whose winner was not hart 0, **the BSS was never cleared at all**. It looked
+fine only because QEMU hands out zeroed memory — it would not survive real hardware
+or a warm restart.
+
+Now claimed with `amoswap.w` on a flag in `.data` (it cannot live in `.bss`, which
+is the thing being cleared), with `fence w,w` before publishing completion and a
+spin-plus-`fence r,r` on the losing path so no hart can read a static before the
+zeroing is visible. Correct whether one hart enters or many.
+
+> The losing branch is **unexercised**: nothing calls SBI HSM `hart_start`, so only
+> one hart ever enters. Verified by disassembly and by 8/8 boots across four
+> different winners, not by racing it.
+
+#### Per-hart stack guard pages
+
+Stacks grow down, and `_bss_end` sat immediately below `_kernel_stack_start`, so
+hart 0's overflow ran into `.bss` — and every other hart's into the previous hart's
+stack. Each hart's stack now sits above its own unmapped guard page:
+
+```
+guard  [start + STRIDE*h,               start + STRIDE*h + GUARD_SIZE)
+stack  [start + STRIDE*h + GUARD_SIZE,  start + STRIDE*(h+1))
+```
+
+so the stack top — and therefore `sp` — stays `start + STRIDE*(h+1)`, the same shape
+`boot.S` already computed. The guards are holes because `kernel_table` maps each
+stack as its own region and never the guards; `audit_holes` then checks all 16 are
+genuinely unmapped, since "unmapped" is the one property invisible in a region list.
+
+**Verified:** writing 8 bytes below hart 0's stack bottom now faults with
+`scause 15` / `StorePageFault`. Before, that write silently landed in `.bss`.
+
+`boot.S` also now derives the hart limit and parks anything beyond it, instead of
+letting an out-of-range hartid compute an `sp` inside someone else's stack.
+
+#### Where the geometry lives, and why that way round
+
+The obvious approach — declare the sizes in `kernel.ld` and read them from Rust —
+**does not link**:
+
+```
+relocation R_RISCV_PCREL_HI20 out of range: 66584062 is not in [-524288, 524287];
+references '_hart_guard_size'
+```
+
+`layout.rs` reads a linker symbol by taking its address, which is PC-relative. That
+works for `_text_start` because its value is near the code; it cannot work for a
+*size* like 4096. (`li t0, _sym` in asm fails for the same underlying reason:
+"operand must be a constant 64-bit integer".)
+
+So it is inverted: `kernel.ld` reserves only the **total**, and `memory::stack` owns
+the subdivision and **derives** `max_harts` from that total. Growing the area grows
+the hart count; nothing can hold a stale copy. `boot.S` derives the same number the
+same way, reading only `STRIDE` from a word `memory::stack` exports — the pattern
+already used for `EARLY_SATP_TEMPLATE`.
+
+#### Also removed
+
+- `arch::NCPU = 8` — a dead constant with no users and a **third**, disagreeing
+  answer to "how many harts" (the linker reserves 16). Deleted, with a pointer to
+  `stack::max_harts()`.
+- The second copy of the `csrw satp; sfence.vma` sequence, which `install()` would
+  have duplicated. Both paths now go through one `switch_to`.
+
+#### Secondary-hart path
+
+`kernel_table::init` publishes the `satp` last, so it doubles as the barrier
+`install()` waits on: non-zero means frames, heap and table are all up.
+`memory::init_secondary()` adopts the table rather than rebuilding it, and every
+hart's stack is already mapped so the switch is safe from any hart with a reserved
+stack. Still unreachable — no `hart_start` caller — but the split is now explicit
+rather than a comment.
+
 ---
 
 ## 3. Verified state
@@ -432,28 +540,29 @@ PA `0x80800000` + `VA_OFFSET`, i.e. the linear map, where it used to be
 
 ```
 [memory] direct map: PA 0x0..0x100000000 -> VA 0xffffffc000000000.. (4 GiB)
+boot hart: 0 (chosen by the firmware, not assumed)
 [dtb] blob at 0x87e00000 (size 0x17c4)
 [memory] reserved device tree: 0x87e00000..0x87e02000 (2 frames)
 [memory] frames: 0x8032d000..0x88000000 (124 MiB, physical)
 [memory] frame allocator self-test passed
 [memory] heap:   0xffffffc080800000..0xffffffc081000000 (8 MiB, virtual)
-[memory] kernel page table root at 0x8032f000:
+[memory] kernel page table root at 0x87e02000:
 [memory]   uart                   0xffffffc010000000 -> 0x0010000000  rw-     1 x 4KiB
 [memory]   plic                   0xffffffc00c000000 -> 0x000c000000  rw-  1536 x 4KiB
 [memory]   clint                  0xffffffc002000000 -> 0x0002000000  rw-    16 x 4KiB
 [memory]   text                   0xffffffc080200000 -> 0x0080200000  r-x    26 x 4KiB
 [memory]   rodata                 0xffffffc08021a000 -> 0x008021a000  r--    14 x 4KiB
-[memory]   data                   0xffffffc080228000 -> 0x0080228000  rw-     2 x 4KiB
-[memory]   bss                    0xffffffc08022a000 -> 0x008022a000  rw-     2 x 4KiB
-[memory]   kernel stack           0xffffffc08022c000 -> 0x008022c000  rw-   256 x 4KiB
-[memory]   frame pool head        0xffffffc08032d000 -> 0x008032d000  rw-   211 x 4KiB
+[memory]   data                   0xffffffc080229000 -> 0x0080229000  rw-     2 x 4KiB
+[memory]   bss                    0xffffffc08022b000 -> 0x008022b000  rw-     2 x 4KiB
+[memory]   hart stacks            0xffffffc08022e000 -> 0x008022e000  rw-   256 x 4KiB (x16)
+[memory]   frame pool head        0xffffffc08033e000 -> 0x008033e000  rw-   194 x 4KiB
 [memory]   direct map             0xffffffc080400000 -> 0x0080400000  rw-    62 x 2MiB
-[memory] kernel page table live (satp 0x800000000008032f); boot table retired
+[memory] kernel page table live (satp 0x8000000000087e02); boot table retired
 enter kmain
 [timer] tick 1
 ```
 
-The `direct map tail` region is absent because this platform's RAM top is already
+`hart stacks (x16)` is sixteen regions collapsed into one line by `region::report`; they are separate regions precisely so the guard page between each pair stays unmapped. The `direct map tail` region is absent because this platform's RAM top is already
 superpage-aligned, so it is empty and skipped. `tick 1` is the proof traps still
 work *after* the switch.
 
@@ -503,21 +612,20 @@ table over a linear direct map, a W^X kernel table with no identity mapping, and
 the DTB withheld. What is left in this area is small and mostly about *scale*
 rather than correctness.
 
-### 4.1 SMP — the one real correctness gap left
+### 4.1 SMP — mostly closed, one piece left
 
-`memory::init` and `kernel_table::init` are called by **every** hart that reaches
-`start`. At `-smp 1` (what `scripts/run.sh` passes) that is fine; beyond it, every
-hart would re-initialise the frame allocator over the same RAM and build its own
-kernel page table.
+The reachable half is fixed (§2.H): the boot hart is claimed rather than assumed,
+the BSS is claimed rather than gated on hart 0, and secondary harts have an
+`init_secondary` that adopts the kernel table instead of rebuilding it.
 
-The fix has a shape already: hart 0 builds and publishes the `Satp` value;
-secondaries skip straight to installing it. `Satp` is `Copy` and `bits()` is all an
-AP needs, so a `static AtomicUsize` plus an `install(satp)` is close to sufficient.
-Note `device_tree::init` is already correctly guarded to hart 0 — only the memory
-path is not.
+What remains is that **nothing starts a secondary hart**. `sbi.rs` implements only
+legacy SBI v0.1 — there is no HSM `hart_start`, so `init_secondary`, `install`, and
+`boot.S`'s BSS wait-branch are all correct-by-construction but unexercised. Bringing
+APs up means adding the HSM extension, and only then can those paths be tested by
+racing them rather than by inspection.
 
-Worth doing **before** user processes, not after: retrofitting per-hart state into a
-larger surface is strictly harder.
+Note `-smp 4` now boots reliably, which it did not before — but that is one hart
+running, chosen from four, not four harts running.
 
 ### 4.2 `GLOBAL` on kernel mappings
 
@@ -539,9 +647,6 @@ so this is purely a boot-phase limit.
 
 ### 4.4 Nice-to-haves, in rough order of value
 
-- **A guard page below the kernel stack.** The stack/heap guard above it exists and
-  is asserted, but `_bss_end` and `_kernel_stack_start` are adjacent, so stack
-  *overflow* runs into `.bss` silently. Needs a `. = . + 4096` in `kernel.ld`.
 - **Superpages for aligned device windows.** QEMU virt's PLIC is 3 aligned MiB
   mapped as 1536 4 KiB leaves. Picking the largest level that divides both base and
   size would cut that to 3, at the cost of a size-must-divide argument.
@@ -587,14 +692,15 @@ Struck-through items are closed; kept so the history of each is legible.
    at the crate level, but the kernel table is permanent so nothing tears down a
    tree. The least-exercised code in the subsystem; user paging (§4.5) is what will
    first run it.
-9. **Single-hart only.** `memory::init` and `kernel_table::init` run on every hart
-   that reaches `start` — fine at `-smp 1`, wrong beyond it. The one real
-   correctness gap left in this area; see §4.1.
+9. ~~Single-hart only.~~ **Mostly done** (§2.H). The boot hart is claimed, not
+   assumed — that was a live bug, panicking 5 of 8 boots at `-smp 4`. What is left
+   is that nothing *starts* a secondary hart, so `init_secondary` and `boot.S`'s
+   BSS wait-branch are unexercised. Needs SBI HSM; see §4.1.
 10. **No `GLOBAL` bit on kernel mappings** — TLB optimisation, deferred to when
     address spaces exist (§4.2).
-11. **No guard page below the kernel stack.** `_bss_end` and `_kernel_stack_start`
-    are adjacent, so stack overflow lands in `.bss` silently. The guard *above* the
-    stack exists and is asserted. Needs a linker-script change (§4.4).
+11. ~~No guard page below the kernel stack.~~ **Done** (§2.H) — one unmapped guard
+    page per hart, all 16 audited, verified by a `StorePageFault` probe 8 bytes
+    below hart 0's stack bottom.
 12. **Reservations are not enumerable.** `reserve` works, but nothing records what
     was withheld, so a future initrd or `/reserved-memory` pass has no list to
     consult (§4.4).

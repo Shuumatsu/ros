@@ -20,28 +20,39 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
     // where the direct map lives; every address below depends on it.
     memory::direct_map::verify(va_offset);
 
-    if hartid == 0 {
+    // One-time setup belongs to whichever hart arrived first, *not* to hart 0. The
+    // previous boot stage chooses which hart enters the kernel and is not required
+    // to choose 0; gating on `hartid == 0` would mean a platform whose boot hart is
+    // 1 never parses the device tree and then fails somewhere unrelated.
+    let boot_hart = cpu::claim_boot_hart(hartid);
+
+    if boot_hart {
         // Parse the DTB the SBI handed us in a1: it populates the device table
         // (the console learns the UART base from here). Zero-allocation, so it
         // is safe to run before the heap exists.
         unsafe { crate::device_tree::init(dtb) };
         crate::device_tree::summary();
         cpu::print_info();
+
+        println!("initializing memory...");
+        // Frames, then the heap carved from them, then the real kernel page table.
+        // `memory` owns that ordering; see `memory::init`.
+        memory::init();
+        println!("initializing memory completed");
+    } else {
+        // Physical memory and the heap are global and already up (or on their way);
+        // this hart only needs to stop running on the boot table. Blocks until the
+        // boot hart publishes.
+        memory::init_secondary();
     }
 
-    println!("initializing memory...");
-    memory::init();
-    // Replace boot.S's blanket-RWX gigapage table with a real one: per-section
-    // rights and W^X. Must follow memory::init — it allocates frames.
-    memory::kernel_table::init();
-    println!("initializing memory completed");
-
     println!("initializing traps...");
+    // Per-hart: `stvec` is a CSR, so every hart sets its own.
     unsafe { trap::init() };
     println!("initializing traps completed");
 
     // Already in S-mode — go straight into the kernel.
-    if hartid == 0 {
+    if boot_hart {
         unsafe { kmain() }
     } else {
         unsafe { kmain_ap() }

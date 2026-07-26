@@ -67,22 +67,69 @@ _boot:
 
     la      gp, _global_pointer # high gp (norelax above keeps this absolute-safe)
 
-    # Boot hart (hartid 0) zeroes the BSS.
-    bnez    a0, 3f
-    la      t0, _bss_start
-    la      t1, _bss_end
-    bgeu    t0, t1, 3f
+    # ---- Zero the BSS, exactly once, by whichever hart gets here first ----
+    # NOT "if hartid == 0". The firmware picks which hart enters the kernel and is
+    # not required to pick 0 — OpenSBI runs a lottery, so at -smp 4 the winner
+    # genuinely varies from boot to boot. Gating on a0 meant that on every boot
+    # whose winner was not hart 0, the BSS was never cleared at all; it only looked
+    # fine because QEMU hands out zeroed memory.
+    #
+    # So claim the job with an atomic swap on a flag that lives in .data — it
+    # cannot live in .bss, which is the thing being cleared — and make any hart
+    # that loses the race wait for completion before it can read a static.
+    lla     t0, .Lbss_state
+    li      t1, 1
+    amoswap.w t1, t1, (t0)      # 0 -> 1, returning the previous value
+    bnez    t1, 7f              # someone else claimed it: wait below
+    la      t2, _bss_start
+    la      t3, _bss_end
+    bgeu    t2, t3, 8f
 2:
-    sd      zero, (t0)
-    addi    t0, t0, 8
-    bltu    t0, t1, 2b
+    sd      zero, (t2)
+    addi    t2, t2, 8
+    bltu    t2, t3, 2b
+8:
+    fence   w, w                # the zeroing must be visible before "done" is
+    li      t1, 2
+    sw      t1, 0(t0)           # publish completion
+    j       3f
+7:
+    lw      t1, 0(t0)           # spin until the claiming hart publishes
+    li      t2, 2
+    bne     t1, t2, 7b
+    fence   r, r                # ...and do not read statics before that is seen
 3:
-    # Per-hart stack: sp = _kernel_stack_start + 64 KiB * (hartid + 1).
-    la      sp, _kernel_stack_start
-    li      t0, 64*1024
-    addi    t1, tp, 1
-    mul     t0, t0, t1
-    add     sp, sp, t0
+    # ---- Per-hart stack ----
+    # Each hart's usable stack sits immediately above its own guard page, so its
+    # top is _kernel_stack_start + stride * (hartid + 1). The stride is owned by
+    # memory::stack and read from the word it exports; the hart count is *derived*
+    # from the area the linker reserved, which is exactly how Rust derives it. So
+    # neither side restates the other, and there is no constant here to drift.
+    lla     t0, HART_STACK_STRIDE
+    ld      t0, 0(t0)           # t0 = guard + stack, per hart
+    la      t1, _kernel_stack_start
+    la      t2, _kernel_stack_end
+    sub     t2, t2, t1          # t2 = bytes reserved for all stacks
+    divu    t2, t2, t0          # t2 = harts we have stack space for
+
+    # A hartid at or beyond that has no stack. Continuing would put sp on another
+    # hart's stack — or past the area entirely — and corrupt memory before Rust
+    # runs, so there is nothing safe to do but park.
+    bltu    tp, t2, 4f
+5:
+    wfi
+    j       5b
+4:
+    addi    t3, tp, 1
+    mul     t0, t0, t3
+    add     sp, t1, t0          # sp = start + stride * (hartid + 1)
 
     # start(hartid = a0, dtb = a1, measured va_offset = a2)
     call    start
+
+# BSS-zeroing claim flag: 0 = untouched, 1 = claimed, 2 = done. In .data so it is
+# loaded as zero from the image and is NOT itself cleared by the loop it guards.
+.section .data
+.balign 4
+.Lbss_state:
+    .word   0

@@ -8,6 +8,7 @@ pub mod frame;
 pub mod kernel_table;
 pub mod layout;
 pub mod region;
+pub mod stack;
 
 /// ORDER determines max allocation size: 2^(ORDER-1) bytes
 /// ORDER=32 supports up to 2GB allocations
@@ -50,8 +51,12 @@ fn alloc_error(layout: Layout) -> ! {
     );
 }
 
-/// Initialize the memory subsystem: the physical frame allocator first, then the
-/// kernel heap carved out of it.
+/// Bring up the memory subsystem. **Boot hart only** — see [`init_secondary`].
+///
+/// Physical frames, then the kernel heap carved out of them, then the kernel page
+/// table built from both. The ordering lives here rather than in the caller: it is a
+/// property of how these three depend on each other, not something `start` should
+/// have to know.
 ///
 /// Order is load-bearing and now the canonical way round. The frame allocator
 /// (`frame`) keeps its metadata in a bitmap it reserves from RAM, so it depends
@@ -109,4 +114,24 @@ pub fn init() {
         heap_end,
         KERNEL_HEAP_SIZE / 1024 / 1024
     );
+
+    // 3. The real kernel page table LAST: it needs frames for its tree, and it
+    //    derives its direct map from what the allocator ended up owning. Replaces
+    //    boot.S's blanket-RWX gigapages with per-section rights and W^X.
+    kernel_table::init();
+}
+
+/// Adopt the boot hart's memory setup. **Secondary harts only.**
+///
+/// Physical memory and the heap are global and already up; all this hart needs is
+/// to stop running on the boot table. It blocks until the boot hart has published
+/// the kernel table, so it is also the barrier that keeps a secondary from touching
+/// memory before there is any.
+///
+/// Currently unreachable — nothing calls SBI HSM `hart_start`, so no secondary hart
+/// enters the kernel. Its purpose is to make the split explicit, so that when one
+/// does, it cannot accidentally re-run [`init`] and re-initialise the allocator over
+/// RAM already in use.
+pub fn init_secondary() {
+    kernel_table::install();
 }
