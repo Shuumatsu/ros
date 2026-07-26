@@ -1,26 +1,53 @@
 use core::fmt::{self, Write};
-use spin::{Lazy, Mutex};
+use spin::Mutex;
 use uart_16550::MmioSerialPort;
 
-use crate::arch::riscv64::hart_id;
+use crate::arch::riscv64::{hart_id, sbi};
+use crate::device_tree;
 
-pub static UART: Lazy<Mutex<MmioSerialPort>> = Lazy::new(|| {
-    // Base comes from the device tree (`device_tree::discover` runs before the
-    // first print); the earlycon default only applies before discovery.
-    let mut serial = unsafe { MmioSerialPort::new(crate::device_tree::uart_base()) };
-    serial.init();
-    Mutex::new(serial)
-});
+/// The primary MMIO UART, bound to the device-tree base the first time we print
+/// after the DTB is parsed. `None` until then, when output falls back to the SBI
+/// console — so no UART address is ever hardcoded.
+static UART: Mutex<Option<MmioSerialPort>> = Mutex::new(None);
 
-/// Lock-free stdout for interrupt/panic contexts
+/// Write `s` to the DTB-discovered MMIO UART if we have it, else the SBI console.
+fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
+    if port.is_none() {
+        if let Some(base) = device_tree::uart_base() {
+            let mut serial = unsafe { MmioSerialPort::new(base) };
+            serial.init();
+            *port = Some(serial);
+        }
+    }
+    match port {
+        Some(serial) => {
+            let _ = serial.write_str(s);
+        }
+        None => sbi_write(s),
+    }
+}
+
+/// Lock-free write via the SBI console — needs no address, safe in panic/IRQ.
+fn sbi_write(s: &str) {
+    for b in s.bytes() {
+        sbi::console_putchar(b as usize);
+    }
+}
+
+/// `fmt::Write` sink over the locked UART slot (the normal, locked path).
+struct Uart<'a>(&'a mut Option<MmioSerialPort>);
+impl fmt::Write for Uart<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        emit(self.0, s);
+        Ok(())
+    }
+}
+
+/// Lock-free SBI-console sink for interrupt/panic contexts.
 struct KernelStdout;
-
 impl fmt::Write for KernelStdout {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let uart = crate::device_tree::uart_base() as *mut u8;
-        for c in s.bytes() {
-            unsafe { uart.write_volatile(c) };
-        }
+        sbi_write(s);
         Ok(())
     }
 }
@@ -56,9 +83,10 @@ pub fn _print(args: fmt::Arguments) {
     let was_enabled = disable_interrupts();
 
     {
-        let mut uart = UART.lock();
-        let _ = write!(uart, "[hart {}] ", hart);
-        let _ = uart.write_fmt(args);
+        let mut port = UART.lock();
+        let mut out = Uart(&mut port);
+        let _ = write!(out, "[hart {}] ", hart);
+        let _ = out.write_fmt(args);
     }
 
     restore_interrupts(was_enabled);

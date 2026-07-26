@@ -4,12 +4,21 @@ use riscv::register::{mie, sie};
 use crate::device_tree::{plic_base, uart_irq};
 use crate::trap::TrapFrame;
 use crate::{print, println};
-// The PLIC is an interrupt controller controlled via MMIO. Its base comes from
-// the device tree; the register offsets below are fixed by the PLIC spec.
-use crate::platform::{
-    PLIC_CLAIM_OFFSET, PLIC_ENABLE_OFFSET, PLIC_PENDING_OFFSET, PLIC_PRIORITY_OFFSET,
-    PLIC_THRESHOLD_OFFSET,
-};
+
+// Register offsets within the PLIC MMIO region. The *base* comes from the device
+// tree; these offsets are fixed by the PLIC spec (the DTB does not — and cannot —
+// describe a controller's internal register layout), so they live with the
+// driver, not in any platform table.
+//   base + 0x000000: source priorities
+//   base + 0x001000: pending bits
+//   base + 0x002000: enable bits (context 0)
+//   base + 0x200000: priority threshold (context 0)
+//   base + 0x200004: claim/complete (context 0)
+const PLIC_PRIORITY_OFFSET: usize = 0x0;
+const PLIC_PENDING_OFFSET: usize = 0x1000;
+const PLIC_ENABLE_OFFSET: usize = 0x2000;
+const PLIC_THRESHOLD_OFFSET: usize = 0x20_0000;
+const PLIC_CLAIM_OFFSET: usize = 0x20_0004;
 
 // The platform-level interrupt controller (PLIC) routes all signals through one pin on the CPU--the EI (external interrupt) pin.
 // This pin can be enabled via the machine external interrupt enable (meie) bit in the mie register.

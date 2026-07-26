@@ -19,7 +19,6 @@ mod lang_items;
 mod console;
 mod device_tree;
 mod memory;
-mod platform;
 mod proc;
 mod sbi;
 mod start;

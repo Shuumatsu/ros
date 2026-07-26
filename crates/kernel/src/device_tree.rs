@@ -18,8 +18,6 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use fdt_raw::Fdt;
 
-use crate::platform;
-
 // Discovered hardware, filled in by `discover`. Zero means "not found".
 static DTB_ADDR: AtomicUsize = AtomicUsize::new(0);
 static RAM_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -63,30 +61,24 @@ pub fn ram_end() -> Option<usize> {
     }
 }
 
-/// Primary UART base. Before [`discover`] runs this returns the compile-time
-/// earlycon default, so a panic in the pre-discovery window is still visible;
-/// afterwards it returns the address the device tree reported.
-pub fn uart_base() -> usize {
+/// Primary UART base, or `None` before the device tree has been parsed. There is
+/// no hardcoded UART address: the console falls back to the SBI console until
+/// this is known, then uses the DTB-reported MMIO base.
+pub fn uart_base() -> Option<usize> {
     match UART_BASE.load(Ordering::Relaxed) {
-        0 => platform::UART0_BASE,
-        b => b,
+        0 => None,
+        b => Some(b),
     }
 }
 
-/// Primary UART MMIO size (earlycon default before discovery).
+/// Primary UART MMIO size (0 before discovery).
 pub fn uart_size() -> usize {
-    match UART_SIZE.load(Ordering::Relaxed) {
-        0 => platform::UART0_SIZE,
-        s => s,
-    }
+    UART_SIZE.load(Ordering::Relaxed)
 }
 
-/// Primary UART interrupt number (earlycon default before discovery).
+/// Primary UART interrupt number (0 before discovery).
 pub fn uart_irq() -> usize {
-    match UART_IRQ.load(Ordering::Relaxed) {
-        0 => platform::UART0_IRQ,
-        i => i,
-    }
+    UART_IRQ.load(Ordering::Relaxed)
 }
 
 /// PLIC base. Panics if the tree carried no PLIC — callers only reach this once
@@ -153,9 +145,9 @@ fn find_irq(fdt: &Fdt, compatibles: &[&str]) -> Option<usize> {
 /// print itself; call [`summary`] for that.
 ///
 /// A usable device tree is part of the boot contract: a null pointer, an
-/// unparseable blob, a `/memory` with no region covering [`platform::DRAM_BASE`],
-/// or a missing UART all **panic** rather than let the kernel limp on wrong
-/// addresses. (Such a panic is still visible via the earlycon UART default.)
+/// unparseable blob, a `/memory` with no region containing the kernel, or a
+/// missing UART all **panic** rather than let the kernel limp on wrong
+/// addresses. (Such a panic is still visible via the SBI console.)
 ///
 /// # Safety
 /// `dtb_ptr` must be the address of a valid, readable FDT blob (as passed in
@@ -174,13 +166,15 @@ pub unsafe fn init(dtb_ptr: usize) {
     // ---- Populate the device table (no printing yet: the console needs the
     //      UART base we are about to store). ----
 
-    // Physical RAM: the region covering the DRAM base backs the kernel + heap.
+    // Physical RAM: pick the /memory region that actually backs the kernel — the
+    // one containing our own physical load address (derived, not hardcoded).
+    let kernel_pa = crate::memory::virt_to_phys(crate::memory::layout::text_start());
     let mut ram_found = false;
     for mem in fdt.memory() {
         for region in mem.regions() {
             let base = region.address as usize;
             let end = base.saturating_add(region.size as usize);
-            if (base..end).contains(&platform::DRAM_BASE) {
+            if (base..end).contains(&kernel_pa) {
                 RAM_BASE.store(base, Ordering::Relaxed);
                 RAM_END.store(end, Ordering::Relaxed);
                 ram_found = true;
@@ -188,14 +182,14 @@ pub unsafe fn init(dtb_ptr: usize) {
         }
     }
     if !ram_found {
-        panic!("[dtb] /memory has no region covering DRAM base {:#x}", platform::DRAM_BASE);
+        panic!("[dtb] /memory has no region containing the kernel at {:#x}", kernel_pa);
     }
 
     // Primary UART — console-critical, so its absence is fatal.
     match find_reg(&fdt, &["ns16550a", "ns16550"]) {
         Some((base, size)) => {
             UART_BASE.store(base, Ordering::Relaxed);
-            UART_SIZE.store(if size == 0 { platform::UART0_SIZE } else { size }, Ordering::Relaxed);
+            UART_SIZE.store(size, Ordering::Relaxed);
         }
         None => panic!("[dtb] no ns16550a UART node — cannot bring up the console"),
     }
@@ -222,7 +216,12 @@ pub fn summary() {
     if let (Some(base), Some(end)) = (ram_base(), ram_end()) {
         println!("[dtb] ram:   {:#x}..{:#x} ({} MiB)", base, end, (end - base) / (1024 * 1024));
     }
-    println!("[dtb] uart:  {:#x} (size {:#x}, irq {})", uart_base(), uart_size(), uart_irq());
+    println!(
+        "[dtb] uart:  {:#x} (size {:#x}, irq {})",
+        UART_BASE.load(Ordering::Relaxed),
+        uart_size(),
+        uart_irq()
+    );
     if PLIC_BASE.load(Ordering::Relaxed) != 0 {
         println!("[dtb] plic:  {:#x} (size {:#x})", plic_base(), plic_size());
     }
