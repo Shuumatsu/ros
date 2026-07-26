@@ -1,0 +1,497 @@
+//! Page-table walks: mapping, translation and teardown.
+//!
+//! Everything here descends *through* tables, so everything here needs the two
+//! policies the caller owns: where new intermediate tables come from
+//! ([`FrameSource`]) and how to reach a frame from its physical address
+//! ([`PhysAccess`]). [`Mapper`] binds a root table to one choice of each, which
+//! keeps that choice fixed for the whole tree and keeps it off [`Table`] — a
+//! type that must stay exactly one page of hardware-defined entries.
+
+use super::access::PhysAccess;
+use super::addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
+use super::entry::{Entry, PteFlags};
+use super::frames::FrameSource;
+use super::table::Table;
+use super::{ENTRIES_PER_PAGE, LEVELS, PAGE_OFFSET_BITS, PAGE_SIZE, ROOT_LEVEL, VPN_BITS};
+use super::page_size_at;
+use crate::utils::{align_down, align_up, mask};
+
+/// Why a mapping could not be installed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum MapError {
+    /// `level` is not one of the Sv39 page-table levels.
+    #[error("page-table level {level} is out of range for Sv39")]
+    InvalidLevel {
+        /// The rejected level.
+        level: usize,
+    },
+    /// The virtual address is not aligned to the page size it would map.
+    #[error("virtual address {vaddr:#x} is not aligned to its {page_size:#x}-byte page")]
+    UnalignedVirtual {
+        /// The rejected virtual address.
+        vaddr: usize,
+        /// Page size implied by the requested level.
+        page_size: usize,
+    },
+    /// The physical address is not aligned to the page size it would map.
+    #[error("physical address {paddr:#x} is not aligned to its {page_size:#x}-byte page")]
+    UnalignedPhysical {
+        /// The rejected physical address.
+        paddr: usize,
+        /// Page size implied by the requested level.
+        page_size: usize,
+    },
+    /// The flags name none of R/W/X, which encodes a branch rather than a page.
+    #[error("a mapping needs at least one of R/W/X")]
+    NotALeaf,
+    /// Write-without-read is architecturally reserved.
+    #[error("write-without-read is a reserved PTE encoding")]
+    WriteWithoutRead,
+    /// The frame source is exhausted, so no intermediate table could be made.
+    #[error("no frame available for an intermediate page table")]
+    OutOfFrames,
+    /// A superpage already covers this address, so the walk cannot descend.
+    #[error("an existing superpage at level {level} already covers this address")]
+    SuperpageInPath {
+        /// Level at which the blocking leaf was found.
+        level: usize,
+    },
+}
+
+/// Reconstruct the physical address a leaf at `level` maps `vaddr` to.
+///
+/// The upper bits come from the entry's PPN; the low `12 + 9*level` bits (the
+/// offset within a 4 KiB / 2 MiB / 1 GiB page) come from `vaddr`.
+#[inline]
+fn leaf_to_phys(entry: Entry, vaddr: VirtualAddr, level: usize) -> PhysicalAddr {
+    let page_bits = PAGE_OFFSET_BITS + VPN_BITS * level;
+    let in_page = mask(page_bits);
+    let base = entry.ppn() << PAGE_OFFSET_BITS;
+    PhysicalAddr::new((base & !in_page) | (vaddr.bits() & in_page))
+}
+
+/// Reject a mapping request that the hardware could not represent.
+fn validate(
+    vaddr: VirtualAddr,
+    paddr: PhysicalAddr,
+    level: usize,
+    flags: PteFlags,
+) -> Result<(), MapError> {
+    // Checked first: `page_size_at` is only defined for real levels.
+    if level >= LEVELS {
+        return Err(MapError::InvalidLevel { level });
+    }
+    if !flags.is_leaf() {
+        return Err(MapError::NotALeaf);
+    }
+    if !flags.is_legal_leaf() {
+        return Err(MapError::WriteWithoutRead);
+    }
+    let page_size = page_size_at(level);
+    if !vaddr.is_aligned(page_size) {
+        return Err(MapError::UnalignedVirtual { vaddr: vaddr.bits(), page_size });
+    }
+    if !paddr.is_aligned(page_size) {
+        return Err(MapError::UnalignedPhysical { paddr: paddr.bits(), page_size });
+    }
+    Ok(())
+}
+
+/// A page-table tree plus the policy needed to walk it.
+pub struct Mapper<'a, F, A> {
+    root: &'a mut Table,
+    frames: F,
+    access: A,
+}
+
+impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
+    /// Bind `root` to a frame source and an addressing strategy.
+    pub fn new(root: &'a mut Table, frames: F, access: A) -> Self {
+        Self { root, frames, access }
+    }
+
+    /// Borrow the frame source, for callers that share one allocator.
+    pub fn frames_mut(&mut self) -> &mut F {
+        &mut self.frames
+    }
+
+    /// Map a single 4 KiB page `vaddr -> paddr`.
+    pub fn map(
+        &mut self,
+        vaddr: VirtualAddr,
+        paddr: PhysicalAddr,
+        flags: PteFlags,
+    ) -> Result<(), MapError> {
+        self.map_at_level(vaddr, paddr, 0, flags)
+    }
+
+    /// Map one page of the size `level` selects: 4 KiB (0), 2 MiB (1), 1 GiB (2).
+    ///
+    /// Intermediate tables are created for every level *above* `level`, so a
+    /// root-level mapping never touches the frame source. `VALID` is applied
+    /// automatically; `flags` must name at least one of R/W/X.
+    ///
+    /// On [`MapError::OutOfFrames`] any intermediate tables already created are
+    /// left in place. They are empty and will be reused by the next mapping
+    /// through the same region — nothing is corrupted, but nothing is unwound.
+    pub fn map_at_level(
+        &mut self,
+        vaddr: VirtualAddr,
+        paddr: PhysicalAddr,
+        level: usize,
+        flags: PteFlags,
+    ) -> Result<(), MapError> {
+        validate(vaddr, paddr, level, flags)?;
+
+        let mut table: *mut Table = self.root;
+        let mut current = ROOT_LEVEL;
+        while current > level {
+            let index = vaddr.vpn(current);
+            // Read the entry out by value: holding a `&mut` into the table
+            // across the frame-source call would borrow `self` twice.
+            // SAFETY: `table` is the root or a child reached through a valid
+            // branch entry, and `access` maps such frames to live pointers.
+            let existing = unsafe { (*table).entries[index] };
+
+            let child = if !existing.is_valid() {
+                let frame = self.frames.alloc_zeroed().ok_or(MapError::OutOfFrames)?;
+                // SAFETY: same frame as above; the slot is ours to overwrite.
+                unsafe { (*table).entries[index] = Entry::branch(frame) };
+                frame
+            } else if existing.is_leaf() {
+                return Err(MapError::SuperpageInPath { level: current });
+            } else {
+                existing.target()
+            };
+
+            table = self.access.ptr::<Table>(child);
+            current -= 1;
+        }
+
+        // SAFETY: the walk stopped at `level`, so `table` is the table that
+        // owns the entry for `vaddr` at that level.
+        unsafe { (*table).entries[vaddr.vpn(level)] = Entry::leaf(paddr, flags) };
+        Ok(())
+    }
+
+    /// Translate a virtual address, honouring leaf mappings at any level.
+    ///
+    /// Returns `None` if the walk hits an invalid entry, or a branch where a
+    /// leaf must be.
+    pub fn translate(&self, vaddr: VirtualAddr) -> Option<PhysicalAddr> {
+        let mut table: *const Table = self.root;
+        for level in (0..LEVELS).rev() {
+            // SAFETY: `table` is the root or a child from a valid branch entry.
+            let entry = unsafe { (*table).entries[vaddr.vpn(level)] };
+            if !entry.is_valid() {
+                return None;
+            }
+            if entry.is_leaf() {
+                return Some(leaf_to_phys(entry, vaddr, level));
+            }
+            table = self.access.ptr::<Table>(entry.target());
+        }
+        // Fell off the bottom without a leaf: a branch at level 0 is malformed.
+        None
+    }
+
+    /// Map every 4 KiB page overlapping `[start, end)`, taking each physical
+    /// address from `translate`. `end` is rounded up so a partial final page is
+    /// still fully mapped.
+    pub fn map_range<T>(
+        &mut self,
+        start: usize,
+        end: usize,
+        translate: T,
+        flags: PteFlags,
+    ) -> Result<(), MapError>
+    where
+        T: Fn(VirtualAddr) -> PhysicalAddr,
+    {
+        let mut va = align_down(start, PAGE_SIZE);
+        let end = align_up(end, PAGE_SIZE);
+        while va < end {
+            let vaddr = VirtualAddr::new(va);
+            self.map(vaddr, translate(vaddr), flags)?;
+            va += PAGE_SIZE;
+        }
+        Ok(())
+    }
+
+    /// Identity-map `[start, end)` (each virtual page to the equal physical page).
+    pub fn id_map_range(&mut self, start: usize, end: usize, flags: PteFlags) -> Result<(), MapError> {
+        self.map_range(start, end, |v| PhysicalAddr::new(v.bits()), flags)
+    }
+
+    /// Return every intermediate table beneath the root to the frame source.
+    ///
+    /// Leaf-mapped frames are left untouched (they are not owned here) and the
+    /// root itself is not freed. Freed branch entries are cleared, so the tree
+    /// is left consistent.
+    ///
+    /// # Safety
+    ///
+    /// Every branch under the root must point to a frame from this mapper's
+    /// [`FrameSource`], and none of them may still be in use by hardware — the
+    /// caller must have removed this tree from `satp` and flushed the TLB.
+    pub unsafe fn free_subtables(&mut self) {
+        let root: *mut Table = self.root;
+        // SAFETY: forwarded from this function's contract.
+        unsafe { self.free_below(root, ROOT_LEVEL) };
+    }
+
+    /// Recursively free the branches under `table`, which sits at `level`.
+    ///
+    /// # Safety
+    /// See [`free_subtables`](Self::free_subtables); `table` must be live and
+    /// at `level`.
+    unsafe fn free_below(&mut self, table: *mut Table, level: usize) {
+        // Entries at level 0 are leaves; there is nothing below them to free.
+        if level == 0 {
+            return;
+        }
+        for index in 0..ENTRIES_PER_PAGE {
+            // SAFETY: `table` is live for `ENTRIES_PER_PAGE` entries.
+            let entry = unsafe { (*table).entries[index] };
+            if !entry.is_branch() {
+                continue;
+            }
+            let child = self.access.ptr::<Table>(entry.target());
+            // SAFETY: a branch points at a frame this source handed out; free
+            // its descendants first (post-order), then the frame itself, then
+            // clear the slot so the tree never references freed memory.
+            unsafe {
+                self.free_below(child, level - 1);
+                self.frames.free(entry.target());
+                (*table).entries[index] = Entry::empty();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sv39::access::Identity;
+
+    /// A frame source backed by boxed tables.
+    ///
+    /// A boxed `Table` is page-aligned (the type demands it) and its heap block
+    /// does not move when the `Vec` grows, so the addresses handed out stay
+    /// valid. That is what lets host tests use [`Identity`] and treat a host
+    /// pointer as a physical address.
+    #[derive(Default)]
+    struct Arena {
+        tables: Vec<Box<Table>>,
+        freed: Vec<usize>,
+    }
+
+    // SAFETY: every frame is a freshly boxed `Table::new()` — page-aligned,
+    // zeroed (all entries invalid), and owned solely by this arena.
+    unsafe impl FrameSource for Arena {
+        fn alloc_zeroed(&mut self) -> Option<PhysicalAddr> {
+            let mut table = Box::new(Table::new());
+            let pa = PhysicalAddr::new(table.as_mut() as *mut Table as usize);
+            self.tables.push(table);
+            Some(pa)
+        }
+        unsafe fn free(&mut self, frame: PhysicalAddr) {
+            // Record rather than deallocate: the arena owns the boxes until it
+            // drops, which keeps freed frames safe to inspect in assertions.
+            self.freed.push(frame.bits());
+        }
+    }
+
+    /// A frame source that never yields, for proving a path allocates nothing.
+    struct Barren;
+
+    // SAFETY: never hands out a frame, so the contract holds vacuously.
+    unsafe impl FrameSource for Barren {
+        fn alloc_zeroed(&mut self) -> Option<PhysicalAddr> {
+            None
+        }
+        unsafe fn free(&mut self, _frame: PhysicalAddr) {}
+    }
+
+    const RWX: PteFlags = PteFlags::READ_WRITE_EXECUTE;
+
+    #[test]
+    fn maps_and_translates_a_four_kib_page() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        // A distinct index at every level: vpn2=1, vpn1=2, vpn0=3.
+        let va = VirtualAddr::new((1 << 30) | (2 << 21) | (3 << 12));
+        let pa = PhysicalAddr::new(0x8020_1000);
+
+        mapper.map(va, pa, PteFlags::READ_WRITE).expect("4 KiB mapping must succeed");
+        assert_eq!(mapper.translate(va), Some(pa), "exact page translates back");
+
+        let va_off = VirtualAddr::new(va.bits() + 0x123);
+        let pa_off = PhysicalAddr::new(pa.bits() + 0x123);
+        assert_eq!(mapper.translate(va_off), Some(pa_off), "in-page offset preserved");
+    }
+
+    #[test]
+    fn maps_and_translates_superpages() {
+        for (level, size) in [(1usize, 2 * 1024 * 1024usize), (2, 1024 * 1024 * 1024)] {
+            let mut root = Table::new();
+            let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+            let va = VirtualAddr::new(4 * size);
+            let pa = PhysicalAddr::new(6 * size);
+
+            mapper
+                .map_at_level(va, pa, level, RWX)
+                .unwrap_or_else(|e| panic!("level-{level} mapping must succeed: {e}"));
+            assert_eq!(mapper.translate(va), Some(pa), "level-{level} base translates");
+
+            // An offset anywhere inside the superpage resolves through it.
+            let inside = size - 1;
+            assert_eq!(
+                mapper.translate(VirtualAddr::new(va.bits() + inside)),
+                Some(PhysicalAddr::new(pa.bits() + inside)),
+                "offset inside a level-{level} superpage is preserved",
+            );
+        }
+    }
+
+    #[test]
+    fn a_gigapage_needs_no_frames() {
+        // The early boot table depends on this: a root-level leaf must never
+        // reach for the frame source, because none exists yet.
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Barren, Identity);
+        let va = VirtualAddr::new(2 << 30);
+        let pa = PhysicalAddr::new(2 << 30);
+
+        mapper
+            .map_at_level(va, pa, ROOT_LEVEL, RWX)
+            .expect("a root-level gigapage must not allocate");
+        assert_eq!(mapper.translate(va), Some(pa), "gigapage translates");
+    }
+
+    #[test]
+    fn reports_out_of_frames_below_the_root() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Barren, Identity);
+        let error = mapper
+            .map(VirtualAddr::new(0x4000), PhysicalAddr::new(0x4000), RWX)
+            .expect_err("a 4 KiB mapping needs intermediate tables");
+        assert_eq!(error, MapError::OutOfFrames, "wrong exhaustion diagnostic");
+    }
+
+    #[test]
+    fn rejects_a_superpage_in_the_walk_path() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        let giga = 1 << 30;
+        mapper
+            .map_at_level(VirtualAddr::new(giga), PhysicalAddr::new(giga), ROOT_LEVEL, RWX)
+            .expect("gigapage must map");
+
+        // A 4 KiB mapping inside that gigapage would have to descend through it.
+        let error = mapper
+            .map(VirtualAddr::new(giga + 0x1000), PhysicalAddr::new(0x1000), RWX)
+            .expect_err("cannot descend through a superpage");
+        assert_eq!(
+            error,
+            MapError::SuperpageInPath { level: ROOT_LEVEL },
+            "wrong blocked-walk diagnostic",
+        );
+    }
+
+    #[test]
+    fn rejects_misaligned_and_illegal_requests() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        let two_mib = 2 * 1024 * 1024;
+
+        assert_eq!(
+            mapper.map_at_level(VirtualAddr::new(0x1000), PhysicalAddr::new(0), 1, RWX),
+            Err(MapError::UnalignedVirtual { vaddr: 0x1000, page_size: two_mib }),
+            "a 2 MiB mapping needs a 2 MiB-aligned VA",
+        );
+        assert_eq!(
+            mapper.map_at_level(VirtualAddr::new(0), PhysicalAddr::new(0x1000), 1, RWX),
+            Err(MapError::UnalignedPhysical { paddr: 0x1000, page_size: two_mib }),
+            "a 2 MiB mapping needs a 2 MiB-aligned PA",
+        );
+        assert_eq!(
+            mapper.map(VirtualAddr::new(0), PhysicalAddr::new(0), PteFlags::VALID),
+            Err(MapError::NotALeaf),
+            "no R/W/X is a branch, not a page",
+        );
+        assert_eq!(
+            mapper.map(VirtualAddr::new(0), PhysicalAddr::new(0), PteFlags::WRITE),
+            Err(MapError::WriteWithoutRead),
+            "write-only is reserved",
+        );
+        assert_eq!(
+            mapper.map_at_level(VirtualAddr::new(0), PhysicalAddr::new(0), LEVELS, RWX),
+            Err(MapError::InvalidLevel { level: LEVELS }),
+            "level must be a real Sv39 level",
+        );
+    }
+
+    #[test]
+    fn unmapped_translates_to_none() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        mapper
+            .map(VirtualAddr::new(0x8000_0000), PhysicalAddr::new(0x8000_0000), PteFlags::READ_WRITE)
+            .expect("mapping must succeed");
+
+        assert_eq!(mapper.translate(VirtualAddr::new(0x9000_0000)), None, "unmapped VA is None");
+    }
+
+    #[test]
+    fn map_range_covers_a_partial_final_page() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        // 0x3001 lands in the page based at 0x3000, so three pages must be
+        // mapped; rounding the end down would have dropped it.
+        mapper.id_map_range(0x1000, 0x3001, PteFlags::READ_WRITE).expect("range must map");
+
+        for page in [0x1000usize, 0x2000, 0x3000] {
+            assert_eq!(
+                mapper.translate(VirtualAddr::new(page)),
+                Some(PhysicalAddr::new(page)),
+                "page {page:#x} in range must be mapped",
+            );
+        }
+        assert_eq!(mapper.translate(VirtualAddr::new(0x4000)), None, "page past the range");
+        assert_eq!(mapper.translate(VirtualAddr::new(0)), None, "page before the range");
+    }
+
+    #[test]
+    fn remapping_overwrites_the_leaf() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        let va = VirtualAddr::new(0x4000_0000);
+        mapper.map(va, PhysicalAddr::new(0x1000), PteFlags::READ).expect("first map");
+        mapper.map(va, PhysicalAddr::new(0x2000), PteFlags::READ_WRITE).expect("second map");
+
+        assert_eq!(mapper.translate(va), Some(PhysicalAddr::new(0x2000)), "second map wins");
+    }
+
+    #[test]
+    fn free_subtables_returns_every_intermediate_frame() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        // One 4 KiB mapping builds exactly two intermediate tables (levels 1, 0).
+        mapper
+            .map(VirtualAddr::new(0x4000_0000), PhysicalAddr::new(0x1000), PteFlags::READ_WRITE)
+            .expect("mapping must succeed");
+        let allocated = mapper.frames_mut().tables.len();
+        assert_eq!(allocated, 2, "a 4 KiB mapping needs a level-1 and a level-0 table");
+
+        // SAFETY: this tree is not installed in any satp; the arena owns the frames.
+        unsafe { mapper.free_subtables() };
+
+        assert_eq!(mapper.frames_mut().freed.len(), allocated, "every intermediate must be freed");
+        assert_eq!(
+            mapper.translate(VirtualAddr::new(0x4000_0000)),
+            None,
+            "freed branches must be cleared, not left dangling",
+        );
+    }
+}

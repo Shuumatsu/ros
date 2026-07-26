@@ -76,6 +76,27 @@ impl Entry {
     /// Wrap a raw entry word.
     pub const fn new(bits: usize) -> Self { Self(bits) }
 
+    /// A leaf entry mapping the frame `paddr` lies in, with `flags`; `VALID` is
+    /// applied automatically and `paddr`'s offset bits are ignored.
+    ///
+    /// `const`, so a whole page table can be built at compile time — which is
+    /// how the early boot table is made, before any allocator exists.
+    pub const fn leaf(paddr: PhysicalAddr, flags: PteFlags) -> Self {
+        Self(
+            with_field(0, PTE_PPN_SHIFT, PPN_BITS, paddr.ppn())
+                | flags.bits()
+                | PteFlags::VALID.bits(),
+        )
+    }
+
+    /// A branch entry pointing at the next-level table in `paddr`.
+    ///
+    /// Carries no R/W/X, so a stale permission bit can never turn an
+    /// intermediate table into an accidental leaf.
+    pub const fn branch(paddr: PhysicalAddr) -> Self {
+        Self(with_field(0, PTE_PPN_SHIFT, PPN_BITS, paddr.ppn()) | PteFlags::VALID.bits())
+    }
+
     pub const fn bits(self) -> usize { self.0 }
 
     pub const fn flags(self) -> PteFlags {

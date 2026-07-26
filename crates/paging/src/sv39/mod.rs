@@ -14,12 +14,18 @@
 //!   | PPN[2] 53:28 | PPN[1] 27:19 | PPN[0] 18:10 | RSW | DAGUXWRV |
 //! ```
 
+pub mod access;
 pub mod addr;
 pub mod entry;
+pub mod frames;
+pub mod mapper;
 pub mod table;
 
+pub use access::{Identity, LinearOffset, PhysAccess};
 pub use addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
 pub use entry::{Entry, PteFlags};
+pub use frames::FrameSource;
+pub use mapper::{MapError, Mapper};
 pub use table::Table;
 
 use crate::utils::{KILOBYTE, MEGABYTE};
