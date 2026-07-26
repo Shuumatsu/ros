@@ -105,8 +105,8 @@ pub fn init(free_start: usize, ram_end: usize) {
     let usable_end = ram_end.min(window_end);
     if ram_end > window_end {
         println!(
-            "[memory] WARNING: {} MiB of RAM above the {:#x} boot window is unmanaged",
-            (ram_end - window_end) / 1024 / 1024,
+            "[memory] WARNING: {} of RAM above the {:#x} boot window is unmanaged",
+            crate::utils::Bytes(ram_end - window_end),
             window_end
         );
     }

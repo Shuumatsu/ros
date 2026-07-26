@@ -20,10 +20,13 @@
 //! | which physical memory is ours | [`frame::owned_range`] |
 //! | the direct-map base | [`super::direct_map::VA_OFFSET`] |
 //!
-//! The device list matters in particular: an earlier version of this module mapped
-//! "the low gigabyte" as one gigapage, justified by a comment listing the QEMU
-//! virt addresses. That was a second, coarser encoding of what the DTB already
-//! says, and it mapped 1 GiB `rw-` to cover a few MiB of real registers.
+//! The device list has been wrong twice, in opposite directions, so it is worth
+//! recording both. First this module mapped "the low gigabyte" as one gigapage,
+//! justified by a comment listing the QEMU virt addresses — a coarser second
+//! encoding of what the DTB already said. Then `mmio_regions()` replaced it but
+//! returned only UART, PLIC and CLINT while *claiming* to be every window, which
+//! left a future driver nowhere to look up its own. It is now a real walk of the
+//! tree, and this maps all of it.
 //!
 //! # No identity mapping
 //!
@@ -52,15 +55,15 @@
 //!
 //! - `GLOBAL` is deliberately not set. It is a TLB optimisation whose correctness
 //!   depends on address spaces that do not exist yet.
-//! - Single-hart only. With SMP, secondary harts must *install* this table rather
-//!   than build their own.
+//! - Secondary harts adopt this table via [`install`] rather than building their
+//!   own, but nothing starts one yet, so that path is unexercised.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use heapless::Vec;
+use alloc::vec::Vec;
 use riscv::register::sstatus;
 
-use paging::sv39::page_size_at;
+use paging::sv39::{LEVELS, page_size_at};
 use paging::utils::{align_down, align_up};
 use paging::{LinearOffset, Mapper, PhysicalAddr, PteFlags, Satp, Table, VirtualAddr};
 
@@ -84,14 +87,32 @@ const READ_WRITE: PteFlags =
 /// Bytes mapped by one leaf at the middle level.
 const SUPERPAGE: usize = page_size_at(1);
 
-/// Upper bound on the region list, derived rather than guessed: one region per hart
-/// stack, plus headroom for the fixed entries (4 kernel sections, 3 direct-map
-/// pieces) and however many device windows the tree describes.
+// No MAX_REGIONS. The count is one per hart stack plus four sections, three
+// direct-map pieces and however many MMIO windows the device tree happens to
+// describe — a bound would be a hand-computed composite of all four, in the same
+// class as the `0x110000` that used to sit in kernel.ld, and it would silently
+// become too small the moment any of them grew. The heap is already up by the time
+// this runs (`super::init` adds it before calling here), so the list simply grows.
+
+/// The largest page-table level that can tile `[base, base + len)` exactly.
 ///
-/// Tied to [`stack::MAX_HARTS`] on purpose — a bare constant would silently become
-/// too small the moment the hart count grew, and the failure would be a panic during
-/// page-table construction rather than anything obvious.
-const MAX_REGIONS: usize = stack::MAX_HARTS + 16;
+/// "Exactly" is the requirement, not "approximately": a superpage rounds outward, so
+/// using one that does not divide the window would map whatever sits next to the
+/// device. Both the base and the length must be multiples of the page size.
+///
+/// This is why big apertures are affordable — QEMU virt's PCI ECAM is 256 MiB, which
+/// is 128 superpages rather than 65536 pages.
+fn largest_level_for(base: usize, len: usize) -> usize {
+    (0..LEVELS)
+        .rev()
+        .find(|&level| {
+            let page = page_size_at(level);
+            base % page == 0 && len % page == 0
+        })
+        // Level 0 always fits: every MMIO window is page-aligned and page-sized once
+        // `Region::install` has rounded it, and `validate` rejects it otherwise.
+        .unwrap_or(0)
+}
 
 /// A direct-map region: `VA` and `PA` differ by the fixed offset, so the physical
 /// side is *derived* rather than restated and given a chance to disagree.
@@ -113,16 +134,10 @@ fn direct(
 }
 
 /// Compute the kernel's address-space layout.
-fn regions() -> Vec<Region, MAX_REGIONS> {
-    // The stack geometry is declared in Rust but placed by the linker; confirm the
-    // two agree before building regions out of it.
-    stack::check_layout();
-
+fn regions() -> Vec<Region> {
     let mut regions = Vec::new();
     let mut push = |region: Region| {
-        regions.push(region).unwrap_or_else(|_| {
-            panic!("kernel layout needs more than {MAX_REGIONS} regions; raise MAX_REGIONS")
-        });
+        regions.push(region);
     };
 
     // ---- Device memory, exactly as the device tree describes it ----
@@ -131,18 +146,20 @@ fn regions() -> Vec<Region, MAX_REGIONS> {
     // through `phys_to_virt` now (`console.rs`, `plic::register`,
     // `device_tree::init`), so a physical address is never dereferenced as one.
     //
-    // 4 KiB pages for exactness rather than for lack of alignment — a superpage
-    // rounds outward, and next to a device register window sits either another
-    // device or nothing, neither of which should be mapped by accident. Some
-    // windows would in fact fit superpages (QEMU virt's PLIC is 3 aligned MiB), but
-    // a few thousand exact leaves cost less than a mapping that overreaches.
+    // Every window the tree describes, not a list of the devices this kernel
+    // currently drives. Mapping them all is what makes a new driver just work
+    // through `phys_to_virt` instead of needing its own base constant, and
+    // `largest_level_for` keeps it cheap.
     for device in crate::device_tree::mmio_regions() {
         push(Region {
-            name: device.name,
+            name: "mmio",
             va: phys_to_virt(device.base),
             pa: device.base,
             len: device.size,
-            level: 0,
+            // Largest page the window's own geometry permits, so a big aperture does
+            // not cost thousands of leaves. QEMU virt's PCI ECAM is 256 MiB: 128
+            // superpages instead of 65536 pages.
+            level: largest_level_for(device.base, device.size),
             flags: READ_WRITE,
         });
     }

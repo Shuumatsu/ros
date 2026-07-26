@@ -16,8 +16,9 @@
 //! turn a `Region` into mappings, and it is the way that validates.
 
 use paging::sv39::{FrameSource, PhysAccess, page_size_at};
-use paging::utils::{GIGABYTE, KILOBYTE, MEGABYTE};
 use paging::{MapError, Mapper, PhysicalAddr, PteFlags, VirtualAddr};
+
+use crate::utils::Bytes;
 
 /// One contiguous mapping: a virtual range, the physical range behind it, the
 /// page size to build it from, and the rights it carries.
@@ -160,27 +161,20 @@ impl Region {
     }
 }
 
-/// Byte count as a value and a unit, for the boot log.
-fn human(bytes: usize) -> (usize, &'static str) {
-    if bytes >= GIGABYTE {
-        (bytes / GIGABYTE, "GiB")
-    } else if bytes >= MEGABYTE {
-        (bytes / MEGABYTE, "MiB")
-    } else {
-        (bytes / KILOBYTE, "KiB")
-    }
-}
-
 /// Print a region list as a memory map.
 ///
 /// Worth the lines: it puts the protection policy in the boot log, where it can be
 /// read off a failing run, instead of leaving it to be inferred from the source.
 /// The rights come from [`PteFlags::rwx`] rather than being spelled out here.
 ///
-/// A run of adjacent regions sharing a name is collapsed into one line with the
-/// run's total page count and a `xN` marker. That is not cosmetic: the per-hart
-/// stacks are one region each — which is what leaves their guard pages unmapped —
-/// and printing sixteen identical lines would bury everything else.
+/// A run of adjacent regions sharing a name **and a page size** is collapsed into one
+/// line with the run's total page count and a `xN` marker. That is not cosmetic: the
+/// per-hart stacks are one region each — which is what leaves their guard pages
+/// unmapped — and printing sixteen identical lines would bury everything else.
+///
+/// The page size has to match too, or the total is a lie. Collapsing on name alone
+/// summed 4 KiB and 2 MiB device windows into "271 x 4KiB", which understated the
+/// mapping by two orders of magnitude.
 pub fn report(regions: &[Region]) {
     let mut index = 0;
     while index < regions.len() {
@@ -190,27 +184,25 @@ pub fn report(regions: &[Region]) {
             continue;
         }
 
-        // Consume the whole run of same-named, non-empty regions.
+        // Consume the whole run of same-named, same-sized, non-empty regions.
         let mut run = 1;
         let mut pages = region.pages();
         while let Some(next) = regions.get(index + run) {
-            if next.name != region.name || next.is_empty() {
+            if next.name != region.name || next.level != region.level || next.is_empty() {
                 break;
             }
             pages += next.pages();
             run += 1;
         }
 
-        let (size, unit) = human(region.page_size());
         println!(
-            "[memory]   {:<22} {:#018x} -> {:#012x}  {} {:>5} x {}{}{}",
+            "[memory]   {:<22} {:#018x} -> {:#012x}  {} {:>5} x {}{}",
             region.name,
             region.va,
             region.pa,
             region.flags.rwx(),
             pages,
-            size,
-            unit,
+            Bytes(region.page_size()),
             Run(run)
         );
         index += run;

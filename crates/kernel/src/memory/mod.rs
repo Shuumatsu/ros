@@ -70,12 +70,18 @@ pub fn init() {
     // script and Rust agree about the page size and that every section it lays out is
     // page aligned.
     layout::check();
+    stack::check_layout();
 
+    // Deliberately called the *boot* window, not "the direct map": this is what
+    // boot.S's table covers, and `kernel_table::init` below replaces it a few lines
+    // later with device windows plus exactly the RAM the frame allocator owns. The
+    // old wording described something that stopped being true within the same
+    // function.
     println!(
-        "[memory] direct map: PA 0x0..{:#x} -> VA {:#x}.. ({} GiB)",
+        "[memory] boot window: PA 0x0..{:#x} -> VA {:#x}.. ({})",
         direct_map::WINDOW_END,
         direct_map::VA_OFFSET,
-        direct_map::WINDOW_END / (1024 * 1024 * 1024)
+        crate::utils::Bytes(direct_map::WINDOW_END)
     );
 
     // 1. Physical frames FIRST: [free_start, ram_end). `free_start` is the top
@@ -91,10 +97,10 @@ pub fn init() {
     );
     frame::init(free_start_pa, ram_end);
     println!(
-        "[memory] frames: {:#x}..{:#x} ({} MiB, physical)",
+        "[memory] frames: {:#x}..{:#x} ({}, physical)",
         free_start_pa,
         ram_end,
-        (ram_end - free_start_pa) / 1024 / 1024
+        crate::utils::Bytes(ram_end - free_start_pa)
     );
     frame::self_test();
 
@@ -114,10 +120,10 @@ pub fn init() {
         HEAP.lock().add_to_heap(heap_start, heap_end);
     }
     println!(
-        "[memory] heap:   {:#x}..{:#x} ({} MiB, virtual)",
+        "[memory] heap:   {:#x}..{:#x} ({}, virtual)",
         heap_start,
         heap_end,
-        KERNEL_HEAP_SIZE / 1024 / 1024
+        crate::utils::Bytes(KERNEL_HEAP_SIZE)
     );
 
     // 3. The real kernel page table LAST: it needs frames for its tree, and it
