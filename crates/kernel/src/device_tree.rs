@@ -102,6 +102,50 @@ pub fn clint_size() -> usize {
     CLINT_SIZE.load(Ordering::Relaxed)
 }
 
+/// One MMIO window described by the device tree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MmioRegion {
+    /// Which device the window belongs to.
+    pub name: &'static str,
+    /// Physical base of the window.
+    pub base: usize,
+    /// Window length in bytes.
+    pub size: usize,
+}
+
+/// Every MMIO window the device tree described.
+///
+/// This is the **single** answer to "where is device memory". Anything that needs
+/// to map, protect or enumerate it reads the list from here instead of deciding on
+/// a range of its own — the kernel page table used to assume "the low gigabyte",
+/// which was a second, coarser encoding of exactly this knowledge.
+///
+/// Devices absent from the tree are omitted, so the list is only as long as the
+/// hardware actually is. Note that a window appearing here says the *device*
+/// exists, not that supervisor mode may touch it: OpenSBI's PMP configuration is
+/// a separate layer, and denies S-mode access to the CLINT on QEMU virt.
+pub fn mmio_regions() -> impl Iterator<Item = MmioRegion> {
+    [
+        MmioRegion {
+            name: "uart",
+            base: UART_BASE.load(Ordering::Relaxed),
+            size: UART_SIZE.load(Ordering::Relaxed),
+        },
+        MmioRegion {
+            name: "plic",
+            base: PLIC_BASE.load(Ordering::Relaxed),
+            size: PLIC_SIZE.load(Ordering::Relaxed),
+        },
+        MmioRegion {
+            name: "clint",
+            base: CLINT_BASE.load(Ordering::Relaxed),
+            size: CLINT_SIZE.load(Ordering::Relaxed),
+        },
+    ]
+    .into_iter()
+    .filter(|region| region.base != 0 && region.size != 0)
+}
+
 fn require(cell: &AtomicUsize, what: &str) -> usize {
     match cell.load(Ordering::Relaxed) {
         0 => panic!("[dtb] {what} base not discovered (device_tree::discover not run, or device absent)"),

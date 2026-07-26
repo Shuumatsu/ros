@@ -154,6 +154,7 @@ dependencies = [
  "crossbeam-utils",
  "fdt-raw",
  "frame-allocator",
+ "heapless",
  "paging",
  "riscv",
  "riscv-rt",

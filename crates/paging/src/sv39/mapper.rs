@@ -12,7 +12,7 @@ use super::addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
 use super::entry::{Entry, PteFlags};
 use super::frames::FrameSource;
 use super::table::Table;
-use super::{ENTRIES_PER_PAGE, LEVELS, PAGE_OFFSET_BITS, PAGE_SIZE, ROOT_LEVEL, VPN_BITS};
+use super::{ENTRIES_PER_PAGE, LEVELS, PAGE_OFFSET_BITS, ROOT_LEVEL, VPN_BITS};
 use super::page_size_at;
 use crate::utils::{align_down, align_up, mask};
 
@@ -209,6 +209,41 @@ impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
         self.entry_of(vaddr).map(|(entry, level)| leaf_to_phys(entry, vaddr, level))
     }
 
+    /// Map every page of the size `level` selects that overlaps `[start, end)`,
+    /// taking each physical address from `translate`.
+    ///
+    /// The range is rounded **outward** to whole pages, so a partial page at
+    /// either end is still fully mapped. At level 0 that only ever adds bytes
+    /// inside the caller's own final page; at a superpage level it can pull in a
+    /// substantial neighbourhood, because "cover this range with 2 MiB pages"
+    /// cannot mean anything else. A caller needing exactness should align its
+    /// range and assert it rather than rely on the rounding.
+    pub fn map_range_at_level<T>(
+        &mut self,
+        start: usize,
+        end: usize,
+        level: usize,
+        translate: T,
+        flags: PteFlags,
+    ) -> Result<(), MapError>
+    where
+        T: Fn(VirtualAddr) -> PhysicalAddr,
+    {
+        // Checked before `page_size_at`, which is only defined for real levels.
+        if level >= LEVELS {
+            return Err(MapError::InvalidLevel { level });
+        }
+        let page = page_size_at(level);
+        let mut va = align_down(start, page);
+        let end = align_up(end, page);
+        while va < end {
+            let vaddr = VirtualAddr::new(va);
+            self.map_at_level(vaddr, translate(vaddr), level, flags)?;
+            va += page;
+        }
+        Ok(())
+    }
+
     /// Map every 4 KiB page overlapping `[start, end)`, taking each physical
     /// address from `translate`. `end` is rounded up so a partial final page is
     /// still fully mapped.
@@ -222,14 +257,7 @@ impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
     where
         T: Fn(VirtualAddr) -> PhysicalAddr,
     {
-        let mut va = align_down(start, PAGE_SIZE);
-        let end = align_up(end, PAGE_SIZE);
-        while va < end {
-            let vaddr = VirtualAddr::new(va);
-            self.map(vaddr, translate(vaddr), flags)?;
-            va += PAGE_SIZE;
-        }
-        Ok(())
+        self.map_range_at_level(start, end, 0, translate, flags)
     }
 
     /// Identity-map `[start, end)` (each virtual page to the equal physical page).
@@ -286,6 +314,7 @@ impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sv39::PAGE_SIZE;
     use crate::sv39::access::Identity;
 
     /// A frame source backed by boxed tables.
@@ -328,6 +357,75 @@ mod tests {
     }
 
     const RWX: PteFlags = PteFlags::READ_WRITE_EXECUTE;
+
+    /// `map_range` is now the level-0 case of `map_range_at_level`, so the two must
+    /// agree exactly — otherwise collapsing them changed behaviour.
+    #[test]
+    fn map_range_is_the_level_zero_case_of_map_range_at_level() {
+        let base = 7 << 21;
+        let span = 3 * PAGE_SIZE + 0x40; // deliberately not a whole number of pages
+        let phys = |v: VirtualAddr| PhysicalAddr::new(v.bits() - base + 0x8000_0000);
+
+        let mut lhs = Table::new();
+        let mut generic = Mapper::new(&mut lhs, Arena::default(), Identity);
+        generic
+            .map_range_at_level(base, base + span, 0, phys, PteFlags::READ_WRITE)
+            .expect("explicit level-0 range must map");
+
+        let mut rhs = Table::new();
+        let mut shorthand = Mapper::new(&mut rhs, Arena::default(), Identity);
+        shorthand
+            .map_range(base, base + span, phys, PteFlags::READ_WRITE)
+            .expect("shorthand range must map");
+
+        // Four pages: the partial tail is rounded outward and fully mapped.
+        for index in 0..4 {
+            let va = VirtualAddr::new(base + index * PAGE_SIZE);
+            assert_eq!(
+                generic.translate(va),
+                Some(phys(va)),
+                "page {index} missing from the explicit-level mapping"
+            );
+            assert_eq!(
+                shorthand.translate(va),
+                generic.translate(va),
+                "page {index} differs between map_range and map_range_at_level"
+            );
+        }
+        let past = VirtualAddr::new(base + 4 * PAGE_SIZE);
+        assert_eq!(generic.translate(past), None, "rounding must not overshoot a whole page");
+        assert_eq!(shorthand.translate(past), None, "shorthand must not overshoot either");
+    }
+
+    #[test]
+    fn map_range_at_level_builds_superpages_and_rejects_a_bad_level() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        let base = 4 << 30;
+        let superpage = page_size_at(1);
+
+        mapper
+            .map_range_at_level(
+                base,
+                base + 2 * superpage,
+                1,
+                |v| PhysicalAddr::new(v.bits() - base),
+                PteFlags::READ_WRITE,
+            )
+            .expect("2 MiB range must map");
+
+        for index in 0..2 {
+            let va = VirtualAddr::new(base + index * superpage);
+            let (_, level) = mapper.entry_of(va).expect("superpage must be mapped");
+            assert_eq!(level, 1, "range must be built from level-1 leaves, not 4 KiB ones");
+        }
+
+        assert_eq!(
+            mapper.map_range_at_level(base, base + PAGE_SIZE, LEVELS, |_| PhysicalAddr::new(0), RWX),
+            Err(MapError::InvalidLevel { level: LEVELS }),
+            "an out-of-range level must be rejected, not used to index a page size"
+        );
+    }
 
     /// `entry_of` is what lets a caller audit permissions rather than trust them,
     /// so it must report the flags and the level a mapping actually landed at —

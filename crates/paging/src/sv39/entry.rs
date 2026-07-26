@@ -55,6 +55,27 @@ impl PteFlags {
     pub const fn is_legal_leaf(self) -> bool {
         self.bits() & Self::WRITE.bits() == 0 || self.bits() & Self::READ.bits() != 0
     }
+
+    /// The permission bits as a conventional `rwx` triple, `-` for absent.
+    ///
+    /// Lives here because this type owns what R/W/X *mean*; anything printing a
+    /// memory map should not be re-deriving the spelling for itself.
+    pub const fn rwx(self) -> &'static str {
+        match (
+            self.bits() & Self::READ.bits() != 0,
+            self.bits() & Self::WRITE.bits() != 0,
+            self.bits() & Self::EXECUTE.bits() != 0,
+        ) {
+            (false, false, false) => "---",
+            (false, false, true) => "--x",
+            (false, true, false) => "-w-",
+            (false, true, true) => "-wx",
+            (true, false, false) => "r--",
+            (true, false, true) => "r-x",
+            (true, true, false) => "rw-",
+            (true, true, true) => "rwx",
+        }
+    }
 }
 
 /// A single Sv39 page-table entry.
@@ -160,6 +181,21 @@ mod tests {
         assert!(PteFlags::EXECUTE.is_leaf(), "X is a leaf");
         assert!(PteFlags::READ_WRITE.is_legal_leaf(), "RW is legal");
         assert!(!PteFlags::WRITE.is_legal_leaf(), "W-only is reserved");
+    }
+
+    #[test]
+    fn rwx_spells_out_the_permission_bits() {
+        assert_eq!(PteFlags::READ_EXECUTE.rwx(), "r-x", "kernel text");
+        assert_eq!(PteFlags::READ_WRITE.rwx(), "rw-", "kernel data");
+        assert_eq!(PteFlags::READ.rwx(), "r--", "kernel rodata");
+        assert_eq!(PteFlags::READ_WRITE_EXECUTE.rwx(), "rwx", "the boot table's blanket rights");
+        assert_eq!(PteFlags::VALID.rwx(), "---", "a branch carries no permissions");
+        // Status and USER bits must not leak into the triple.
+        assert_eq!(
+            (PteFlags::READ_EXECUTE | PteFlags::ACCESS | PteFlags::DIRTY | PteFlags::USER).rwx(),
+            "r-x",
+            "only R/W/X may appear"
+        );
     }
 
     #[test]

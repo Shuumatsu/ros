@@ -18,6 +18,7 @@ buddy_system_allocator = "0.12.0"
 crossbeam-utils = { version = "0.8.21", default-features = false }
 fdt-raw = "0.3.0"
 frame-allocator = { path = "../frame-allocator" }
+heapless = "0.9"
 paging = { path = "../paging", default-features = false }
 riscv = "0.16.0"
 riscv-rt = "0.17.1"

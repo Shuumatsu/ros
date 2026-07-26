@@ -286,12 +286,76 @@ linker reserves between the kernel stack and the heap
 deliberate linker decision, whereas the former is incidental and would be a
 fragile thing to pin.
 
+### F. AGENTS.md compliance pass on §2.E
+
+Stage 3 was audited against `AGENTS.md` and **four real violations were found and
+fixed**. Recorded because the *pattern* is the useful part.
+
+**1. Split-brain: the kernel table hardcoded where devices live.** It mapped MMIO
+as one blanket 1 GiB gigapage, justified by a comment listing the QEMU virt
+addresses — while `device_tree.rs` already had `uart_base/size`,
+`plic_base/size`, `clint_base/size` parsed from the DTB. A second, coarser
+encoding of knowledge the system already had, and `rw-` over 1 GiB to cover a few
+MiB of registers.
+
+> This is exactly the violation Stage 2 existed to remove — §2.D criticises
+> `frame.rs` for "independently re-encoding boot.S's mapping decision" — and it was
+> committed one commit later. The lesson is a question, not a rule: *does something
+> already know this?*
+
+Fixed by `device_tree::mmio_regions()`, now the single answer to "where is device
+memory". The map went from one 1 GiB gigapage to exact windows:
+
+```
+uart    1 x 4KiB     plic  1536 x 4KiB     clint  16 x 4KiB
+```
+
+4 KiB is for *exactness*, not alignment — a superpage rounds outward, and next to
+a device window sits either another device or nothing.
+
+**2. DRY: a second range-mapping loop.** `kernel_table`'s `install()` duplicated
+`Mapper::map_range`, generalised to any level. Fixed at the root: `paging` gained
+`map_range_at_level`, `map_range` is now its level-0 wrapper, and the kernel's copy
+is gone. A test asserts the two agree page-for-page, so collapsing them is proven
+not to have changed behaviour. This also unblocks reuse — superpage ranges were
+previously only available inside a private kernel module.
+
+**3. Strict modularity: one 406-line file with five concerns.** Split into
+`region.rs` (196 lines — the reusable *mechanism*: `Region`, `install`, `audit`,
+`report`, generic over `FrameSource`/`PhysAccess`) and `kernel_table.rs` (295 —
+the kernel's *policy* and the `satp` switch). A user address space can now reuse
+the mechanism.
+
+> Improvement that fell out of the split: validation moved **into**
+> `Region::install`, so W^X and page alignment are enforced at the single choke
+> point where a `Region` becomes PTEs. It used to be a separate pass over the list,
+> which a future caller could simply forget to run.
+
+**4. Latent split-brain: two owners for "which frames are reachable".** The table
+mapped up to `device_tree::ram_end()` while `frame::init` clamped to
+`direct_map::WINDOW_END` — the *boot* table's window, retired by then. They agreed,
+but by parallel reasoning. Fixed by dependency inversion: `frame::owned_range()`
+publishes the physical span the allocator took (bitmap included, since the
+allocator's own `range()` excludes it), and the table maps exactly that. The
+allocator decides what it will hand out; the table maps what the allocator owns.
+
+**5. Minor: `rights()` re-spelled R/W/X in the kernel.** Moved to
+`PteFlags::rwx()`, in the type that owns what those bits mean.
+
+All three enforcement paths were then shown to be non-vacuous by mutation:
+
+| Mutation | Caught by |
+|---|---|
+| `.text` given `RWX` | `region 'text' would be both writable and executable` |
+| skip installing `rodata` | `region 'rodata' left 0xffffffc080218000 unmapped` |
+| write to `.text` at run time | `scause 15` / `StorePageFault` |
+
 ---
 
 ## 3. Verified state
 
 ```
-cargo test -p paging --features std     # 40 passed  (NOTE: --features std is required;
+cargo test -p paging --features std     # 43 passed  (NOTE: --features std is required;
                                         #  without it the crate is no_std → 0 tests run)
 cargo test -p frame-allocator           # 20 passed
 cargo build -p paging                   # no_std, host        ) both, to keep the
@@ -310,17 +374,21 @@ PA `0x80800000` + `VA_OFFSET`, i.e. the linear map, where it used to be
 [memory] frames: 0x80329000..0x88000000 (124 MiB, physical)
 [memory] frame allocator self-test passed
 [memory] heap:   0xffffffc080800000..0xffffffc081000000 (8 MiB, virtual)
-[memory] kernel page table root at 0x8032b000:
-[memory]   mmio                       0xffffffc000000000 -> 0x0000000000  rw-     1 x 1GiB
-[memory]   mmio (identity, temporary) 0x0000000000000000 -> 0x0000000000  rw-     1 x 1GiB
-[memory]   text                       0xffffffc080200000 -> 0x0080200000  r-x    23 x 4KiB
-[memory]   rodata                     0xffffffc080217000 -> 0x0080217000  r--    13 x 4KiB
-[memory]   data                       0xffffffc080224000 -> 0x0080224000  rw-     2 x 4KiB
-[memory]   bss                        0xffffffc080226000 -> 0x0080226000  rw-     2 x 4KiB
-[memory]   kernel stack               0xffffffc080228000 -> 0x0080228000  rw-   256 x 4KiB
-[memory]   frame pool head            0xffffffc080329000 -> 0x0080329000  rw-   215 x 4KiB
-[memory]   direct map                 0xffffffc080400000 -> 0x0080400000  rw-    62 x 2MiB
-[memory] kernel page table live (satp 0x800000000008032b); boot table retired
+[memory] kernel page table root at 0x8032d000:
+[memory]   uart                   0xffffffc010000000 -> 0x0010000000  rw-     1 x 4KiB
+[memory]     (identity)           0x0000000010000000 -> 0x0010000000  rw-     1 x 4KiB
+[memory]   plic                   0xffffffc00c000000 -> 0x000c000000  rw-  1536 x 4KiB
+[memory]     (identity)           0x000000000c000000 -> 0x000c000000  rw-  1536 x 4KiB
+[memory]   clint                  0xffffffc002000000 -> 0x0002000000  rw-    16 x 4KiB
+[memory]     (identity)           0x0000000002000000 -> 0x0002000000  rw-    16 x 4KiB
+[memory]   text                   0xffffffc080200000 -> 0x0080200000  r-x    24 x 4KiB
+[memory]   rodata                 0xffffffc080218000 -> 0x0080218000  r--    13 x 4KiB
+[memory]   data                   0xffffffc080226000 -> 0x0080226000  rw-     2 x 4KiB
+[memory]   bss                    0xffffffc080228000 -> 0x0080228000  rw-     2 x 4KiB
+[memory]   kernel stack           0xffffffc08022a000 -> 0x008022a000  rw-   256 x 4KiB
+[memory]   frame pool head        0xffffffc08032b000 -> 0x008032b000  rw-   213 x 4KiB
+[memory]   direct map             0xffffffc080400000 -> 0x0080400000  rw-    62 x 2MiB
+[memory] kernel page table live (satp 0x800000000008032d); boot table retired
 enter kmain
 [timer] tick 1
 ```
@@ -447,9 +515,10 @@ Sequencing note: user paging is the first thing that will exercise
 5. ~~`Mapper` has no kernel adopter.~~ **Done** — `memory/kernel_table.rs` (§2.E).
 6. ~~The kernel runs on the boot table.~~ **Done** — W^X kernel table, verified by
    a `StorePageFault` probe against `.text` (§2.E).
-7. **One identity mapping survives**, for MMIO only, because `console.rs` caches an
-   `MmioSerialPort` built from the raw device-tree base. Narrowed from the boot
-   table's low 4 GiB `RWX` to a single `rw-` gigabyte. Removing it is §4.1.
+7. **Identity mappings survive for device windows only**, because `console.rs`
+   caches an `MmioSerialPort` built from the raw device-tree base. Narrowed twice:
+   from the boot table's low 4 GiB `RWX`, to one `rw-` gigabyte, to the exact DTB
+   windows (~6 MiB). Removing them entirely is §4.1.
 8. **`FrameSource::free` has no caller yet.** Stage 3 wired it up and it is
    correct, but the kernel table is permanent, so nothing ever tears down a tree.
    User paging (§4.3) is what will first exercise it.
@@ -468,7 +537,7 @@ Sequencing note: user paging is the first thing that will exercise
 ## 6. Commands
 
 ```bash
-cargo test -p paging --features std   # 40 — the --features std is NOT optional
+cargo test -p paging --features std   # 43 — the --features std is NOT optional
 cargo test -p frame-allocator         # 20
 cargo kbuild                          # build kernel (riscv64imac-unknown-none-elf)
 cargo krun                            # boot under QEMU + OpenSBI (Ctrl-A X to exit)
@@ -506,6 +575,6 @@ Same trick verifies the `direct_map::verify` guard: add `addi a2, a2, 8` after
 mapping. Always confirm the revert by disassembly, not by reading the source.
 
 Relevant files: `crates/kernel/src/boot.S`, `crates/kernel/kernel.ld`,
-`crates/kernel/src/memory/{mod,direct_map,kernel_table,frame,layout}.rs`,
+`crates/kernel/src/memory/{mod,direct_map,kernel_table,region,frame,layout}.rs`,
 `crates/paging/src/satp.rs`, `crates/paging/src/sv39/*`,
 `crates/frame-allocator/src/*`.

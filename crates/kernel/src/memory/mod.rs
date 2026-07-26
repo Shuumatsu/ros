@@ -7,6 +7,7 @@ pub mod direct_map;
 pub mod frame;
 pub mod kernel_table;
 pub mod layout;
+pub mod region;
 
 /// ORDER determines max allocation size: 2^(ORDER-1) bytes
 /// ORDER=32 supports up to 2GB allocations

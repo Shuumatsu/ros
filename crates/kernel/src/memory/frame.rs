@@ -28,6 +28,7 @@
 //! the eventual removal of the boot identity map.
 
 use core::num::NonZeroUsize;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use frame_allocator::{FrameAllocator, FrameBlock, FrameRange, metadata_layout};
 use spin::Mutex;
@@ -40,6 +41,28 @@ use crate::memory::phys_to_virt;
 /// The one global physical frame allocator. `None` until [`init`] feeds it a RAM
 /// range and the `'static` bitmap reserved from that same RAM.
 static FRAME_ALLOCATOR: Mutex<Option<FrameAllocator<'static>>> = Mutex::new(None);
+
+/// Physical span this module took at [`init`], bitmap included. Zero until then.
+static OWNED_START: AtomicUsize = AtomicUsize::new(0);
+static OWNED_END: AtomicUsize = AtomicUsize::new(0);
+
+/// The physical span this module owns, `[start, end)`, **including** the metadata
+/// bitmap that [`init`] reserved from the front of it.
+///
+/// The authoritative answer to "which physical memory belongs to the frame
+/// subsystem", and therefore to what a page table must map before the kernel can
+/// touch any of it. [`super::kernel_table`] derives its direct map from this
+/// rather than re-deriving a RAM extent of its own — the allocator decides what it
+/// will hand out, and the table maps exactly that.
+///
+/// Note this is deliberately *not* the allocator's `range()`, which excludes the
+/// bitmap: the bitmap needs mapping too, since this module writes it.
+pub fn owned_range() -> (usize, usize) {
+    let start = OWNED_START.load(Ordering::Relaxed);
+    let end = OWNED_END.load(Ordering::Relaxed);
+    assert!(start < end, "frame::owned_range queried before frame::init");
+    (start, end)
+}
 
 /// A physical frame allocation handed out by [`alloc`] / [`alloc_contiguous`].
 ///
@@ -118,6 +141,11 @@ pub fn init(free_start: usize, ram_end: usize) {
         FrameAllocator::new(managed, bitmap).expect("frame allocator initialization failed")
     };
     *FRAME_ALLOCATOR.lock() = Some(allocator);
+
+    // Publish the span we took — bitmap included, so `[start_ppn, end_ppn)` rather
+    // than `managed`. This is what `kernel_table` maps; see `owned_range`.
+    OWNED_START.store(PhysicalAddr::from_ppn(start_ppn).bits(), Ordering::Relaxed);
+    OWNED_END.store(PhysicalAddr::from_ppn(end_ppn).bits(), Ordering::Relaxed);
 }
 
 /// Allocate one zeroed physical frame, or `None` if the pool is exhausted.
