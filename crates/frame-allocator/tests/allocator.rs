@@ -96,6 +96,11 @@ fn error_messages_and_source_chain_are_stable() {
         "frame block is already free",
         "AlreadyFree message changed"
     );
+    assert_eq!(
+        DeallocationError::UnalignedFrame { start: 7, order: 2 }.to_string(),
+        "frame 7 does not start an aligned block of order 2",
+        "UnalignedFrame message changed"
+    );
 }
 
 #[test]
@@ -316,4 +321,218 @@ fn restores_fragmented_allocations_for_a_larger_request() {
     assert_eq!(allocator.free_frames(), 64, "fragmented frees did not restore capacity");
     let whole = allocator.allocate(count(64)).expect("full-range allocation failed after merge");
     assert_eq!(whole.start_frame(), 0, "full-range allocation has the wrong base");
+}
+
+// ---------------------------------------------------------------------------
+// deallocate_at: freeing by address, for callers whose only surviving handle is
+// a page-table entry.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deallocate_at_round_trips_a_single_frame() {
+    let mut metadata = [0usize; TEST_METADATA_WORDS];
+    let mut allocator = allocator(range(0, 8), &mut metadata);
+    let block = allocator.allocate(count(1)).expect("single-frame allocation failed");
+    let (start, order) = (block.start_frame(), block.order());
+    assert_eq!(order, 0, "a one-frame request must be order 0");
+
+    // Drop the token unused — the whole point is that the address is enough.
+    drop(block);
+    assert_eq!(allocator.free_frames(), 7, "allocation accounting is wrong before the free");
+
+    // SAFETY: the frame was just allocated at this exact order, has no users in
+    // this host-only numeric test, and is freed once.
+    unsafe {
+        allocator.deallocate_at(start, order).expect("address-based deallocation failed");
+    }
+    assert_eq!(allocator.free_frames(), 8, "freeing by address did not restore the frame");
+
+    let whole = allocator.allocate(count(8)).expect("root did not coalesce after an address free");
+    assert_eq!(whole.start_frame(), 0, "coalesced root has the wrong base");
+}
+
+#[test]
+fn deallocate_at_is_indistinguishable_from_token_deallocation() {
+    // The load-bearing test: run one allocation sequence on two allocators, free
+    // one by token and the other by address, and require the observable state to
+    // agree at every step. `deallocate_at` reconstructs a node index, so this is
+    // what pins that arithmetic to `allocate`'s.
+    let mut token_metadata = [0usize; TEST_METADATA_WORDS];
+    let mut address_metadata = [0usize; TEST_METADATA_WORDS];
+    let mut by_token = allocator(range(0, 64), &mut token_metadata);
+    let mut by_address = allocator(range(0, 64), &mut address_metadata);
+
+    // Deliberately mixed orders, including requests that round up.
+    let requests = [1usize, 2, 3, 5];
+    let mut tokens: [Option<FrameBlock>; 4] = core::array::from_fn(|_| None);
+    let mut addresses = [(0usize, 0usize); 4];
+
+    for (index, &request) in requests.iter().enumerate() {
+        let token = by_token.allocate(count(request)).expect("token-side allocation failed");
+        let mirror = by_address.allocate(count(request)).expect("address-side allocation failed");
+        assert_eq!(
+            (token.start_frame(), token.order()),
+            (mirror.start_frame(), mirror.order()),
+            "the two allocators diverged allocating {request} frames"
+        );
+        addresses[index] = (mirror.start_frame(), mirror.order());
+        tokens[index] = Some(token);
+    }
+
+    // Free in reverse, one step at a time, comparing after each.
+    for index in (0..requests.len()).rev() {
+        // SAFETY: a unique block from this allocator, freed once, with no users.
+        unsafe {
+            by_token
+                .deallocate(tokens[index].take().expect("test lost a token"))
+                .expect("token deallocation failed");
+        }
+        let (start, order) = addresses[index];
+        // SAFETY: same block, same order it was allocated with, freed once.
+        unsafe {
+            by_address.deallocate_at(start, order).expect("address deallocation failed");
+        }
+        assert_eq!(
+            by_address.free_frames(),
+            by_token.free_frames(),
+            "freeing {order:?}-order block at {start} by address diverged from the token path"
+        );
+    }
+
+    assert_eq!(by_token.free_frames(), 64, "token path lost capacity");
+    assert_eq!(by_address.free_frames(), 64, "address path lost capacity");
+
+    // Equal counters are not enough — the *shape* of the bitmap must match too,
+    // which only a full-range allocation proves.
+    let token_whole = by_token.allocate(count(64)).expect("token path failed to fully coalesce");
+    let address_whole =
+        by_address.allocate(count(64)).expect("address path failed to fully coalesce");
+    assert_eq!(
+        address_whole.start_frame(),
+        token_whole.start_frame(),
+        "the two paths coalesced to different roots"
+    );
+}
+
+#[test]
+fn deallocate_at_addresses_every_root_of_an_unaligned_range() {
+    // 3..13 decomposes into roots of 1, 4, 4, 1 frames at 3, 4, 8 and 12, so this
+    // exercises node reconstruction against four different root orders and bit
+    // offsets rather than one.
+    let frame_range = range(3, 13);
+    let mut metadata = [usize::MAX; TEST_METADATA_WORDS];
+    let mut allocator = allocator(frame_range, &mut metadata);
+    let mut starts = [usize::MAX; 10];
+
+    for slot in &mut starts {
+        let block = allocator.allocate(count(1)).expect("single-frame allocation failed");
+        *slot = block.start_frame();
+    }
+    assert_eq!(allocator.free_frames(), 0, "all managed frames should be reserved");
+
+    for &start in &starts {
+        // SAFETY: each frame was allocated at order 0 exactly once and has no users.
+        unsafe {
+            allocator
+                .deallocate_at(start, 0)
+                .unwrap_or_else(|error| panic!("freeing frame {start} by address failed: {error}"));
+        }
+    }
+    assert_eq!(allocator.free_frames(), 10, "address frees did not restore every root");
+
+    // Proves the order-2 roots actually coalesced, not merely that a counter moved.
+    let merged = allocator.allocate(count(4)).expect("an order-2 root did not coalesce");
+    assert_eq!(merged.frame_count(), 4, "coalesced block has the wrong extent");
+}
+
+#[test]
+fn deallocate_at_detects_a_double_free() {
+    let mut metadata = [0usize; TEST_METADATA_WORDS];
+    let mut allocator = allocator(range(0, 8), &mut metadata);
+    let block = allocator.allocate(count(1)).expect("allocation failed");
+    let (start, order) = (block.start_frame(), block.order());
+    drop(block);
+
+    // SAFETY: the one live allocation, freed once.
+    unsafe {
+        allocator.deallocate_at(start, order).expect("initial deallocation failed");
+    }
+    // SAFETY: deliberately violating the no-double-free precondition. Freeing by
+    // address forfeits the move-only token's compile-time protection, so this must
+    // still be caught at run time — by the ancestor that swallowed the block when
+    // it coalesced, not by its own bit.
+    let error = unsafe {
+        allocator.deallocate_at(start, order).expect_err("duplicate address free was accepted")
+    };
+    assert_eq!(error, DeallocationError::AlreadyFree, "wrong duplicate-free diagnostic");
+    assert_eq!(allocator.free_frames(), 8, "rejected double free changed allocator state");
+}
+
+#[test]
+fn deallocate_at_rejects_frames_it_does_not_manage() {
+    let mut metadata = [0usize; TEST_METADATA_WORDS];
+    let mut allocator = allocator(range(8, 16), &mut metadata);
+    let block = allocator.allocate(count(1)).expect("allocation failed");
+    drop(block);
+
+    for &outsider in &[0usize, 7, 16, 100] {
+        // SAFETY: no frame is actually released; this checks the structural
+        // rejection happens before any metadata is touched.
+        let error = unsafe {
+            allocator
+                .deallocate_at(outsider, 0)
+                .expect_err("frame outside the managed range was accepted")
+        };
+        assert_eq!(
+            error,
+            DeallocationError::ForeignBlock,
+            "wrong diagnostic for unmanaged frame {outsider}"
+        );
+    }
+    assert_eq!(allocator.free_frames(), 7, "rejected frees changed allocator state");
+}
+
+#[test]
+fn deallocate_at_rejects_a_start_that_cannot_begin_that_order() {
+    let mut metadata = [0usize; TEST_METADATA_WORDS];
+    let mut allocator = allocator(range(0, 64), &mut metadata);
+    let block = allocator.allocate(count(2)).expect("two-frame allocation failed");
+    assert_eq!((block.start_frame(), block.order()), (0, 1), "unexpected two-frame allocation");
+    drop(block);
+
+    // Frame 1 is inside the block but cannot *begin* an order-1 block. Accepting
+    // this would free frames 1..3, straddling two buddies and corrupting the tree.
+    // SAFETY: the misuse is the point; it must be rejected, not performed.
+    let error = unsafe {
+        allocator.deallocate_at(1, 1).expect_err("misaligned address free was accepted")
+    };
+    assert_eq!(
+        error,
+        DeallocationError::UnalignedFrame { start: 1, order: 1 },
+        "wrong misalignment diagnostic"
+    );
+    assert_eq!(allocator.free_frames(), 62, "rejected free changed allocator state");
+}
+
+#[test]
+fn deallocate_at_rejects_an_order_larger_than_its_root() {
+    // Frame 3 is a root of its own, of order 0: no larger block can start there.
+    let mut metadata = [usize::MAX; TEST_METADATA_WORDS];
+    let mut allocator = allocator(range(3, 13), &mut metadata);
+
+    // SAFETY: rejected before any metadata is touched; nothing is released.
+    let error = unsafe {
+        allocator.deallocate_at(3, 1).expect_err("order beyond the root was accepted")
+    };
+    assert_eq!(error, DeallocationError::ForeignBlock, "wrong over-order diagnostic");
+
+    // An order that would overflow `1 << order` must be rejected, not shifted.
+    // SAFETY: as above.
+    let error = unsafe {
+        allocator
+            .deallocate_at(4, usize::BITS as usize)
+            .expect_err("absurd order was accepted")
+    };
+    assert_eq!(error, DeallocationError::ForeignBlock, "wrong absurd-order diagnostic");
+    assert_eq!(allocator.free_frames(), 10, "rejected frees changed allocator state");
 }

@@ -106,17 +106,34 @@ impl FrameBlock {
 
     /// Number of frames actually reserved after buddy rounding.
     pub const fn frame_count(&self) -> usize { 1usize << self.order }
+
+    /// Buddy order of the allocation: it spans `1 << order` frames.
+    ///
+    /// Exposed because it is the one value [`FrameAllocator::deallocate_at`]
+    /// cannot recover on its own, so a caller that intends to drop this token and
+    /// keep only the address must record it first.
+    pub const fn order(&self) -> usize { self.order }
 }
 
 /// Error detected while returning an allocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DeallocationError {
-    /// The block was created by an allocator with a different range layout.
+    /// The block was created by an allocator with a different range layout, or
+    /// names frames this allocator does not manage.
     #[error("frame block does not belong to this allocator")]
     ForeignBlock,
     /// The block, or an ancestor containing it, is already free.
     #[error("frame block is already free")]
     AlreadyFree,
+    /// The frame given to [`FrameAllocator::deallocate_at`] does not begin a
+    /// block of the requested order, so no such allocation can ever have existed.
+    #[error("frame {start} does not start an aligned block of order {order}")]
+    UnalignedFrame {
+        /// The rejected first frame.
+        start: usize,
+        /// The order it was claimed to begin.
+        order: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -275,6 +292,91 @@ impl<'a> FrameAllocator<'a> {
         self.bitmap.set(root.bit_offset + node);
         self.free_frames += frame_count;
         Ok(())
+    }
+
+    /// Return a block identified by its **first frame and order** instead of by
+    /// an owned [`FrameBlock`].
+    ///
+    /// This exists for exactly one reason: reclaiming a page whose only surviving
+    /// handle is a page-table entry. A PTE records a frame number, not a token, so
+    /// a pager tearing down an address space has an address and nothing else.
+    /// Every other caller should keep the token and use
+    /// [`deallocate`](Self::deallocate), which cannot be misused.
+    ///
+    /// # Safety
+    ///
+    /// Two contracts. The second is what makes this sharper than
+    /// [`deallocate`](Self::deallocate), not merely as sharp:
+    ///
+    /// 1. As for [`deallocate`](Self::deallocate): no live mapping, pointer, DMA
+    ///    operation or other owner may still reach any frame in the block.
+    /// 2. `order` must be the order the block was **allocated** with, and `start`
+    ///    its first frame. Nothing here can check that, and nothing can: the
+    ///    bitmap records the extent of *free* blocks, never of allocated ones. Too
+    ///    large an `order` frees frames that are still in use; too small an one
+    ///    leaks the remainder. Every other misuse below is reported as an error —
+    ///    this one is undetectable, which is the whole reason the token-based
+    ///    [`deallocate`](Self::deallocate) is the default.
+    ///
+    /// Note that double frees *are* caught, as
+    /// [`DeallocationError::AlreadyFree`]: the ancestor scan in
+    /// [`deallocate`](Self::deallocate) finds either the block's own bit or the
+    /// coalesced ancestor that swallowed it.
+    pub unsafe fn deallocate_at(
+        &mut self,
+        start: usize,
+        order: usize,
+    ) -> Result<(), DeallocationError> {
+        let block = self.block_at(start, order)?;
+        // SAFETY: forwarded from this function's contract. `block_at` rebuilds the
+        // token with the same arithmetic `allocate` used to mint it, so it is
+        // structurally indistinguishable from the original.
+        unsafe { self.deallocate(block) }
+    }
+
+    /// Rebuild the [`FrameBlock`] that [`allocate`](Self::allocate) would have
+    /// minted for `1 << order` frames starting at `start`.
+    ///
+    /// Exact inverse of the position arithmetic that closes
+    /// [`allocate`](Self::allocate), and deliberately adjacent to it: the two must
+    /// agree on how a node index maps to a frame address, so they should be read
+    /// together. Nothing else in the crate may derive a node index.
+    fn block_at(&self, start: usize, order: usize) -> Result<FrameBlock, DeallocationError> {
+        // Roots tile the managed range, so "inside some root" is exactly "managed".
+        let (root_index, root) = self
+            .roots
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, root)| start >= root.start && start - root.start < (1usize << root.order))
+            .ok_or(DeallocationError::ForeignBlock)?;
+
+        // Checked before any `1 << order`, which would otherwise overflow. A block
+        // larger than its root would have to span roots; those are never handed out.
+        if order > root.order {
+            return Err(DeallocationError::ForeignBlock);
+        }
+
+        let frame_count = 1usize << order;
+        let offset = start - root.start;
+        if offset % frame_count != 0 {
+            return Err(DeallocationError::UnalignedFrame { start, order });
+        }
+
+        // `offset < 1 << root.order` and `frame_count == 1 << order`, so
+        // `position < 1 << depth` — the node is always within its depth's span.
+        let depth = root.order - order;
+        let node = first_node_at_depth(depth) + offset / frame_count;
+
+        Ok(FrameBlock {
+            start,
+            // Nothing records the caller's original pre-rounding request, so
+            // report the block's true extent rather than inventing one.
+            requested_frames: frame_count,
+            order,
+            root_index,
+            node,
+        })
     }
 
     fn find_free_node(&self, root: Root, order: usize) -> Option<usize> {
