@@ -40,6 +40,18 @@ impl Fs {
         }
     }
 
+    /// Hard-link `new_path` to the existing file at `existing` — argument order as
+    /// in `ln existing new_path`. See [`Fs::link`] for the rules.
+    pub fn link_path(&self, existing: &str, new_path: &str) -> bool {
+        let Some(target) = self.resolve(existing) else {
+            return false;
+        };
+        match self.split_parent(new_path) {
+            Some((parent, name)) => self.link(parent, name, target),
+            None => false,
+        }
+    }
+
     /// Split a path into (parent-directory inode, final component). `None` if
     /// there is no final component (e.g. `"/"`) or the parent does not resolve.
     fn split_parent<'p>(&self, path: &'p str) -> Option<(u32, &'p str)> {
@@ -77,6 +89,10 @@ impl<'a> File<'a> {
 
     /// Current cursor position.
     pub fn pos(&self) -> usize { self.pos }
+
+    /// Resize the file to `len` bytes, freeing the blocks a shrink gives up. The
+    /// cursor does not move — a read past the new end simply returns nothing.
+    pub fn set_len(&mut self, len: usize) { self.fs.set_len(self.inode, len); }
 
     /// Move the cursor to an absolute byte offset.
     pub fn seek(&mut self, pos: usize) { self.pos = pos; }
@@ -174,6 +190,48 @@ mod tests {
         assert!(fs.remove_path("/f"));
         assert!(fs.open("/f").is_none());
         assert!(!fs.remove_path("/f"), "removing a gone file reports false");
+    }
+
+    #[test]
+    fn set_len_shortens_and_extends_through_the_handle() {
+        let fs = fresh();
+        let mut f = fs.create_file("/f").unwrap();
+        f.write(&pattern(10_000));
+
+        f.set_len(1_000);
+        assert_eq!(f.len(), 1_000);
+        f.rewind();
+        let mut out = Vec::new();
+        f.read_to_end(&mut out);
+        assert_eq!(out, pattern(1_000), "keeps the head, drops the tail");
+
+        f.set_len(1_500);
+        f.rewind();
+        out.clear();
+        f.read_to_end(&mut out);
+        assert_eq!(out.len(), 1_500);
+        assert!(out[1_000..].iter().all(|&b| b == 0), "extension reads as zeros");
+    }
+
+    #[test]
+    fn link_path_shares_content_between_two_paths() {
+        let fs = fresh();
+        fs.create_path("/a", InodeType::Dir).unwrap();
+        fs.create_path("/b", InodeType::Dir).unwrap();
+        fs.create_file("/a/f").unwrap().write(b"linked");
+
+        assert!(fs.link_path("/a/f", "/b/g"), "ln /a/f /b/g");
+        let mut out = Vec::new();
+        fs.open("/b/g").unwrap().read_to_end(&mut out);
+        assert_eq!(out, b"linked".to_vec(), "same bytes through the new path");
+
+        assert!(fs.remove_path("/a/f"));
+        out.clear();
+        fs.open("/b/g").unwrap().read_to_end(&mut out);
+        assert_eq!(out, b"linked".to_vec(), "unlinking one path keeps the file");
+
+        assert!(!fs.link_path("/nope", "/b/h"), "missing source refused");
+        assert!(!fs.link_path("/b/g", "/missing/h"), "missing parent refused");
     }
 
     #[test]

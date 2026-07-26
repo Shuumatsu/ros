@@ -40,12 +40,9 @@ pub const POINTERS_PER_BLOCK: usize = BLOCK_SIZE / core::mem::size_of::<u32>();
 /// Direct block pointers stored inline in an inode.
 pub const DIRECT_COUNT: usize = 26;
 
-/// Capacity of the [`DirEntry::name`] field, in bytes.
-pub const NAME_CAP: usize = 28;
-
-/// Longest usable file name, in bytes. One byte is reserved so a name is always
-/// NUL-terminated within [`NAME_CAP`].
-pub const NAME_MAX: usize = NAME_CAP - 1;
+/// Longest file name, in bytes — the full capacity of [`DirEntry::name`], since
+/// the length is stored explicitly and no byte is spent on a terminator.
+pub const NAME_MAX: usize = 27;
 
 /// Largest file addressable by one inode, in blocks: the direct pointers, plus
 /// one single-indirect block, plus one double-indirect block.
@@ -101,14 +98,22 @@ pub struct DiskInode {
 
 /// A directory entry: 32 bytes, 16 to a block.
 ///
-/// `name` is NUL-padded; the usable length is at most [`NAME_MAX`]. An entry
-/// with `inode == 0` in a slot past the first is treated as free (inode 0 is
-/// the root, which never appears as a child).
+/// The name is stored as an explicit length plus a fixed byte array, *not*
+/// NUL-terminated: the length is then O(1) to read, no byte of the 27 is spent
+/// on a terminator, and a name may contain any byte. `name_len` comes off disk
+/// unvalidated, so [`DirEntry::name`] clamps it — a corrupt entry must not be
+/// able to slice out of bounds.
+///
+/// Every slot in `[0, size/32)` of a directory is live: removal compacts by
+/// moving the last entry down, so there are no free slots to skip and no
+/// sentinel value to reserve (see [`Fs::remove`](crate::Fs::remove)).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
 pub struct DirEntry {
     pub inode: u32,
-    pub name: [u8; NAME_CAP],
+    /// Bytes of `name` in use; at most [`NAME_MAX`].
+    pub name_len: u8,
+    pub name: [u8; NAME_MAX],
 }
 
 /// The kind of object an inode represents. On disk this is the raw `u32`
@@ -136,23 +141,19 @@ impl InodeType {
 }
 
 impl DirEntry {
-    /// An all-zero entry (inode 0, empty name), used to fill free slots.
-    pub const fn empty() -> Self { Self { inode: 0, name: [0u8; NAME_CAP] } }
-
-    /// Build an entry for `inode` named `name`. The name is truncated to
-    /// [`NAME_MAX`] bytes and always left NUL-terminated.
+    /// Build an entry for `inode` named `name`, truncated to [`NAME_MAX`] bytes.
     pub fn new(inode: u32, name: &str) -> Self {
-        let mut entry = Self { inode, name: [0u8; NAME_CAP] };
         let bytes = name.as_bytes();
         let n = if bytes.len() > NAME_MAX { NAME_MAX } else { bytes.len() };
+        let mut entry = Self { inode, name_len: n as u8, name: [0u8; NAME_MAX] };
         entry.name[..n].copy_from_slice(&bytes[..n]);
         entry
     }
 
-    /// The name as a string slice: bytes up to the first NUL, as UTF-8. Invalid
-    /// UTF-8 (e.g. a name truncated mid-character) reads back as empty.
+    /// The name as a string slice. A `name_len` past the field (only reachable
+    /// from a corrupt image) is clamped; invalid UTF-8 reads back as empty.
     pub fn name(&self) -> &str {
-        let end = self.name.iter().position(|&b| b == 0).unwrap_or(NAME_CAP);
+        let end = (self.name_len as usize).min(NAME_MAX);
         core::str::from_utf8(&self.name[..end]).unwrap_or("")
     }
 }
@@ -205,20 +206,28 @@ mod tests {
     fn dir_entry_name_roundtrip() {
         let entry = DirEntry::new(7, "hello.txt");
         assert_eq!(entry.inode, 7);
+        assert_eq!(entry.name_len as usize, "hello.txt".len(), "length stored explicitly");
         assert_eq!(entry.name(), "hello.txt");
-
-        let empty = DirEntry::empty();
-        assert_eq!(empty.inode, 0);
-        assert_eq!(empty.name(), "");
     }
 
     #[test]
-    fn dir_entry_name_truncated_and_terminated() {
-        // 36 ASCII bytes, longer than NAME_MAX (27).
+    fn dir_entry_name_fills_the_field_and_truncates() {
+        // Exactly NAME_MAX bytes: no terminator to spare, all 27 usable.
+        let full = "a".repeat(NAME_MAX);
+        assert_eq!(DirEntry::new(1, &full).name(), full, "a full-width name survives");
+
+        // 36 ASCII bytes, longer than NAME_MAX.
         let long = "abcdefghijklmnopqrstuvwxyz0123456789";
         let entry = DirEntry::new(1, long);
-        assert_eq!(entry.name().len(), NAME_MAX, "name truncated to NAME_MAX");
-        assert_eq!(entry.name.last(), Some(&0u8), "field stays NUL-terminated");
+        assert_eq!(entry.name_len as usize, NAME_MAX, "name truncated to NAME_MAX");
         assert_eq!(entry.name(), &long[..NAME_MAX]);
+    }
+
+    #[test]
+    fn dir_entry_clamps_a_corrupt_length() {
+        // A garbage name_len off a corrupt disk must not slice out of bounds.
+        let mut entry = DirEntry::new(1, "ok");
+        entry.name_len = u8::MAX;
+        assert_eq!(entry.name().len(), NAME_MAX, "clamped to the field, no panic");
     }
 }
