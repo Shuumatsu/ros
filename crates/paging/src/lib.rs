@@ -18,9 +18,11 @@
 #[macro_use]
 extern crate static_assertions;
 
+pub mod satp;
 pub mod sv39;
 pub mod utils;
 
+pub use satp::{Mode, Satp};
 pub use sv39::access::{Identity, LinearOffset, PhysAccess};
 pub use sv39::addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
 pub use sv39::entry::{Entry, PteFlags};
