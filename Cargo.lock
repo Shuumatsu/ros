@@ -111,6 +111,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "frame-allocator"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "pretty_assertions",
+ "thiserror",
+]
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -144,6 +153,7 @@ dependencies = [
  "buddy_system_allocator",
  "crossbeam-utils",
  "fdt-raw",
+ "frame-allocator",
  "paging",
  "riscv",
  "riscv-rt",
@@ -182,6 +192,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags 2.10.0",
  "static_assertions",
+ "thiserror",
 ]
 
 [[package]]

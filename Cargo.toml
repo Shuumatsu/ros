@@ -1,5 +1,12 @@
 [workspace]
-members = ["crates/paging", "crates/kernel", "crates/blockdev", "crates/rfs", "crates/mkfs"]
+members = [
+    "crates/paging",
+    "crates/kernel",
+    "crates/blockdev",
+    "crates/rfs",
+    "crates/mkfs",
+    "crates/frame-allocator",
+]
 resolver = "3"
 
 [profile.dev]

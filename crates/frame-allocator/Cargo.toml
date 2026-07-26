@@ -1,0 +1,11 @@
+[package]
+name = "frame-allocator"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thiserror = { version = "2", default-features = false }
+heapless = "0.9"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
