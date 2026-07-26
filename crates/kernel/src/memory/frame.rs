@@ -135,17 +135,67 @@ pub fn init(free_start: usize, ram_end: usize) {
 
     // SAFETY: `managed` covers RAM strictly above the kernel image and the
     // bitmap — memory nothing else owns — and boot.S maps every frame in it.
-    // TODO: also reserve the device-tree blob's region; today's range may span
-    // it (pre-existing: the old buddy allocator had the same gap).
-    let allocator = unsafe {
+    let mut allocator = unsafe {
         FrameAllocator::new(managed, bitmap).expect("frame allocator initialization failed")
     };
+    reserve_device_tree(&mut allocator, managed);
     *FRAME_ALLOCATOR.lock() = Some(allocator);
 
     // Publish the span we took — bitmap included, so `[start_ppn, end_ppn)` rather
     // than `managed`. This is what `kernel_table` maps; see `owned_range`.
     OWNED_START.store(PhysicalAddr::from_ppn(start_ppn).bits(), Ordering::Relaxed);
     OWNED_END.store(PhysicalAddr::from_ppn(end_ppn).bits(), Ordering::Relaxed);
+}
+
+/// Withhold the frames the device-tree blob occupies.
+///
+/// The previous boot stage leaves the blob in ordinary RAM — on QEMU virt at
+/// `0x87e00000`, near the top — so it falls squarely inside `managed`. Without
+/// this the allocator will happily vend the pages the tree is stored in, and the
+/// corruption only shows up if something reads the blob again.
+///
+/// Rounded outward to whole frames: a partial frame is still a frame that must not
+/// be handed out.
+fn reserve_device_tree(allocator: &mut FrameAllocator<'static>, managed: FrameRange) {
+    let Some((dtb_start, dtb_end)) = crate::device_tree::dtb_range() else {
+        panic!("device tree extent unknown; call device_tree::init before memory::init")
+    };
+
+    let first = PhysicalAddr::new(dtb_start).align_down(PAGE_SIZE).ppn();
+    let last = PhysicalAddr::new(dtb_end).align_up(PAGE_SIZE).ppn();
+
+    // The blob need not be inside the pool: it could sit below the kernel image, or
+    // above the mapped window we clamped to. Reserve only the overlap, and say when
+    // there is none rather than leaving it ambiguous.
+    let first = first.max(managed.start());
+    let last = last.min(managed.end());
+    let Ok(range) = FrameRange::new(first, last) else {
+        println!(
+            "[memory] device tree at {dtb_start:#x}..{dtb_end:#x} lies outside the frame pool; \
+             nothing to reserve"
+        );
+        return;
+    };
+
+    let free_before = allocator.free_frames();
+    allocator
+        .reserve(range)
+        .unwrap_or_else(|error| panic!("reserving the device tree blob failed: {error}"));
+    // A reservation that silently withheld nothing would leave the blob vendable
+    // and the corruption would only surface much later, so check the accounting
+    // actually moved rather than trusting the call.
+    assert_eq!(
+        allocator.free_frames(),
+        free_before - range.len(),
+        "reserving {} device-tree frames did not remove them from the pool",
+        range.len()
+    );
+    println!(
+        "[memory] reserved device tree: {:#x}..{:#x} ({} frames)",
+        PhysicalAddr::from_ppn(range.start()).bits(),
+        PhysicalAddr::from_ppn(range.end()).bits(),
+        range.len()
+    );
 }
 
 /// Allocate one zeroed physical frame, or `None` if the pool is exhausted.

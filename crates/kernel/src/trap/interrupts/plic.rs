@@ -20,6 +20,17 @@ const PLIC_ENABLE_OFFSET: usize = 0x2000;
 const PLIC_THRESHOLD_OFFSET: usize = 0x20_0000;
 const PLIC_CLAIM_OFFSET: usize = 0x20_0004;
 
+/// Pointer to the PLIC register `offset` bytes into its MMIO window.
+///
+/// The single place that turns the device tree's *physical* PLIC base into a
+/// usable pointer. It goes through the kernel's direct map, which covers device
+/// memory (see [`crate::memory::kernel_table`]) — never the raw physical address,
+/// which is only a valid pointer for as long as the boot identity mapping happens
+/// to survive.
+fn register(offset: usize) -> *mut u32 {
+    crate::memory::phys_to_virt(plic_base() + offset) as *mut u32
+}
+
 // The platform-level interrupt controller (PLIC) routes all signals through one pin on the CPU--the EI (external interrupt) pin.
 // This pin can be enabled via the machine external interrupt enable (meie) bit in the mie register.
 
@@ -34,7 +45,7 @@ unsafe fn enable(intr_id: usize) {
 
     let bit = 1 << intr_id;
     // 似乎 qemu 是运行在 context 0？
-    let ptr = (plic_base() + PLIC_ENABLE_OFFSET) as *mut u32;
+    let ptr = register(PLIC_ENABLE_OFFSET);
     unsafe { ptr.write_volatile(ptr.read_volatile() | bit) };
 }
 
@@ -42,23 +53,23 @@ unsafe fn set_priority(intr_id: usize, mut prio: u32) {
     assert!(intr_id < 1024);
 
     let tsh = {
-        let ptr = (plic_base() + PLIC_THRESHOLD_OFFSET) as *mut u32;
+        let ptr = register(PLIC_THRESHOLD_OFFSET);
         unsafe { ptr.read_volatile() }
     };
     prio = max(prio, tsh);
 
-    let ptr = (plic_base() + PLIC_PRIORITY_OFFSET) as *mut u32;
+    let ptr = register(PLIC_PRIORITY_OFFSET);
     unsafe { ptr.add(intr_id).write_volatile(prio) };
 }
 
 unsafe fn set_threshold(threshold: u32) {
-    let ptr = (plic_base() + PLIC_THRESHOLD_OFFSET) as *mut u32;
+    let ptr = register(PLIC_THRESHOLD_OFFSET);
     unsafe { ptr.write_volatile(threshold) }
 }
 
 /// See if a given interrupt id is pending.
 unsafe fn is_pending(intr_id: u32) -> bool {
-    let ptr = (plic_base() + PLIC_PENDING_OFFSET) as *const u32;
+    let ptr = register(PLIC_PENDING_OFFSET);
 
     let bits = unsafe { ptr.read_volatile() };
     (1 << intr_id) & bits != 0
@@ -67,7 +78,7 @@ unsafe fn is_pending(intr_id: u32) -> bool {
 // returns the ID of the highest priority pending interrupt or zero if there is no pending interrupt
 // A successful claim will also atomically clear the corresponding pending bit on the interrupt source.
 unsafe fn claim() -> Option<usize> {
-    let ptr = (plic_base() + PLIC_CLAIM_OFFSET) as *const u32;
+    let ptr = register(PLIC_CLAIM_OFFSET);
 
     match unsafe { ptr.read_volatile() } {
         0 => None,
@@ -78,7 +89,7 @@ unsafe fn claim() -> Option<usize> {
 // The PLIC does not check whether the completion ID is the same as the last claim ID for that target.
 // If the completion ID does not match an interrupt source that is currently enabled for the target, the completion is silently ignored.
 unsafe fn complete(intr_id: usize) {
-    let ptr = (plic_base() + PLIC_CLAIM_OFFSET) as *mut u32;
+    let ptr = register(PLIC_CLAIM_OFFSET);
     unsafe { ptr.write_volatile(intr_id as u32) }
 }
 

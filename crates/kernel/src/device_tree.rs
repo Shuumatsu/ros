@@ -20,6 +20,7 @@ use fdt_raw::Fdt;
 
 // Discovered hardware, filled in by `discover`. Zero means "not found".
 static DTB_ADDR: AtomicUsize = AtomicUsize::new(0);
+static DTB_SIZE: AtomicUsize = AtomicUsize::new(0);
 static RAM_BASE: AtomicUsize = AtomicUsize::new(0);
 static RAM_END: AtomicUsize = AtomicUsize::new(0);
 static UART_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -41,6 +42,23 @@ pub fn dtb_addr() -> Option<usize> {
         0 => None,
         a => Some(a),
     }
+}
+
+/// Physical extent of the device-tree blob itself, `[start, end)`.
+///
+/// The blob lives in ordinary RAM — on QEMU virt near the top of it — so it falls
+/// inside the range the frame allocator manages. Something has to withhold it, or
+/// the allocator will vend the memory the tree is still stored in;
+/// [`crate::memory::frame::init`] reserves exactly this range.
+///
+/// `None` before the tree has been parsed.
+pub fn dtb_range() -> Option<(usize, usize)> {
+    let start = DTB_ADDR.load(Ordering::Relaxed);
+    let size = DTB_SIZE.load(Ordering::Relaxed);
+    if start == 0 || size == 0 {
+        return None;
+    }
+    Some((start, start.saturating_add(size)))
 }
 
 /// Base of the RAM region backing the kernel, from the DTB.
@@ -201,11 +219,23 @@ pub unsafe fn init(dtb_ptr: usize) {
         panic!("[dtb] no device tree pointer in a1 — previous boot stage violated the boot contract");
     }
 
-    let fdt = match unsafe { Fdt::from_ptr(dtb_ptr as *mut u8) } {
+    // `a1` holds a *physical* address; reach the blob through the direct map
+    // rather than treating it as a pointer. Both the boot table and the kernel
+    // table map it there, whereas the raw address is only dereferenceable while a
+    // boot identity mapping exists — and it no longer does.
+    let blob = crate::memory::phys_to_virt(dtb_ptr) as *mut u8;
+    // SAFETY: forwarded from this function's contract — `dtb_ptr` addresses a
+    // valid FDT that stays mapped and unmodified, and `blob` is its direct-map
+    // alias.
+    let fdt = match unsafe { Fdt::from_ptr(blob) } {
         Ok(fdt) => fdt,
         Err(e) => panic!("[dtb] failed to parse FDT at {:#x}: {:?}", dtb_ptr, e),
     };
     DTB_ADDR.store(dtb_ptr, Ordering::Relaxed);
+    // The blob's own extent, from its header. Needed because the blob sits *in*
+    // RAM: the frame allocator has to be told to withhold it, or it will hand out
+    // the memory the tree is still living in. See `dtb_range`.
+    DTB_SIZE.store(fdt.header().totalsize as usize, Ordering::Relaxed);
 
     // ---- Populate the device table (no printing yet: the console needs the
     //      UART base we are about to store). ----
@@ -256,7 +286,13 @@ pub unsafe fn init(dtb_ptr: usize) {
 /// so printing is fully decoupled from [`init`]. Call once the console is up,
 /// i.e. after `init` (which is what backs the console with the real UART).
 pub fn summary() {
-    println!("[dtb] blob at {:#x}", DTB_ADDR.load(Ordering::Relaxed));
+    // Size included so the frame reservation in `memory::frame` can be checked
+    // against it straight from the boot log.
+    println!(
+        "[dtb] blob at {:#x} (size {:#x})",
+        DTB_ADDR.load(Ordering::Relaxed),
+        DTB_SIZE.load(Ordering::Relaxed)
+    );
     if let (Some(base), Some(end)) = (ram_base(), ram_end()) {
         println!("[dtb] ram:   {:#x}..{:#x} ({} MiB)", base, end, (end - base) / (1024 * 1024));
     }

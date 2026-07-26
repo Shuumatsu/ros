@@ -14,7 +14,20 @@ static UART: Mutex<Option<MmioSerialPort>> = Mutex::new(None);
 fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
     if port.is_none() {
         if let Some(base) = device_tree::uart_base() {
-            let mut serial = unsafe { MmioSerialPort::new(base) };
+            // The device tree reports a *physical* base; reach it through the
+            // kernel's direct map. Not the raw address: that is only a valid
+            // pointer while a boot identity mapping happens to exist, and this port
+            // is cached in a `static` that outlives the boot table.
+            //
+            // Valid under both tables, which is the point — the direct map is
+            // linear, so `phys_to_virt` of a device address is a canonical Sv39
+            // address that `boot.S` and `kernel_table` both map. Under the old
+            // RAM-base-skewed offset it would not even have been canonical.
+            let uart = crate::memory::phys_to_virt(base);
+            // SAFETY: `uart` is the direct-map alias of the DTB-reported UART
+            // window, mapped R+W, and this is the only `MmioSerialPort` built for
+            // it — the `UART` mutex keeps that exclusive.
+            let mut serial = unsafe { MmioSerialPort::new(uart) };
             serial.init();
             *port = Some(serial);
         }

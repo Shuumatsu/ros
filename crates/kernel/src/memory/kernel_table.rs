@@ -25,6 +25,14 @@
 //! virt addresses. That was a second, coarser encoding of what the DTB already
 //! says, and it mapped 1 GiB `rw-` to cover a few MiB of real registers.
 //!
+//! # No identity mapping
+//!
+//! Unlike `boot.S`'s table, this one maps nothing at `VA == PA`. Every physical
+//! address the kernel dereferences goes through [`super::phys_to_virt`] first —
+//! device registers included, which is what the linear direct map bought. The
+//! low half of the address space is now entirely unmapped and available to user
+//! processes.
+//!
 //! # One layout, consumed twice
 //!
 //! [`regions`] computes the list once, and it is used to *install*, then to
@@ -44,9 +52,6 @@
 //!
 //! - `GLOBAL` is deliberately not set. It is a TLB optimisation whose correctness
 //!   depends on address spaces that do not exist yet.
-//! - Device windows are still mapped identity *as well as* into the direct map,
-//!   because `console.rs` hands the raw device-tree base to `MmioSerialPort` and
-//!   caches the result. That is the next thing to go.
 //! - Single-hart only. With SMP, secondary harts must *install* this table rather
 //!   than build their own.
 
@@ -76,9 +81,9 @@ const READ_WRITE: PteFlags =
 /// Bytes mapped by one leaf at the middle level.
 const SUPERPAGE: usize = page_size_at(1);
 
-/// Upper bound on the region list: eight kernel regions plus two entries (direct
-/// and identity) per device window. Generous, and a compile-time bound beats a
-/// heap allocation in the code that builds page tables.
+/// Upper bound on the region list: eight kernel regions plus one per device
+/// window. Generous, and a compile-time bound beats a heap allocation in the code
+/// that builds page tables.
 const MAX_REGIONS: usize = 24;
 
 /// A direct-map region: `VA` and `PA` differ by the fixed offset, so the physical
@@ -110,27 +115,20 @@ fn regions() -> Vec<Region, MAX_REGIONS> {
     };
 
     // ---- Device memory, exactly as the device tree describes it ----
-    // 4 KiB pages for exactness, not for lack of alignment: a superpage rounds
-    // outward, and next to a device register window sits either another device or
-    // nothing, neither of which should be mapped by accident. Some windows would
-    // in fact fit superpages (QEMU virt's PLIC is 3 aligned MiB), but a few
-    // thousand exact leaves cost less than a mapping that reaches past its device.
+    //
+    // Direct map only, no identity alias: everything that touches a device goes
+    // through `phys_to_virt` now (`console.rs`, `plic::register`,
+    // `device_tree::init`), so a physical address is never dereferenced as one.
+    //
+    // 4 KiB pages for exactness rather than for lack of alignment — a superpage
+    // rounds outward, and next to a device register window sits either another
+    // device or nothing, neither of which should be mapped by accident. Some
+    // windows would in fact fit superpages (QEMU virt's PLIC is 3 aligned MiB), but
+    // a few thousand exact leaves cost less than a mapping that overreaches.
     for device in crate::device_tree::mmio_regions() {
-        let va = phys_to_virt(device.base);
         push(Region {
             name: device.name,
-            va,
-            pa: device.base,
-            len: device.size,
-            level: 0,
-            flags: READ_WRITE,
-        });
-        // The same window identity-mapped. Temporary: `console.rs` caches an
-        // `MmioSerialPort` built from the raw device-tree base, so dropping this
-        // means converting that call site first.
-        push(Region {
-            name: "  (identity)",
-            va: device.base,
+            va: phys_to_virt(device.base),
             pa: device.base,
             len: device.size,
             level: 0,

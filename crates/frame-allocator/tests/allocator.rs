@@ -4,7 +4,7 @@ use pretty_assertions::assert_eq;
 
 use frame_allocator::{
     DeallocationError, FrameAllocator, FrameBlock, FrameRange, InitError, MetadataError,
-    metadata_layout,
+    ReserveError, metadata_layout,
 };
 
 const TEST_METADATA_WORDS: usize = 64;
@@ -100,6 +100,16 @@ fn error_messages_and_source_chain_are_stable() {
         DeallocationError::UnalignedFrame { start: 7, order: 2 }.to_string(),
         "frame 7 does not start an aligned block of order 2",
         "UnalignedFrame message changed"
+    );
+    assert_eq!(
+        ReserveError::OutOfRange { start: 4, end: 9 }.to_string(),
+        "reserved range 4..9 is not inside the managed range",
+        "ReserveError::OutOfRange message changed"
+    );
+    assert_eq!(
+        ReserveError::AlreadyAllocated { frame: 12 }.to_string(),
+        "frame 12 is already allocated and cannot be reserved",
+        "ReserveError::AlreadyAllocated message changed"
     );
 }
 
@@ -321,6 +331,131 @@ fn restores_fragmented_allocations_for_a_larger_request() {
     assert_eq!(allocator.free_frames(), 64, "fragmented frees did not restore capacity");
     let whole = allocator.allocate(count(64)).expect("full-range allocation failed after merge");
     assert_eq!(whole.start_frame(), 0, "full-range allocation has the wrong base");
+}
+
+// ---------------------------------------------------------------------------
+// reserve: withholding interior memory that is not the allocator's to give.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reserved_frames_are_never_vended_even_under_exhaustion() {
+    // An interior range, deliberately not aligned to anything: a device-tree blob
+    // lands where the previous boot stage put it.
+    let mut metadata = [0usize; TEST_METADATA_WORDS];
+    let mut allocator = allocator(range(0, 64), &mut metadata);
+    allocator.reserve(range(21, 26)).expect("interior reservation must succeed");
+
+    assert_eq!(allocator.free_frames(), 59, "reserving five frames must cost five frames");
+
+    // Drain the pool completely and prove no reserved frame ever comes back.
+    let mut seen = [false; 64];
+    while let Some(block) = allocator.allocate(count(1)) {
+        let frame = block.start_frame();
+        check!(
+            !(21..26).contains(&frame),
+            "allocator handed out reserved frame {frame}"
+        );
+        check!(!seen[frame], "frame {frame} was handed out twice");
+        seen[frame] = true;
+    }
+
+    assert_eq!(allocator.free_frames(), 0, "pool should be drained");
+    for frame in 0..64 {
+        assert_eq!(
+            seen[frame],
+            !(21..26).contains(&frame),
+            "frame {frame} was vended exactly when it should not have been (or vice versa)"
+        );
+    }
+}
+
+#[test]
+fn reserving_splits_only_what_it_must() {
+    // One reserved frame in the middle of a 64-frame root must not cost more than
+    // one frame: the surrounding buddies have to survive as larger free blocks.
+    let mut metadata = [0usize; TEST_METADATA_WORDS];
+    let mut allocator = allocator(range(0, 64), &mut metadata);
+    allocator.reserve(range(32, 33)).expect("single-frame reservation must succeed");
+
+    assert_eq!(allocator.free_frames(), 63, "one reserved frame must cost exactly one");
+    // The untouched half is still a whole 32-frame block.
+    let half = allocator.allocate(count(32)).expect("the intact half must still be allocatable");
+    assert_eq!(half.start_frame(), 0, "the intact half is the low one");
+    assert_eq!(half.frame_count(), 32, "reserving must not have fragmented the other half");
+}
+
+#[test]
+fn a_reserved_frame_can_be_reclaimed() {
+    // The initrd case: withheld during boot, handed back once it is finished with.
+    let mut metadata = [0usize; TEST_METADATA_WORDS];
+    let mut allocator = allocator(range(0, 8), &mut metadata);
+    allocator.reserve(range(3, 4)).expect("reservation must succeed");
+    assert_eq!(allocator.free_frames(), 7, "reservation must be accounted");
+
+    // SAFETY: nothing else refers to the reserved frame in this numeric test, and
+    // it was withheld at order 0, which is what `deallocate_at` is told here.
+    unsafe {
+        allocator.deallocate_at(3, 0).expect("a reserved frame must be reclaimable");
+    }
+    assert_eq!(allocator.free_frames(), 8, "reclaiming must restore the frame");
+    let whole = allocator.allocate(count(8)).expect("root must coalesce after reclaim");
+    assert_eq!(whole.frame_count(), 8, "reclaimed frame must merge back into the root");
+}
+
+#[test]
+fn reserve_rejects_ranges_it_cannot_honour() {
+    let mut metadata = [0usize; TEST_METADATA_WORDS];
+    let mut allocator = allocator(range(8, 16), &mut metadata);
+
+    for bad in [range(0, 4), range(4, 10), range(12, 20), range(20, 24)] {
+        let error = allocator
+            .reserve(bad)
+            .expect_err("a range outside the managed range must be rejected");
+        assert_eq!(
+            error,
+            ReserveError::OutOfRange { start: bad.start(), end: bad.end() },
+            "wrong diagnostic for out-of-range reservation {}..{}",
+            bad.start(),
+            bad.end()
+        );
+    }
+    assert_eq!(allocator.free_frames(), 8, "rejected reservations must not change state");
+
+    // Reserving memory that has already been handed out is a real conflict.
+    let block = allocator.allocate(count(1)).expect("allocation failed");
+    let taken = block.start_frame();
+    let error = allocator
+        .reserve(range(taken, taken + 1))
+        .expect_err("reserving an allocated frame must be rejected");
+    assert_eq!(
+        error,
+        ReserveError::AlreadyAllocated { frame: taken },
+        "wrong diagnostic for reserving allocated memory"
+    );
+}
+
+#[test]
+fn reserve_spans_multiple_buddy_roots() {
+    // 3..13 decomposes into roots of 1, 4, 4, 1 at 3, 4, 8 and 12, so a
+    // reservation crossing 4..12 has to descend three different trees.
+    let mut metadata = [usize::MAX; TEST_METADATA_WORDS];
+    let mut allocator = allocator(range(3, 13), &mut metadata);
+    allocator.reserve(range(6, 11)).expect("cross-root reservation must succeed");
+
+    assert_eq!(allocator.free_frames(), 5, "five of ten frames remain");
+    let mut seen = [false; 13];
+    while let Some(block) = allocator.allocate(count(1)) {
+        let frame = block.start_frame();
+        check!(!(6..11).contains(&frame), "handed out reserved frame {frame}");
+        seen[frame] = true;
+    }
+    for frame in 3..13 {
+        assert_eq!(
+            seen[frame],
+            !(6..11).contains(&frame),
+            "frame {frame} vended exactly when it should not have been (or vice versa)"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

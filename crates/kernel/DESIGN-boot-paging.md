@@ -350,6 +350,67 @@ All three enforcement paths were then shown to be non-vacuous by mutation:
 | skip installing `rodata` | `region 'rodata' left 0xffffffc080218000 unmapped` |
 | write to `.text` at run time | `scause 15` / `StorePageFault` |
 
+### G. Stage 4 — DTB reserved, identity map retired
+
+Two things, both boot/memory only.
+
+**1. The device-tree blob is now withheld from the frame allocator.** It sits at
+`0x87e00000 (size 0x17c4)` — squarely inside the pool `0x8032d000..0x88000000` —
+so the allocator could hand out the pages the tree is stored in. §5 debt #1 for
+three sessions; now closed.
+
+> **A correction to an earlier claim in these notes.** The suggested cheap fix was
+> "allocate over it at init and never free". That is **impossible**: `allocate(count)`
+> returns whichever block happens to be free, never a chosen address. Nothing in the
+> crate could claim a specific frame, so a real reservation primitive was the only
+> option.
+
+`FrameAllocator::reserve(range)` withholds an interior range. It is
+`allocate`'s descent aimed at a *chosen* leaf: climb to the nearest ancestor that
+is a whole free block, recording the path, then clear that ancestor and free every
+sibling passed on the way down. `parent`/`sibling`/`block_at` already existed, so
+the whole thing is ~20 lines.
+
+- Reserved frames are indistinguishable from allocated ones, so reclaiming an
+  initrd later is just `deallocate_at` — there is a test for exactly that.
+- Frame-at-a-time at order 0. A largest-aligned-block walk would touch fewer
+  nodes, but reservations are boot-time and small, and this is obviously correct
+  where the clever version would need its own argument.
+- Deliberately **not** unwound on failure: frames reserved before the failing one
+  stay reserved, which is the safe direction.
+- `device_tree::dtb_range()` supplies the extent from the FDT header's
+  `totalsize`, rounded outward to whole frames. The size is printed in the boot log
+  so the reservation can be checked against it: `0x17c4` rounds to 2 frames. ✓
+
+**2. The identity mapping is gone.** The kernel table now maps nothing at
+`VA == PA`; the entire low half of the address space is unmapped and available to
+user processes. Three call sites had to stop treating a physical address as a
+pointer:
+
+| Site | Fix |
+|---|---|
+| `console.rs` | `MmioSerialPort::new(phys_to_virt(base))` — it caches the port in a `static` that outlives the boot table |
+| `plic.rs` | 7 × `(plic_base() + OFFSET) as *mut u32` → one `register(offset)` accessor |
+| `device_tree.rs` | `Fdt::from_ptr(phys_to_virt(dtb_ptr))` — the last one, and easy to miss |
+
+The `plic.rs` change is worth noting as DRY rather than mechanical: seven copies of
+one decision became one accessor, so there is a single place that knows how to
+reach a PLIC register.
+
+**This is Stage 2's payoff arriving.** `phys_to_virt` of a device address is only
+usable because the direct map is *linear* — under the old RAM-base-skewed offset it
+produced `0xffffffbf90000000`, not even a canonical Sv39 address. The same VA is
+mapped by both `boot.S`'s table and the kernel table, so the conversions are valid
+across the switch and the console never goes dark.
+
+Verified empirically in both directions:
+
+| Check | Result |
+|---|---|
+| console still prints after the switch | 125 lines of output, `tick 1` |
+| raw physical UART read | `scause 13` / `LoadPageFault`, "probe failed" never printed |
+| reservation actually withholds | mutating `reserve` to a no-op trips `reserving 2 device-tree frames did not remove them from the pool` |
+
 ---
 
 ## 3. Verified state
@@ -357,7 +418,7 @@ All three enforcement paths were then shown to be non-vacuous by mutation:
 ```
 cargo test -p paging --features std     # 43 passed  (NOTE: --features std is required;
                                         #  without it the crate is no_std → 0 tests run)
-cargo test -p frame-allocator           # 20 passed
+cargo test -p frame-allocator           # 25 passed
 cargo build -p paging                   # no_std, host        ) both, to keep the
 cargo build -p paging --target riscv64imac-unknown-none-elf   ) crate honest
 cargo kbuild                            # builds; 34 warnings, all pre-existing
@@ -371,24 +432,23 @@ PA `0x80800000` + `VA_OFFSET`, i.e. the linear map, where it used to be
 
 ```
 [memory] direct map: PA 0x0..0x100000000 -> VA 0xffffffc000000000.. (4 GiB)
-[memory] frames: 0x80329000..0x88000000 (124 MiB, physical)
+[dtb] blob at 0x87e00000 (size 0x17c4)
+[memory] reserved device tree: 0x87e00000..0x87e02000 (2 frames)
+[memory] frames: 0x8032d000..0x88000000 (124 MiB, physical)
 [memory] frame allocator self-test passed
 [memory] heap:   0xffffffc080800000..0xffffffc081000000 (8 MiB, virtual)
-[memory] kernel page table root at 0x8032d000:
+[memory] kernel page table root at 0x8032f000:
 [memory]   uart                   0xffffffc010000000 -> 0x0010000000  rw-     1 x 4KiB
-[memory]     (identity)           0x0000000010000000 -> 0x0010000000  rw-     1 x 4KiB
 [memory]   plic                   0xffffffc00c000000 -> 0x000c000000  rw-  1536 x 4KiB
-[memory]     (identity)           0x000000000c000000 -> 0x000c000000  rw-  1536 x 4KiB
 [memory]   clint                  0xffffffc002000000 -> 0x0002000000  rw-    16 x 4KiB
-[memory]     (identity)           0x0000000002000000 -> 0x0002000000  rw-    16 x 4KiB
-[memory]   text                   0xffffffc080200000 -> 0x0080200000  r-x    24 x 4KiB
-[memory]   rodata                 0xffffffc080218000 -> 0x0080218000  r--    13 x 4KiB
-[memory]   data                   0xffffffc080226000 -> 0x0080226000  rw-     2 x 4KiB
-[memory]   bss                    0xffffffc080228000 -> 0x0080228000  rw-     2 x 4KiB
-[memory]   kernel stack           0xffffffc08022a000 -> 0x008022a000  rw-   256 x 4KiB
-[memory]   frame pool head        0xffffffc08032b000 -> 0x008032b000  rw-   213 x 4KiB
+[memory]   text                   0xffffffc080200000 -> 0x0080200000  r-x    26 x 4KiB
+[memory]   rodata                 0xffffffc08021a000 -> 0x008021a000  r--    14 x 4KiB
+[memory]   data                   0xffffffc080228000 -> 0x0080228000  rw-     2 x 4KiB
+[memory]   bss                    0xffffffc08022a000 -> 0x008022a000  rw-     2 x 4KiB
+[memory]   kernel stack           0xffffffc08022c000 -> 0x008022c000  rw-   256 x 4KiB
+[memory]   frame pool head        0xffffffc08032d000 -> 0x008032d000  rw-   211 x 4KiB
 [memory]   direct map             0xffffffc080400000 -> 0x0080400000  rw-    62 x 2MiB
-[memory] kernel page table live (satp 0x800000000008032d); boot table retired
+[memory] kernel page table live (satp 0x800000000008032f); boot table retired
 enter kmain
 [timer] tick 1
 ```
@@ -436,100 +496,110 @@ Environment facts established by inspection:
 
 ---
 
-## 4. OPEN — Stage 4: drop the identity map, reserve the DTB, then user processes
+## 4. OPEN — remaining boot & memory work
 
-Stage 3 gave the kernel real protection. Three things are queued behind it, in
-increasing size.
+The boot/memory path is now essentially complete: PMM before heap, a const boot
+table over a linear direct map, a W^X kernel table with no identity mapping, and
+the DTB withheld. What is left in this area is small and mostly about *scale*
+rather than correctness.
 
-### 4.1 Drop the last identity mapping (small, well-scoped)
+### 4.1 SMP — the one real correctness gap left
 
-The kernel table still identity-maps the low gigabyte, purely so `console.rs` can
-keep handing the raw device-tree UART base to `MmioSerialPort`. Everything needed
-to remove it is already in place — `phys_to_virt` is valid for MMIO under the
-linear map, and the same gigabyte is already mapped there.
+`memory::init` and `kernel_table::init` are called by **every** hart that reaches
+`start`. At `-smp 1` (what `scripts/run.sh` passes) that is fine; beyond it, every
+hart would re-initialise the frame allocator over the same RAM and build its own
+kernel page table.
 
-Two call sites:
+The fix has a shape already: hart 0 builds and publishes the `Satp` value;
+secondaries skip straight to installing it. `Satp` is `Copy` and `bits()` is all an
+AP needs, so a `static AtomicUsize` plus an `install(satp)` is close to sufficient.
+Note `device_tree::init` is already correctly guarded to hart 0 — only the memory
+path is not.
 
-1. `console.rs:17` — `MmioSerialPort::new(base)` → `new(phys_to_virt(base))`. Note
-   the port is **cached** in a `static`, so the raw pointer would survive the
-   change if missed.
-2. `plic.rs` — seven `(plic_base() + OFFSET) as *mut u32`. Currently dead code
-   (`plic::init()` is a TODO and the offsets are unused-const warnings), but it
-   must be converted at the same time or it will be wrong the day it wakes up.
+Worth doing **before** user processes, not after: retrofitting per-hart state into a
+larger surface is strictly harder.
 
-Then delete the `"mmio (identity, temporary)"` region. **Safety net:** the panic
-path writes via the SBI console, which needs no address, so even a total MMIO-UART
-failure still prints.
+### 4.2 `GLOBAL` on kernel mappings
 
-### 4.2 Reserve the device-tree blob (now confirmed live, not theoretical)
+Deliberately omitted so far. Kernel regions live in every address space, so marking
+their leaves `G` lets the TLB keep them across an ASID switch. It is pure
+optimisation and it has no observable effect until there is more than one address
+space — which is why it was deferred, and why it should land *with* user paging
+rather than before it.
 
-§5 debt #1 used to be speculative. It is not: the boot log shows the DTB at
-**`0x87e00000`**, which is inside the frame allocator's managed range
-(`0x80329000..0x88000000`). The allocator can hand out the blob's frames today.
+### 4.3 RAM above the direct-map window
 
-It is harmless *only* because `dtb_addr()` has no callers and nothing re-reads the
-raw blob after `device_tree::init`. Verified by grep, not assumed. Anything that
-starts re-reading it — a second FDT pass, handing the DTB to a userspace init —
-breaks first and silently.
+`direct_map::WINDOW_GIGAPAGES = 4` bounds what the *boot* table reaches, and
+`frame::init` clamps to it, warning loudly about anything above. Only bites on a
+machine with more than 4 GiB below the window; lifting it is a one-line change plus
+a check that the const table still fits (512 root entries, 8 in use).
 
-Fix: reserve `[dtb, dtb + totalsize)` in `frame::init`. Note the frame allocator
-has no "reserve a sub-range" operation yet; the cheap version is to allocate over
-it at init and never free, the honest version is a reservation list.
+Note the kernel table has no such bound — it maps exactly `frame::owned_range()` —
+so this is purely a boot-phase limit.
 
-### 4.3 User processes (the real next milestone)
+### 4.4 Nice-to-haves, in rough order of value
 
-- `proc/mod.rs` is still 100% commented out against the old heap-allocated `Table`
-  API. Rewrite against `Mapper` — `TableFrames` and
-  `LinearOffset(direct_map::VA_OFFSET)` are exactly the policies it needs, and are
-  now proven in the kernel table.
-- Per-process root tables, `U=1` user pages, a real syscall path.
-- Teardown needs `Mapper::free_subtables` (exists) plus `frame::free_at` for the
-  leaf pages (exists now, via `deallocate_at`). The pieces are in place.
-- A VMA / address-space manager still has **no owner** (see §1) — that is what
-  decides *legal or not* on a fault before anything allocates.
+- **A guard page below the kernel stack.** The stack/heap guard above it exists and
+  is asserted, but `_bss_end` and `_kernel_stack_start` are adjacent, so stack
+  *overflow* runs into `.bss` silently. Needs a `. = . + 4096` in `kernel.ld`.
+- **Superpages for aligned device windows.** QEMU virt's PLIC is 3 aligned MiB
+  mapped as 1536 4 KiB leaves. Picking the largest level that divides both base and
+  size would cut that to 3, at the cost of a size-must-divide argument.
+- **A reservation list rather than one-shot reserve.** `FrameAllocator::reserve`
+  handles the DTB; an initrd or DTB `/reserved-memory` nodes would each need
+  another call, which is fine, but nothing currently *enumerates* what was reserved.
+- **~34 dead-code warnings** in `plic`/`utils`/`trap`/`proc`. Unrelated to memory;
+  they have survived four stages untouched.
 
-Sequencing note: user paging is the first thing that will exercise
-`FrameSource::free`, which Stage 3 wired up but nothing calls yet.
+### 4.5 Explicitly out of scope here
+
+User processes, per-process page tables, `U=1` pages, the syscall path, and the VMA
+/ address-space manager (§1's third column, still unowned). All of it is queued
+behind the memory work, and all of it is where `FrameSource::free` /
+`frame::free_at` finally get a caller — they still have **zero** today, which makes
+that the least-exercised code in the subsystem.
 
 
 ## 5. Known debt (flagged, not silently ignored)
 
-1. **DTB not reserved — CONFIRMED LIVE.** The blob sits at `0x87e00000`, *inside*
-   `frame::init`'s managed range `0x80329000..0x88000000`, so the allocator can
-   hand out its frames. Harmless only because `dtb_addr()` has no callers
-   (grep-verified) and nothing re-reads the raw blob after `device_tree::init`.
-   `TODO` in `frame::init`. See §4.2.
+Struck-through items are closed; kept so the history of each is legible.
+
+1. ~~DTB not reserved.~~ **Done** (§2.G) — `FrameAllocator::reserve` withholds
+   `0x87e00000..0x87e02000`. Note the earlier suggested fix ("allocate over it and
+   never free") was **impossible**: `allocate` cannot target an address.
 2. **RAM above the direct-map window is dropped.** Warned loudly, never silently
-   truncated. The bound is one constant — `direct_map::WINDOW_GIGAPAGES` — so
-   lifting it is a one-line change plus a re-check that the table still fits (it
-   does: 512 root entries, 8 in use). `frame::init` also asserts the case the
-   absolute window genuinely cannot serve, rather than failing later with a
-   confusing "range empty after alignment".
-3. ~~No free-by-PFN.~~ **Done** — `deallocate_at` (§2.E). One residual sharp edge:
-   the *order* passed to it cannot be validated, so it is `unsafe` and the
-   token-based `deallocate` stays the default. `frame::free_at` hardcodes order 0,
-   which is correct for every caller it documents accepting.
-4. **`proc/mod.rs` is entirely commented out** and references the old
-   heap-allocated `Table` API. It must be rewritten against `Mapper` when process
-   support lands (§4.3).
+   truncated. Bounds the *boot* table only — the kernel table maps exactly
+   `frame::owned_range()`. One constant, `direct_map::WINDOW_GIGAPAGES`. §4.3.
+3. ~~No free-by-PFN.~~ **Done** — `deallocate_at` (§2.E). Residual sharp edge: the
+   *order* passed cannot be validated, so it is `unsafe` and the token-based
+   `deallocate` stays the default. `frame::free_at` hardcodes order 0, correct for
+   every caller it documents accepting.
+4. **`proc/mod.rs` is entirely commented out** against the old heap-allocated
+   `Table` API. Out of scope for the memory work (§4.5).
 5. ~~`Mapper` has no kernel adopter.~~ **Done** — `memory/kernel_table.rs` (§2.E).
-6. ~~The kernel runs on the boot table.~~ **Done** — W^X kernel table, verified by
-   a `StorePageFault` probe against `.text` (§2.E).
-7. **Identity mappings survive for device windows only**, because `console.rs`
-   caches an `MmioSerialPort` built from the raw device-tree base. Narrowed twice:
-   from the boot table's low 4 GiB `RWX`, to one `rw-` gigabyte, to the exact DTB
-   windows (~6 MiB). Removing them entirely is §4.1.
-8. **`FrameSource::free` has no caller yet.** Stage 3 wired it up and it is
-   correct, but the kernel table is permanent, so nothing ever tears down a tree.
-   User paging (§4.3) is what will first exercise it.
-9. **Single-hart only.** `memory::init` and `kernel_table::init` are called by
-   every hart that reaches `start`, which is fine at `-smp 1` and wrong beyond it:
-   secondary harts must *install* the kernel table, not rebuild it. Pre-existing
-   for `memory::init`; `kernel_table` inherits the same assumption and says so.
-10. **No `GLOBAL` bit on kernel mappings** — a TLB optimisation deliberately
-    deferred to when address spaces exist.
-11. **~34 pre-existing dead-code warnings** in `plic`/`utils`/`trap`/`proc`.
-    Untouched, unrelated — the count did not move across Stages 2 or 3.
+6. ~~The kernel runs on the boot table.~~ **Done** — W^X kernel table, verified by a
+   `StorePageFault` probe against `.text` (§2.E).
+7. ~~Identity mappings survive.~~ **Done** (§2.G) — the kernel table maps nothing at
+   `VA == PA`; the whole low half is unmapped. Narrowed three times before dying:
+   boot table's low 4 GiB `RWX` → one `rw-` gigabyte → exact DTB windows → gone.
+   Verified by a `LoadPageFault` probe on a raw physical address.
+8. **`FrameSource::free` and `frame::free_at` have no caller.** Correct and tested
+   at the crate level, but the kernel table is permanent so nothing tears down a
+   tree. The least-exercised code in the subsystem; user paging (§4.5) is what will
+   first run it.
+9. **Single-hart only.** `memory::init` and `kernel_table::init` run on every hart
+   that reaches `start` — fine at `-smp 1`, wrong beyond it. The one real
+   correctness gap left in this area; see §4.1.
+10. **No `GLOBAL` bit on kernel mappings** — TLB optimisation, deferred to when
+    address spaces exist (§4.2).
+11. **No guard page below the kernel stack.** `_bss_end` and `_kernel_stack_start`
+    are adjacent, so stack overflow lands in `.bss` silently. The guard *above* the
+    stack exists and is asserted. Needs a linker-script change (§4.4).
+12. **Reservations are not enumerable.** `reserve` works, but nothing records what
+    was withheld, so a future initrd or `/reserved-memory` pass has no list to
+    consult (§4.4).
+13. **~34 pre-existing dead-code warnings** in `plic`/`utils`/`trap`/`proc`.
+    Unrelated to memory; the count has not moved across four stages.
 
 
 ---
@@ -538,7 +608,7 @@ Sequencing note: user paging is the first thing that will exercise
 
 ```bash
 cargo test -p paging --features std   # 43 — the --features std is NOT optional
-cargo test -p frame-allocator         # 20
+cargo test -p frame-allocator         # 25
 cargo kbuild                          # build kernel (riscv64imac-unknown-none-elf)
 cargo krun                            # boot under QEMU + OpenSBI (Ctrl-A X to exit)
 

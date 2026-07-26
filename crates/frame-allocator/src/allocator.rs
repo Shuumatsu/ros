@@ -7,6 +7,10 @@ use crate::range::FrameRange;
 
 const MAX_ROOTS: usize = usize::BITS as usize * 2;
 
+/// Deepest a buddy tree can be: a tree over `2^order` frames has depth `order`,
+/// and an order is bounded by the width of the frame index.
+const MAX_TREE_DEPTH: usize = usize::BITS as usize;
+
 /// Exact bitmap storage required to manage a frame range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MetadataLayout {
@@ -133,6 +137,26 @@ pub enum DeallocationError {
         start: usize,
         /// The order it was claimed to begin.
         order: usize,
+    },
+}
+
+/// Failure to withhold frames from the pool.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ReserveError {
+    /// The requested range is not entirely inside the managed range.
+    #[error("reserved range {start}..{end} is not inside the managed range")]
+    OutOfRange {
+        /// Inclusive start of the rejected range.
+        start: usize,
+        /// Exclusive end of the rejected range.
+        end: usize,
+    },
+    /// A frame in the range has already been handed out, so it cannot be
+    /// withheld — something is using memory the caller believes is spoken for.
+    #[error("frame {frame} is already allocated and cannot be reserved")]
+    AlreadyAllocated {
+        /// The first frame found to be unavailable.
+        frame: usize,
     },
 }
 
@@ -332,6 +356,77 @@ impl<'a> FrameAllocator<'a> {
         // token with the same arithmetic `allocate` used to mint it, so it is
         // structurally indistinguishable from the original.
         unsafe { self.deallocate(block) }
+    }
+
+    /// Withhold every frame in `range` from the pool, permanently unless it is
+    /// later handed back with [`deallocate_at`](Self::deallocate_at).
+    ///
+    /// For memory that lies inside the managed range but is not the allocator's to
+    /// give: a device-tree blob, an initrd, a firmware carve-out. Such memory is
+    /// usually *interior* to RAM, so it cannot be excluded by narrowing the range
+    /// at construction, and it cannot be claimed with
+    /// [`allocate`](Self::allocate) either — that returns whichever block happens
+    /// to be free, never a chosen address.
+    ///
+    /// Reserved frames are indistinguishable from allocated ones afterwards, which
+    /// is what makes reclaiming an initrd later just a `deallocate_at`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReserveError::AlreadyAllocated`] if any frame in `range` has already been
+    /// vended — reserve before vending. **Not unwound**: frames reserved before the
+    /// failing one stay reserved. That is the safe direction (they merely go
+    /// unused) and it keeps a partial failure from returning memory the caller has
+    /// already decided is not free.
+    pub fn reserve(&mut self, range: FrameRange) -> Result<(), ReserveError> {
+        if range.start() < self.range.start() || range.end() > self.range.end() {
+            return Err(ReserveError::OutOfRange { start: range.start(), end: range.end() });
+        }
+        // Frame at a time, at order 0. A largest-aligned-block walk would touch
+        // fewer nodes, but reservations are boot-time and small, and this is
+        // obviously correct where the clever version would need its own argument.
+        for frame in range.start()..range.end() {
+            self.claim(frame)?;
+        }
+        Ok(())
+    }
+
+    /// Mark the single frame `start` as allocated, splitting whichever free block
+    /// currently covers it.
+    ///
+    /// This is [`allocate`](Self::allocate)'s descent aimed at a *chosen* leaf: the
+    /// same "clear the free ancestor, then free each sibling on the way down", but
+    /// steered along a recorded path instead of always taking the left child.
+    fn claim(&mut self, start: usize) -> Result<(), ReserveError> {
+        // Order 0 is aligned to everything, and `reserve` has already checked the
+        // range, so the only way this fails is a frame outside every root — which
+        // is exactly an out-of-range frame.
+        let block = self
+            .block_at(start, 0)
+            .map_err(|_| ReserveError::OutOfRange { start, end: start + 1 })?;
+        let root = self.roots[block.root_index];
+
+        // Climb to the nearest ancestor that is a whole free block, recording the
+        // path so the split can retrace it downward. Reaching the root without
+        // finding one means the frame is already spoken for.
+        let mut path: Vec<usize, MAX_TREE_DEPTH> = Vec::new();
+        let mut ancestor = block.node;
+        while !self.bitmap.get(root.bit_offset + ancestor) {
+            if ancestor == 0 {
+                return Err(ReserveError::AlreadyAllocated { frame: start });
+            }
+            path.push(ancestor).expect("buddy tree deeper than MAX_TREE_DEPTH");
+            ancestor = parent(ancestor);
+        }
+
+        // That ancestor stops being a free block, and every sibling passed on the
+        // way down becomes one — leaving exactly the target leaf allocated.
+        self.bitmap.clear(root.bit_offset + ancestor);
+        for &node in path.iter().rev() {
+            self.bitmap.set(root.bit_offset + sibling(node));
+        }
+        self.free_frames -= block.frame_count();
+        Ok(())
     }
 
     /// Rebuild the [`FrameBlock`] that [`allocate`](Self::allocate) would have

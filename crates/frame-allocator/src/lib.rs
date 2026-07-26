@@ -13,6 +13,6 @@ mod range;
 
 pub use allocator::{
     DeallocationError, FrameAllocator, FrameBlock, InitError, MetadataError, MetadataLayout,
-    metadata_layout,
+    ReserveError, metadata_layout,
 };
 pub use range::{FrameRange, RangeError};
