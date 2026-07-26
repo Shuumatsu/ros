@@ -31,12 +31,14 @@ use core::num::NonZeroUsize;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use frame_allocator::{FrameAllocator, FrameBlock, FrameRange, metadata_layout};
+use heapless::{String, Vec};
 use spin::Mutex;
 
 use paging::MemoryAddr;
 use paging::sv39::{FrameSource, PAGE_SIZE, PhysicalAddr};
 
 use crate::memory::phys_to_virt;
+use crate::utils::ByteSize;
 
 /// The one global physical frame allocator. `None` until [`init`] feeds it a RAM
 /// range and the `'static` bitmap reserved from that same RAM.
@@ -106,7 +108,7 @@ pub fn init(free_start: usize, ram_end: usize) {
     if ram_end > window_end {
         println!(
             "[memory] WARNING: {} of RAM above the {:#x} boot window is unmanaged",
-            crate::utils::Bytes(ram_end - window_end),
+            crate::utils::ByteSize(ram_end - window_end),
             window_end
         );
     }
@@ -138,64 +140,146 @@ pub fn init(free_start: usize, ram_end: usize) {
     let mut allocator = unsafe {
         FrameAllocator::new(managed, bitmap).expect("frame allocator initialization failed")
     };
-    reserve_device_tree(&mut allocator, managed);
+    reserve_foreign_memory(&mut allocator, managed);
     *FRAME_ALLOCATOR.lock() = Some(allocator);
 
     // Publish the span we took — bitmap included, so `[start_ppn, end_ppn)` rather
     // than `managed`. This is what `kernel_table` maps; see `owned_range`.
+    report_reservations();
+
     OWNED_START.store(PhysicalAddr::from_ppn(start_ppn).bits(), Ordering::Relaxed);
     OWNED_END.store(PhysicalAddr::from_ppn(end_ppn).bits(), Ordering::Relaxed);
 }
 
-/// Withhold the frames the device-tree blob occupies.
-///
-/// The previous boot stage leaves the blob in ordinary RAM — on QEMU virt at
-/// `0x87e00000`, near the top — so it falls squarely inside `managed`. Without
-/// this the allocator will happily vend the pages the tree is stored in, and the
-/// corruption only shows up if something reads the blob again.
-///
-/// Rounded outward to whole frames: a partial frame is still a frame that must not
-/// be handed out.
-fn reserve_device_tree(allocator: &mut FrameAllocator<'static>, managed: FrameRange) {
-    let Some((dtb_start, dtb_end)) = crate::device_tree::dtb_range() else {
-        panic!("device tree extent unknown; call device_tree::init before memory::init")
-    };
+/// Longest reservation label kept. Device-tree node names reach ~20 characters.
+const RESERVATION_NAME_LEN: usize = 40;
 
-    let first = PhysicalAddr::new(dtb_start).align_down(PAGE_SIZE).ppn();
-    let last = PhysicalAddr::new(dtb_end).align_up(PAGE_SIZE).ppn();
+/// Reservations recordable: the device-tree blob plus every firmware carve-out.
+const MAX_RESERVATIONS: usize = 24;
 
-    // The blob need not be inside the pool: it could sit below the kernel image, or
-    // above the mapped window we clamped to. Reserve only the overlap, and say when
-    // there is none rather than leaving it ambiguous.
-    let first = first.max(managed.start());
-    let last = last.min(managed.end());
+/// One physical range withheld from the pool, and what withheld it.
+#[derive(Clone, Debug)]
+pub struct Reservation {
+    name: String<RESERVATION_NAME_LEN>,
+    /// First withheld physical address.
+    pub start: usize,
+    /// Exclusive end.
+    pub end: usize,
+}
+
+impl Reservation {
+    /// Why this range is withheld.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Frames withheld.
+    pub fn frames(&self) -> usize {
+        (self.end - self.start) / PAGE_SIZE
+    }
+}
+
+/// Everything withheld from the pool, in the order it was withheld.
+///
+/// Recorded because a reserved frame and an allocated frame are indistinguishable in
+/// the bitmap — that is what makes reclaiming an initrd a plain `deallocate_at`, but
+/// it also means nothing could otherwise answer "why is this memory not free?", and a
+/// leak of 200 frames looked exactly like a firmware carve-out of 200 frames.
+static RESERVATIONS: Mutex<Vec<Reservation, MAX_RESERVATIONS>> = Mutex::new(Vec::new());
+
+/// Every range withheld from the pool, cloned out so no lock is held by the caller.
+pub fn reservations() -> Vec<Reservation, MAX_RESERVATIONS> {
+    RESERVATIONS.lock().clone()
+}
+
+/// Withhold `[start, end)` from the pool, recording it as `name`.
+///
+/// Rounded **outward** to whole frames: a partially covered frame is still a frame
+/// that must not be handed out.
+///
+/// Only the overlap with the pool is withheld. A carve-out need not be inside it —
+/// on QEMU virt the firmware's own reservations sit below the kernel image entirely —
+/// and a range that misses the pool is reported rather than silently ignored, because
+/// "outside" and "forgot to reserve" must not look the same.
+fn reserve(
+    allocator: &mut FrameAllocator<'static>,
+    managed: FrameRange,
+    name: &str,
+    start: usize,
+    end: usize,
+) {
+    let first = PhysicalAddr::new(start).align_down(PAGE_SIZE).ppn().max(managed.start());
+    let last = PhysicalAddr::new(end).align_up(PAGE_SIZE).ppn().min(managed.end());
+
     let Ok(range) = FrameRange::new(first, last) else {
-        println!(
-            "[memory] device tree at {dtb_start:#x}..{dtb_end:#x} lies outside the frame pool; \
-             nothing to reserve"
-        );
+        println!("[memory] reserve: {name} at {start:#x}..{end:#x} is outside the pool, skipped");
         return;
     };
 
     let free_before = allocator.free_frames();
     allocator
         .reserve(range)
-        .unwrap_or_else(|error| panic!("reserving the device tree blob failed: {error}"));
-    // A reservation that silently withheld nothing would leave the blob vendable
-    // and the corruption would only surface much later, so check the accounting
-    // actually moved rather than trusting the call.
+        .unwrap_or_else(|error| panic!("reserving {name} at {start:#x}..{end:#x} failed: {error}"));
+    // A reservation that withheld nothing would leave the memory vendable and the
+    // corruption would surface much later, so check the accounting actually moved.
     assert_eq!(
         allocator.free_frames(),
         free_before - range.len(),
-        "reserving {} device-tree frames did not remove them from the pool",
+        "reserving {} frames for {name} did not remove them from the pool",
         range.len()
     );
-    println!(
-        "[memory] reserved device tree: {:#x}..{:#x} ({} frames)",
-        PhysicalAddr::from_ppn(range.start()).bits(),
-        PhysicalAddr::from_ppn(range.end()).bits(),
-        range.len()
-    );
+
+    let mut label = String::new();
+    let _ = label.push_str(&name[..name.len().min(RESERVATION_NAME_LEN)]);
+    let record = Reservation {
+        name: label,
+        start: PhysicalAddr::from_ppn(range.start()).bits(),
+        end: PhysicalAddr::from_ppn(range.end()).bits(),
+    };
+    if RESERVATIONS.lock().push(record).is_err() {
+        // The frames are withheld either way; only the record is lost. Say so, since
+        // the list is what the boot log and any future reclaim rely on.
+        println!("[memory] WARNING: more than {MAX_RESERVATIONS} reservations; {name} unrecorded");
+    }
+}
+
+/// Withhold every physical range that exists but is not the kernel's to hand out.
+///
+/// Two sources, both from the device tree, both of which the allocator would
+/// otherwise vend:
+///
+/// 1. **The blob itself.** On QEMU virt it sits at `0x87e00000`, near the top of RAM
+///    and squarely inside the pool. Reading it back after the allocator reused those
+///    pages is the kind of corruption that surfaces nowhere near its cause.
+/// 2. **`/reserved-memory`.** Firmware carve-outs — OpenSBI's own `mmode_resv0`/`1`
+///    here. They happen to sit *below* the kernel image on this platform, so they
+///    currently miss the pool and are safe by accident; firmware reserving above the
+///    kernel is entirely normal, and then they would not be.
+fn reserve_foreign_memory(allocator: &mut FrameAllocator<'static>, managed: FrameRange) {
+    let Some((dtb_start, dtb_end)) = crate::device_tree::dtb_range() else {
+        panic!("device tree extent unknown; call device_tree::init before memory::init")
+    };
+    reserve(allocator, managed, "device tree blob", dtb_start, dtb_end);
+
+    for carve_out in crate::device_tree::reserved_memory() {
+        reserve(allocator, managed, carve_out.name(), carve_out.base, carve_out.end());
+    }
+}
+
+/// Print what was withheld, from the record rather than from each call site.
+fn report_reservations() {
+    let reserved = reservations();
+    let frames: usize = reserved.iter().map(Reservation::frames).sum();
+    println!("[memory] withheld {} frames in {} reservations:", frames, reserved.len());
+    for entry in &reserved {
+        println!(
+            "[memory]   {:<24} {:#x}..{:#x} ({})",
+            entry.name(),
+            entry.start,
+            entry.end,
+            ByteSize(entry.end - entry.start)
+        );
+    }
 }
 
 /// Allocate one zeroed physical frame, or `None` if the pool is exhausted.

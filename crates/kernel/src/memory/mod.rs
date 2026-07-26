@@ -81,7 +81,7 @@ pub fn init() {
         "[memory] boot window: PA 0x0..{:#x} -> VA {:#x}.. ({})",
         direct_map::WINDOW_END,
         direct_map::VA_OFFSET,
-        crate::utils::Bytes(direct_map::WINDOW_END)
+        crate::utils::ByteSize(direct_map::WINDOW_END)
     );
 
     // 1. Physical frames FIRST: [free_start, ram_end). `free_start` is the top
@@ -100,7 +100,7 @@ pub fn init() {
         "[memory] frames: {:#x}..{:#x} ({}, physical)",
         free_start_pa,
         ram_end,
-        crate::utils::Bytes(ram_end - free_start_pa)
+        crate::utils::ByteSize(ram_end - free_start_pa)
     );
     frame::self_test();
 
@@ -123,7 +123,7 @@ pub fn init() {
         "[memory] heap:   {:#x}..{:#x} ({}, virtual)",
         heap_start,
         heap_end,
-        crate::utils::Bytes(KERNEL_HEAP_SIZE)
+        crate::utils::ByteSize(KERNEL_HEAP_SIZE)
     );
 
     // 3. The real kernel page table LAST: it needs frames for its tree, and it

@@ -1,28 +1,36 @@
-use alloc::{format, string::String};
-use core::mem::size_of;
+use core::fmt;
 use core::ops::Range;
 
-/// A byte count rendered in the largest binary unit that divides it, e.g. `8 MiB`.
+/// A byte count rendered in the largest binary unit that divides it exactly,
+/// falling back to plain bytes.
 ///
-/// One implementation, because there were five: `memory::init` spelled out
-/// `/ (1024 * 1024 * 1024)`, `memory::frame` and `device_tree` each did
-/// `/ 1024 / 1024`, and `memory::region` had a private `human()`. Every one was the
-/// same arithmetic with the unit hardcoded at the call site, so every one silently
-/// mislabelled anything outside the magnitude its author had in mind.
-pub struct Bytes(pub usize);
+/// Truncating division lies: a bare `/ MIB` at the call site turns 1536 MiB into
+/// `1 GiB` and 4095 bytes into `3 KiB`. Kernel sizes are page multiples on every
+/// normal path, so the exact-divisor rule prints `8 MiB` where you expect it and
+/// surfaces an off-by-one as `4095 B` instead of burying it under a rounded unit.
+///
+/// ```text
+/// ByteSize(8 << 20)    -> "8 MiB"
+/// ByteSize(1536 << 20) -> "1536 MiB"   // not "1 GiB"
+/// ByteSize(4095)       -> "4095 B"     // not "3 KiB"
+/// ByteSize(0)          -> "0 B"
+/// ```
+#[derive(Clone, Copy)]
+pub struct ByteSize(pub usize);
 
-impl core::fmt::Display for Bytes {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+impl fmt::Display for ByteSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         const KIB: usize = 1024;
         const MIB: usize = KIB * 1024;
         const GIB: usize = MIB * 1024;
-        let (value, unit) = match self.0 {
-            bytes if bytes >= GIB => (bytes / GIB, "GiB"),
-            bytes if bytes >= MIB => (bytes / MIB, "MiB"),
-            bytes if bytes >= KIB => (bytes / KIB, "KiB"),
-            bytes => (bytes, "B"),
-        };
-        write!(f, "{value} {unit}")
+        // Largest first: the first unit that divides the count exactly wins.
+        const UNITS: [(usize, &str); 3] = [(GIB, "GiB"), (MIB, "MiB"), (KIB, "KiB")];
+
+        let (scale, unit) = UNITS
+            .into_iter()
+            .find(|&(scale, _)| self.0 >= scale && self.0.is_multiple_of(scale))
+            .unwrap_or((1, "B"));
+        write!(f, "{} {unit}", self.0 / scale)
     }
 }
 
@@ -31,7 +39,6 @@ where
     T: From<u8>,
 {
     let mut ptr = range.start;
-    println!("{:?}", range);
     while ptr < range.end {
         unsafe { core::ptr::write_volatile(ptr, T::from(0)) };
         ptr = unsafe { ptr.offset(1) };

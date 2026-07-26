@@ -18,7 +18,7 @@
 use paging::sv39::{FrameSource, PhysAccess, page_size_at};
 use paging::{MapError, Mapper, PhysicalAddr, PteFlags, VirtualAddr};
 
-use crate::utils::Bytes;
+use crate::utils::ByteSize;
 
 /// One contiguous mapping: a virtual range, the physical range behind it, the
 /// page size to build it from, and the rights it carries.
@@ -202,7 +202,7 @@ pub fn report(regions: &[Region]) {
             region.pa,
             region.flags.rwx(),
             pages,
-            Bytes(region.page_size()),
+            ByteSize(region.page_size()),
             Run(run)
         );
         index += run;

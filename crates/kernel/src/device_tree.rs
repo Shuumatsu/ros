@@ -123,32 +123,82 @@ pub fn clint_size() -> usize {
 }
 
 /// Longest device-tree node name recorded. `virtio_mmio@10008000` is 20 characters.
-const MMIO_NAME_LEN: usize = 40;
+const REGION_NAME_LEN: usize = 40;
 
-/// MMIO windows recordable. QEMU virt describes about sixteen.
+/// MMIO windows recordable. QEMU virt describes seventeen.
 const MAX_MMIO: usize = 48;
 
-/// One MMIO window described by the device tree.
+/// Reserved-memory ranges recordable. OpenSBI adds two on QEMU virt.
+const MAX_RESERVED: usize = 16;
+
+/// A named physical address range taken from a device-tree node's `reg`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MmioRegion {
+pub struct PhysRegion {
     /// Device-tree node name, e.g. `serial@10000000`. Copied rather than borrowed
     /// so the list outlives the parse.
-    name: String<MMIO_NAME_LEN>,
-    /// Physical base of the window.
+    name: String<REGION_NAME_LEN>,
+    /// Physical base of the range.
     pub base: usize,
-    /// Window length in bytes.
+    /// Length in bytes.
     pub size: usize,
 }
 
-impl MmioRegion {
-    /// The device-tree node name this window came from.
+impl PhysRegion {
+    /// The device-tree node name this range came from.
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// Exclusive end of the range.
+    pub fn end(&self) -> usize {
+        self.base.saturating_add(self.size)
+    }
 }
 
-/// Every MMIO window in the device tree, discovered by walking it.
-static MMIO: Once<Vec<MmioRegion, MAX_MMIO>> = Once::new();
+/// What a node's `reg` property actually describes.
+///
+/// `reg` is not always a device address, and mistaking one kind for another is a
+/// real bug in both directions: treating reserved RAM as a device maps memory the
+/// firmware forbids, and treating a device as RAM would hand register space to the
+/// allocator.
+enum RegKind {
+    /// A memory-mapped device window.
+    Mmio,
+    /// RAM carved out by the previous boot stage — present in memory, but not the
+    /// kernel's to hand out.
+    ReservedRam,
+    /// Not a device address: the RAM itself, or a hart id.
+    Neither,
+}
+
+/// Classify a node by its path. The single place this distinction is made.
+///
+/// - `/memory@…` — the RAM itself, reported by [`ram_base`]/[`ram_end`] instead.
+/// - `/cpus/cpu@N` — `reg` there is a hart id, not an address at all.
+/// - `/reserved-memory/…` — firmware carve-outs. OpenSBI *adds* these for itself
+///   (`mmode_resv0`/`mmode_resv1` at the bottom of RAM) and its PMP then denies
+///   supervisor access, so they must reach the frame allocator, never the page table.
+///
+/// Note the reserved-memory nodes are absent from QEMU's own device tree and appear
+/// only in the one OpenSBI hands on, so they are invisible to `-machine dumpdtb` —
+/// they were found by printing what the kernel actually walked.
+fn classify(name: &str, path: &str) -> RegKind {
+    if path.starts_with("/reserved-memory") {
+        RegKind::ReservedRam
+    } else if name.starts_with("memory") || path.starts_with("/cpus") {
+        RegKind::Neither
+    } else {
+        RegKind::Mmio
+    }
+}
+
+/// Everything one walk of the tree turns up.
+struct Discovered {
+    mmio: Vec<PhysRegion, MAX_MMIO>,
+    reserved: Vec<PhysRegion, MAX_RESERVED>,
+}
+
+static DISCOVERED: Once<Discovered> = Once::new();
 
 /// Every MMIO window the device tree describes.
 ///
@@ -156,79 +206,85 @@ static MMIO: Once<Vec<MmioRegion, MAX_MMIO>> = Once::new();
 /// protect or enumerate it reads the list from here rather than deciding on a range
 /// of its own.
 ///
-/// This is a genuine walk of the tree, not a fixed list of the devices this kernel
-/// happens to drive. That distinction is the point: an earlier version returned only
-/// UART, PLIC and CLINT while claiming to be complete, which left a future virtio
-/// driver with no way to find its window here — and the path of least resistance
-/// would have been to write its own base constant, recreating exactly the
-/// split-brain this function exists to prevent.
+/// A genuine walk of the tree, not a fixed list of the devices this kernel happens to
+/// drive. That distinction is the point: an earlier version returned only UART, PLIC
+/// and CLINT while claiming to be complete, which left a future virtio driver with no
+/// way to find its window here — and the path of least resistance would have been its
+/// own base constant, recreating exactly the split-brain this exists to prevent.
 ///
 /// A window appearing here says the *device* exists, not that supervisor mode may
-/// touch it: OpenSBI's PMP configuration is a separate layer and denies S-mode
-/// access to the CLINT on QEMU virt.
+/// touch it: OpenSBI's PMP is a separate layer and denies S-mode access to the CLINT
+/// on QEMU virt.
 ///
 /// Empty before the tree has been parsed.
-pub fn mmio_regions() -> &'static [MmioRegion] {
-    MMIO.get().map(Vec::as_slice).unwrap_or(&[])
+pub fn mmio_regions() -> &'static [PhysRegion] {
+    DISCOVERED.get().map(|d| d.mmio.as_slice()).unwrap_or(&[])
 }
 
-/// True if a node's `reg` describes something other than an MMIO window.
+/// Every `/reserved-memory` range: RAM that exists but is not the kernel's.
 ///
-/// `reg` is not always a device address, and getting this wrong maps RAM as device
-/// memory. Three kinds are excluded:
+/// These must be withheld from the frame allocator. On QEMU virt they happen to sit
+/// *below* the kernel image, so today they fall outside the pool and are safe by
+/// accident — but firmware is free to reserve memory above the kernel, and then they
+/// would be vended. [`crate::memory::frame::init`] reserves whatever overlaps.
 ///
-/// - `/memory@…` — the RAM itself, reported by [`ram_base`]/[`ram_end`] instead.
-/// - `/cpus/cpu@N` — `reg` there is a hart id, not an address.
-/// - `/reserved-memory/…` — RAM carved out by the previous boot stage. OpenSBI
-///   *adds* these for its own firmware (`mmode_resv0`, `mmode_resv1` at the bottom
-///   of RAM) and its PMP then denies supervisor access to them, so treating them as
-///   devices would map memory the kernel must not touch. They are a frame-allocator
-///   concern, not a device one.
-///
-/// Note the reserved-memory nodes do not appear in QEMU's own device tree — only in
-/// the one OpenSBI hands on — so they are invisible to `-machine dumpdtb` and were
-/// found by printing what the kernel actually walked.
-fn reg_is_not_mmio(name: &str, path: &str) -> bool {
-    name.starts_with("memory")
-        || path.starts_with("/cpus")
-        || path.starts_with("/reserved-memory")
+/// Empty before the tree has been parsed.
+pub fn reserved_memory() -> &'static [PhysRegion] {
+    DISCOVERED.get().map(|d| d.reserved.as_slice()).unwrap_or(&[])
 }
 
-/// Walk the tree and record every MMIO window.
-fn discover_mmio(fdt: &Fdt<'_>) -> Vec<MmioRegion, MAX_MMIO> {
-    let mut windows = Vec::new();
+/// Walk the tree once, recording device windows and firmware carve-outs.
+///
+/// One pass and one classifier for both, so the two lists cannot disagree about
+/// which node is which.
+fn discover_regions(fdt: &Fdt<'_>) -> Discovered {
+    let mut found = Discovered { mmio: Vec::new(), reserved: Vec::new() };
 
     for node in fdt.all_nodes() {
         let name = node.name();
         let path = node.path();
-        if reg_is_not_mmio(name, &path) {
+        let kind = classify(name, &path);
+        if matches!(kind, RegKind::Neither) {
             continue;
         }
         let Some(regs) = node.reg() else { continue };
 
-        // A node may describe several windows — QEMU virt's `flash` has two.
+        // A node may describe several ranges — QEMU virt's `flash` has two.
         for reg in regs {
             let Some(size) = reg.size else { continue };
             if size == 0 {
                 continue;
             }
-            let mut recorded = String::new();
-            // Truncation only affects the label, never the address, so a long node
-            // name must not drop the window.
-            let _ = recorded.push_str(&name[..name.len().min(MMIO_NAME_LEN)]);
+            let mut label = String::new();
+            // Truncation may shorten the label but must never drop the range, so the
+            // push result is deliberately ignored.
+            let _ = label.push_str(&name[..name.len().min(REGION_NAME_LEN)]);
             let region =
-                MmioRegion { name: recorded, base: reg.address as usize, size: size as usize };
-            if windows.push(region).is_err() {
+                PhysRegion { name: label, base: reg.address as usize, size: size as usize };
+
+            // The two lists have different capacities, so they are different types
+            // and cannot share one push site; only the diagnostic is shared.
+            let overflowed = match kind {
+                RegKind::Mmio => {
+                    found.mmio.push(region).err().map(|_| ("MMIO window", MAX_MMIO))
+                }
+                RegKind::ReservedRam => {
+                    found.reserved.push(region).err().map(|_| ("reserved range", MAX_RESERVED))
+                }
+                RegKind::Neither => unreachable!("filtered above"),
+            };
+            if let Some((what, cap)) = overflowed {
+                // Dropping a reserved range silently would let the allocator vend
+                // firmware memory, so this is loud rather than a debug aid.
                 println!(
-                    "[dtb] WARNING: more than {MAX_MMIO} MMIO windows; {name} and any after \
-                     it are unmapped"
+                    "[dtb] WARNING: more than {cap} {what}s; {name} and any after it are \
+                     unaccounted for"
                 );
-                return windows;
             }
         }
     }
 
-    windows
+    found
 }
 
 fn require(cell: &AtomicUsize, what: &str) -> usize {
@@ -306,7 +362,7 @@ pub unsafe fn init(dtb_ptr: usize) {
 
     // Walk the tree once for every MMIO window it describes. Done here, with the
     // blob borrowed, so nothing later needs to re-parse or guess.
-    MMIO.call_once(|| discover_mmio(&fdt));
+    DISCOVERED.call_once(|| discover_regions(&fdt));
 
     // ---- Populate the device table (no printing yet: the console needs the
     //      UART base we are about to store). ----
@@ -365,7 +421,7 @@ pub fn summary() {
         DTB_SIZE.load(Ordering::Relaxed)
     );
     if let (Some(base), Some(end)) = (ram_base(), ram_end()) {
-        println!("[dtb] ram:   {:#x}..{:#x} ({})", base, end, crate::utils::Bytes(end - base));
+        println!("[dtb] ram:   {:#x}..{:#x} ({})", base, end, crate::utils::ByteSize(end - base));
     }
     println!(
         "[dtb] uart:  {:#x} (size {:#x}, irq {})",
@@ -378,7 +434,10 @@ pub fn summary() {
     }
     if CLINT_BASE.load(Ordering::Relaxed) != 0 {
         println!("[dtb] clint: {:#x} (size {:#x})", clint_base(), clint_size());
-    let windows = mmio_regions();
-    println!("[dtb] mmio:  {} windows discovered by walking the tree", windows.len());
+    println!(
+        "[dtb] mmio:  {} windows, {} reserved ranges (from one walk of the tree)",
+        mmio_regions().len(),
+        reserved_memory().len()
+    );
     }
 }

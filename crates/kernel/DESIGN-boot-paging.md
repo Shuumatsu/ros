@@ -589,6 +589,51 @@ Remaining literals in `kernel.ld` are the four documented inputs — `_page_size
 (architectural) plus `_dram_base`, `_va_offset`, `_text_offset` (platform facts) —
 and `ALIGN(16)`, the sub-page alignment inside a section.
 
+### J. Stage 6 — reservations are enumerable, and firmware carve-outs reach them
+
+`reserve()` could withhold memory but nothing recorded *what*. A reserved frame and
+an allocated frame are indistinguishable in the bitmap — that is what makes
+reclaiming an initrd a plain `deallocate_at`, but it also meant nothing could answer
+"why is this memory not free?", and a 200-frame leak looked exactly like a 200-frame
+firmware carve-out.
+
+**The latent bug it was hiding.** §2.I fixed `mmio_regions()` by classifying
+`/reserved-memory` as *not* a device — correctly, since OpenSBI's PMP denies S-mode
+access to it. But the ranges were then **discarded**: discovered and dropped. On QEMU
+virt they sit at `0x80000000..0x80050000`, *below* the kernel image, while the pool
+starts at `0x80346000`, so they miss it and are safe **by accident**. Firmware
+reserving memory *above* the kernel is entirely normal, and then the allocator would
+have vended it.
+
+That is the same failure shape as the earlier ones: a fact correctly established and
+then not routed to the thing that needed it.
+
+**Now:**
+
+- `device_tree` does **one** walk producing two lists — MMIO windows and
+  reserved-memory ranges — through a single `classify()`, so the two cannot disagree
+  about which node is which. `MmioRegion` became `PhysRegion`, since both lists are
+  the same shape and having two identical types would be the duplication again.
+- `frame` keeps a `RESERVATIONS` list; `reserve(name, start, end)` records every
+  withholding and the boot log prints **from the record**, not from a `println!` at
+  each call site.
+- Both sources are fed in: the blob and every `/reserved-memory` range.
+- A range that misses the pool is *reported*, not silently ignored — "outside the
+  pool" and "forgot to reserve" must not look the same:
+
+```
+[dtb] mmio:  17 windows, 2 reserved ranges (from one walk of the tree)
+[memory] reserve: mmode_resv1@80000000 at 0x80000000..0x80040000 is outside the pool, skipped
+[memory] reserve: mmode_resv0@80040000 at 0x80040000..0x80050000 is outside the pool, skipped
+[memory] withheld 2 frames in 1 reservations:
+[memory]   device tree blob         0x87e00000..0x87e02000 (8 KiB)
+```
+
+**Verified for the case this platform never produces.** Injecting a synthetic
+carve-out inside the pool gives `withheld 5 frames in 2 reservations` with both named,
+and `reserve`'s internal `free_frames` assertion passes — so a carve-out that *does*
+land in the pool is withheld and recorded, which is the whole reason the code exists.
+
 ---
 
 ## 3. Verified state
@@ -771,9 +816,9 @@ Struck-through items are closed; kept so the history of each is legible.
 11. ~~No guard page below the kernel stack.~~ **Done** (§2.H) — one unmapped guard
     page per hart, all 16 audited, verified by a `StorePageFault` probe 8 bytes
     below hart 0's stack bottom.
-12. **Reservations are not enumerable.** `reserve` works, but nothing records what
-    was withheld, so a future initrd or `/reserved-memory` pass has no list to
-    consult (§4.4).
+12. ~~Reservations are not enumerable.~~ **Done** (§2.J) — `frame::reservations()`
+    records every withholding, the boot log prints from it, and `/reserved-memory` is
+    now fed in rather than discovered and discarded.
 13. **~34 pre-existing dead-code warnings** in `plic`/`utils`/`trap`/`proc`.
     Unrelated to memory; the count has not moved across four stages.
 
