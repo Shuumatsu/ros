@@ -2,6 +2,8 @@ use buddy_system_allocator::LockedHeap;
 use core::alloc::Layout;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use paging::sv39::PAGE_SIZE;
+
 pub mod frame;
 pub mod layout;
 
@@ -39,7 +41,6 @@ const KERNEL_HEAP_SIZE: usize = 8 * 1024 * 1024;
 /// Translate a physical address to its kernel virtual address (`VA = PA + OFFSET`).
 /// Valid for RAM, which the kernel maps in its high half (and, for now, also
 /// identity-maps). The offset's single source is `kernel.ld`'s `_va_offset`.
-#[allow(dead_code)]
 pub fn phys_to_virt(pa: usize) -> usize {
     pa.wrapping_add(va_offset())
 }
@@ -58,19 +59,48 @@ fn alloc_error(layout: Layout) -> ! {
     );
 }
 
-/// Initialize the memory subsystem: kernel heap first, then the physical frame
-/// allocator over the rest of RAM.
+/// Initialize the memory subsystem: the physical frame allocator first, then the
+/// kernel heap carved out of it.
 ///
-/// Order is load-bearing. `frame` (buddy) keeps its free lists on the heap, so
-/// the heap must exist before we add frames. Both regions are sized from RAM
-/// discovered at runtime — the heap from the linker's `_heap_start` up by
-/// [`KERNEL_HEAP_SIZE`], the frames from there to the device-tree RAM top — so
+/// Order is load-bearing and now the canonical way round. The frame allocator
+/// (`frame`) keeps its metadata in a bitmap it reserves from RAM, so it depends
+/// on nothing and can own all of RAM from the start; the heap is just its first
+/// customer. Both regions are sized from RAM discovered at runtime — the frames
+/// from the linker's `_heap_start` (top of the kernel image) to the device-tree
+/// RAM top, the heap as a fixed [`KERNEL_HEAP_SIZE`] slice of those frames — so
 /// nothing here is a compile-time guess about how much RAM exists.
 pub fn init() {
-    // 1. Kernel heap: [_heap_start, _heap_start + KERNEL_HEAP_SIZE).
-    // These are high *virtual* addresses (the kernel is linked high); the heap
-    // is reached through the kernel's high-half mapping.
-    let heap_start = layout::heap_start();
+    // 1. Physical frames FIRST: [free_start, ram_end). `free_start` is the top
+    //    of the kernel image (a high VA); the allocator vends *physical*
+    //    addresses, so convert it back to physical. `ram_end` from the device
+    //    tree is already physical and was validated by `device_tree::init`.
+    let free_start_pa = virt_to_phys(layout::heap_start());
+    let ram_end = crate::device_tree::ram_end()
+        .expect("device tree RAM region not discovered; call device_tree::init before memory::init");
+    assert!(
+        free_start_pa < ram_end,
+        "kernel image top {free_start_pa:#x} meets/exceeds RAM top {ram_end:#x}; give the VM more RAM"
+    );
+    frame::init(free_start_pa, ram_end);
+    println!(
+        "[memory] frames: {:#x}..{:#x} ({} MiB, physical)",
+        free_start_pa,
+        ram_end,
+        (ram_end - free_start_pa) / 1024 / 1024
+    );
+    frame::self_test();
+
+    // 2. Kernel heap SECOND, carved from the frame allocator. It holds only
+    //    kernel bookkeeping; KERNEL_HEAP_SIZE is bounded on purpose — prefer
+    //    `frame` for anything page-sized. It is reached through the high-half
+    //    mapping (the kernel is linked high). The backing run is never freed:
+    //    the heap is permanent, so its `Frames` token is left to drop, which —
+    //    since `Frames` has no destructor and we never call `frame::free` on it
+    //    — pins those frames for the kernel's lifetime.
+    let heap_pages = KERNEL_HEAP_SIZE / PAGE_SIZE;
+    let heap_frames =
+        frame::alloc_contiguous(heap_pages).expect("no contiguous RAM for the kernel heap");
+    let heap_start = phys_to_virt(heap_frames.base().bits());
     let heap_end = heap_start + KERNEL_HEAP_SIZE;
     unsafe {
         HEAP.lock().add_to_heap(heap_start, heap_end);
@@ -81,25 +111,4 @@ pub fn init() {
         heap_end,
         KERNEL_HEAP_SIZE / 1024 / 1024
     );
-
-    // 2. Physical frames: [heap_end_pa, ram_end). The frame allocator vends
-    //    *physical* addresses, so convert the heap top (a VA) back to physical;
-    //    `ram_end` from the device tree is already physical. The RAM top was
-    //    validated by `device_tree::init` (it panics on an unusable tree).
-    let heap_end_pa = virt_to_phys(heap_end);
-    let ram_end = crate::device_tree::ram_end()
-        .expect("device tree RAM region not discovered; call device_tree::init before memory::init");
-    assert!(
-        heap_end_pa < ram_end,
-        "kernel heap top {heap_end_pa:#x} meets/exceeds RAM top {ram_end:#x}; shrink KERNEL_HEAP_SIZE or give the VM more RAM"
-    );
-    frame::add_range(heap_end_pa, ram_end);
-    println!(
-        "[memory] frames: {:#x}..{:#x} ({} MiB, physical)",
-        heap_end_pa,
-        ram_end,
-        (ram_end - heap_end_pa) / 1024 / 1024
-    );
-
-    frame::self_test();
 }
