@@ -634,6 +634,68 @@ carve-out inside the pool gives `withheld 5 frames in 2 reservations` with both 
 and `reserve`'s internal `free_frames` assertion passes — so a carve-out that *does*
 land in the pool is withheld and recorded, which is the whole reason the code exists.
 
+### K. Stage 7 — the DTB was not the only foreign RAM
+
+Asking "is the device-tree blob the only thing inside the pool that isn't ours?"
+turned up **four** sources, of which two were unhandled and one was a live bug.
+
+The previous boot stage has four different ways of leaving something in RAM, and
+honouring some of them is indistinguishable from honouring none:
+
+| Source | Where | Was it handled? |
+|---|---|---|
+| `/reserved-memory` nodes | tree nodes | yes (§2.J) |
+| The blob itself | `0x87e00000` | yes (§2.J) |
+| **FDT memory reservation block** | header `off_mem_rsvmap` | **no** |
+| **initrd**, `/chosen linux,initrd-start/end` | `0x84200000` | **no — live bug** |
+
+**The initrd is the live one.** `fdt_raw`'s `Chosen` does not expose it, so nothing
+read it. Measured with `-initrd`:
+
+```
+[PROBE] linux,initrd-start: len=8 u64=Some(2216689664)   = 0x84200000
+[PROBE] linux,initrd-end:   len=8 u64=Some(2250244096)   = 0x86200000
+```
+
+The pool is `0x8034a000..0x88000000`, so a 32 MiB initrd lands **squarely in the
+middle of it** and the allocator would hand it out. `rfs` and `blockdev` are already
+in the tree; the first attempt to mount a root filesystem from an initrd would have
+hit this.
+
+**The reservation block is the standards one.** The FDT spec has *two* mechanisms for
+reserved memory — the `/reserved-memory` node and the header-level reservation block —
+and reading only the former honours half the standard. Empty on QEMU virt with
+OpenSBI (measured: 0 entries), so latent here, but U-Boot and coreboot populate it.
+
+**Fixed by widening the concept rather than adding two more special cases.**
+`reserved_memory()` became `foreign_ram()`: one list, four sources, each entry named
+by where it came from — so `frame` iterates exactly one thing, and a later reclaim
+(an initrd is finished with once the root filesystem is mounted) can find its range
+by name. `dtb_range()` is gone, since the blob is now just another entry.
+
+Verified both ways:
+
+```
+# no initrd
+[dtb] mmio:  17 windows, 3 foreign RAM ranges (from one pass over the tree)
+[memory] withheld 2 frames in 1 reservations:
+[memory]   device tree blob         0x87e00000..0x87e02000 (8 KiB)
+
+# -initrd hdd.dsk
+[dtb] mmio:  17 windows, 4 foreign RAM ranges (from one pass over the tree)
+[memory] withheld 8194 frames in 2 reservations:
+[memory]   device tree blob         0x87e00000..0x87e02000 (8 KiB)
+[memory]   initrd                   0x84200000..0x86200000 (32 MiB)
+```
+
+8194 = 2 + 8192, and `reserve`'s `free_frames` assertion passed for both, so the
+32 MiB is genuinely withheld rather than merely logged.
+
+> The lesson is the question, not the fix. "Is the DTB reserved?" was the wrong
+> question; "what did the previous boot stage leave in RAM that the pool's *start
+> address* does not already exclude?" is the right one, and it has four answers on
+> this platform.
+
 ---
 
 ## 3. Verified state

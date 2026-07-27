@@ -256,13 +256,14 @@ fn reserve(
 ///    currently miss the pool and are safe by accident; firmware reserving above the
 ///    kernel is entirely normal, and then they would not be.
 fn reserve_foreign_memory(allocator: &mut FrameAllocator<'static>, managed: FrameRange) {
-    let Some((dtb_start, dtb_end)) = crate::device_tree::dtb_range() else {
-        panic!("device tree extent unknown; call device_tree::init before memory::init")
-    };
-    reserve(allocator, managed, "device tree blob", dtb_start, dtb_end);
-
-    for carve_out in crate::device_tree::reserved_memory() {
-        reserve(allocator, managed, carve_out.name(), carve_out.base, carve_out.end());
+    let foreign = crate::device_tree::foreign_ram();
+    assert!(
+        !foreign.is_empty(),
+        "no foreign RAM discovered, not even the device-tree blob; \
+         call device_tree::init before memory::init"
+    );
+    for range in foreign {
+        reserve(allocator, managed, range.name(), range.base, range.end());
     }
 }
 

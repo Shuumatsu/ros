@@ -17,6 +17,8 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use fdt_raw::Fdt;
+use core::fmt::Write as _;
+
 use heapless::{String, Vec};
 use spin::Once;
 
@@ -44,23 +46,6 @@ pub fn dtb_addr() -> Option<usize> {
         0 => None,
         a => Some(a),
     }
-}
-
-/// Physical extent of the device-tree blob itself, `[start, end)`.
-///
-/// The blob lives in ordinary RAM — on QEMU virt near the top of it — so it falls
-/// inside the range the frame allocator manages. Something has to withhold it, or
-/// the allocator will vend the memory the tree is still stored in;
-/// [`crate::memory::frame::init`] reserves exactly this range.
-///
-/// `None` before the tree has been parsed.
-pub fn dtb_range() -> Option<(usize, usize)> {
-    let start = DTB_ADDR.load(Ordering::Relaxed);
-    let size = DTB_SIZE.load(Ordering::Relaxed);
-    if start == 0 || size == 0 {
-        return None;
-    }
-    Some((start, start.saturating_add(size)))
 }
 
 /// Base of the RAM region backing the kernel, from the DTB.
@@ -128,8 +113,9 @@ const REGION_NAME_LEN: usize = 40;
 /// MMIO windows recordable. QEMU virt describes seventeen.
 const MAX_MMIO: usize = 48;
 
-/// Reserved-memory ranges recordable. OpenSBI adds two on QEMU virt.
-const MAX_RESERVED: usize = 16;
+/// Foreign RAM ranges recordable: `/reserved-memory` nodes, FDT reservation-block
+/// entries, the initrd and the blob itself.
+const MAX_FOREIGN: usize = 24;
 
 /// A named physical address range taken from a device-tree node's `reg`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,10 +178,10 @@ fn classify(name: &str, path: &str) -> RegKind {
     }
 }
 
-/// Everything one walk of the tree turns up.
+/// Everything one pass over the tree turns up.
 struct Discovered {
     mmio: Vec<PhysRegion, MAX_MMIO>,
-    reserved: Vec<PhysRegion, MAX_RESERVED>,
+    foreign: Vec<PhysRegion, MAX_FOREIGN>,
 }
 
 static DISCOVERED: Once<Discovered> = Once::new();
@@ -221,24 +207,95 @@ pub fn mmio_regions() -> &'static [PhysRegion] {
     DISCOVERED.get().map(|d| d.mmio.as_slice()).unwrap_or(&[])
 }
 
-/// Every `/reserved-memory` range: RAM that exists but is not the kernel's.
+/// Every RAM range that exists but is not the kernel's to hand out.
 ///
-/// These must be withheld from the frame allocator. On QEMU virt they happen to sit
-/// *below* the kernel image, so today they fall outside the pool and are safe by
-/// accident — but firmware is free to reserve memory above the kernel, and then they
-/// would be vended. [`crate::memory::frame::init`] reserves whatever overlaps.
+/// The frame allocator would otherwise vend all of it. Four sources, because the
+/// previous boot stage has four different ways of leaving something behind and
+/// honouring only some of them is indistinguishable from honouring none:
+///
+/// 1. **`/reserved-memory` nodes** — firmware carve-outs. OpenSBI adds its own here
+///    (`mmode_resv0`/`1`) and its PMP then denies supervisor access.
+/// 2. **The FDT memory reservation block** (header `off_mem_rsvmap`) — the *other*,
+///    older spec mechanism for exactly the same purpose. Empty on QEMU virt with
+///    OpenSBI, but mandated by the spec and used by U-Boot and coreboot, so reading
+///    only `/reserved-memory` honours half the standard.
+/// 3. **The initrd**, from `/chosen`'s `linux,initrd-start` / `linux,initrd-end`.
+///    QEMU puts a 32 MiB one at `0x84200000` — squarely inside the pool.
+/// 4. **The blob itself**, which lives in ordinary RAM near the top of it.
+///
+/// Each entry is named by its source, so a later reclaim (an initrd is finished with
+/// once the root filesystem is mounted) can find its range in the list.
 ///
 /// Empty before the tree has been parsed.
-pub fn reserved_memory() -> &'static [PhysRegion] {
-    DISCOVERED.get().map(|d| d.reserved.as_slice()).unwrap_or(&[])
+pub fn foreign_ram() -> &'static [PhysRegion] {
+    DISCOVERED.get().map(|d| d.foreign.as_slice()).unwrap_or(&[])
+}
+
+/// Build a `PhysRegion`, truncating an over-long label but never the range.
+fn region(name: &str, base: usize, size: usize) -> PhysRegion {
+    let mut label = String::new();
+    let _ = label.push_str(&name[..name.len().min(REGION_NAME_LEN)]);
+    PhysRegion { name: label, base, size }
+}
+
+/// Record a foreign range, warning if the list is full rather than dropping it
+/// quietly — an unrecorded carve-out is memory the allocator will hand out.
+fn push_foreign(found: &mut Discovered, entry: PhysRegion) {
+    if let Err(dropped) = found.foreign.push(entry) {
+        println!(
+            "[dtb] WARNING: more than {MAX_FOREIGN} foreign RAM ranges; {} at {:#x} is unreserved",
+            dropped.name(),
+            dropped.base
+        );
+    }
+}
+
+/// The initrd's extent, if the previous stage loaded one.
+///
+/// `fdt_raw`'s `Chosen` does not expose it, so the two properties are read directly.
+/// They are `#address-cells`-sized, so 8 bytes here and 4 on a 32-bit tree.
+fn initrd_range(fdt: &Fdt<'_>) -> Option<(usize, usize)> {
+    let chosen = fdt.find_by_path("/chosen")?;
+    let cell = |key: &str| {
+        chosen
+            .find_property(key)
+            .and_then(|prop| prop.as_u64().or_else(|| prop.as_u32().map(u64::from)))
+            .map(|value| value as usize)
+    };
+    let start = cell("linux,initrd-start")?;
+    let end = cell("linux,initrd-end")?;
+    (end > start).then_some((start, end))
 }
 
 /// Walk the tree once, recording device windows and firmware carve-outs.
 ///
 /// One pass and one classifier for both, so the two lists cannot disagree about
 /// which node is which.
-fn discover_regions(fdt: &Fdt<'_>) -> Discovered {
-    let mut found = Discovered { mmio: Vec::new(), reserved: Vec::new() };
+fn discover_regions(fdt: &Fdt<'_>, blob: usize, blob_size: usize) -> Discovered {
+    let mut found = Discovered { mmio: Vec::new(), foreign: Vec::new() };
+
+    // The blob is foreign RAM like any other: it sits in the pool and the allocator
+    // would vend it.
+    push_foreign(&mut found, region("device tree blob", blob, blob_size));
+
+    // The FDT header's reservation block — the spec's *other* mechanism, separate
+    // from the `/reserved-memory` nodes handled in the walk below.
+    for (index, entry) in fdt.memory_reservations().enumerate() {
+        if entry.size == 0 {
+            continue;
+        }
+        let mut label = String::new();
+        let _ = write!(label, "fdt-rsvmap[{index}]");
+        push_foreign(
+            &mut found,
+            PhysRegion { name: label, base: entry.address as usize, size: entry.size as usize },
+        );
+    }
+
+    // The initial ramdisk, which the previous stage loaded into RAM for us.
+    if let Some((start, end)) = initrd_range(fdt) {
+        push_foreign(&mut found, region("initrd", start, end - start));
+    }
 
     for node in fdt.all_nodes() {
         let name = node.name();
@@ -255,21 +312,16 @@ fn discover_regions(fdt: &Fdt<'_>) -> Discovered {
             if size == 0 {
                 continue;
             }
-            let mut label = String::new();
-            // Truncation may shorten the label but must never drop the range, so the
-            // push result is deliberately ignored.
-            let _ = label.push_str(&name[..name.len().min(REGION_NAME_LEN)]);
-            let region =
-                PhysRegion { name: label, base: reg.address as usize, size: size as usize };
+            let entry = region(name, reg.address as usize, size as usize);
 
             // The two lists have different capacities, so they are different types
             // and cannot share one push site; only the diagnostic is shared.
             let overflowed = match kind {
                 RegKind::Mmio => {
-                    found.mmio.push(region).err().map(|_| ("MMIO window", MAX_MMIO))
+                    found.mmio.push(entry).err().map(|_| ("MMIO window", MAX_MMIO))
                 }
                 RegKind::ReservedRam => {
-                    found.reserved.push(region).err().map(|_| ("reserved range", MAX_RESERVED))
+                    found.foreign.push(entry).err().map(|_| ("foreign RAM range", MAX_FOREIGN))
                 }
                 RegKind::Neither => unreachable!("filtered above"),
             };
@@ -357,12 +409,12 @@ pub unsafe fn init(dtb_ptr: usize) {
     DTB_ADDR.store(dtb_ptr, Ordering::Relaxed);
     // The blob's own extent, from its header. Needed because the blob sits *in*
     // RAM: the frame allocator has to be told to withhold it, or it will hand out
-    // the memory the tree is still living in. See `dtb_range`.
+    // the memory the tree is still living in; see `foreign_ram`.
     DTB_SIZE.store(fdt.header().totalsize as usize, Ordering::Relaxed);
 
     // Walk the tree once for every MMIO window it describes. Done here, with the
     // blob borrowed, so nothing later needs to re-parse or guess.
-    DISCOVERED.call_once(|| discover_regions(&fdt));
+    DISCOVERED.call_once(|| discover_regions(&fdt, dtb_ptr, fdt.header().totalsize as usize));
 
     // ---- Populate the device table (no printing yet: the console needs the
     //      UART base we are about to store). ----
@@ -435,9 +487,9 @@ pub fn summary() {
     if CLINT_BASE.load(Ordering::Relaxed) != 0 {
         println!("[dtb] clint: {:#x} (size {:#x})", clint_base(), clint_size());
     println!(
-        "[dtb] mmio:  {} windows, {} reserved ranges (from one walk of the tree)",
+        "[dtb] mmio:  {} windows, {} foreign RAM ranges (from one pass over the tree)",
         mmio_regions().len(),
-        reserved_memory().len()
+        foreign_ram().len()
     );
     }
 }
