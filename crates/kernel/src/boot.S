@@ -74,13 +74,25 @@ _boot:
     # whose winner was not hart 0, the BSS was never cleared at all; it only looked
     # fine because QEMU hands out zeroed memory.
     #
-    # So claim the job with an atomic swap on a flag that lives in .data — it
-    # cannot live in .bss, which is the thing being cleared — and make any hart
-    # that loses the race wait for completion before it can read a static.
+    # So claim the job through a flag in .data — it cannot live in .bss, which is
+    # the thing being cleared — and make every hart that loses wait for completion
+    # before it can read a static. Flag: 0 = untouched, 1 = claimed, 2 = done.
+    #
+    # The claim MUST be conditional, which is why this is lr/sc and not amoswap.
+    # An unconditional `amoswap.w 1` writes 1 whatever it finds, so a hart arriving
+    # after the flag reached 2 clobbered the 2 back to 1 and then span forever
+    # waiting for a 2 that could never return — deadlocking every secondary hart.
+    # lr/sc stores only when nothing has touched the word since the load, so a hart
+    # that observes 2 never writes at all.
     lla     t0, .Lbss_state
-    li      t1, 1
-    amoswap.w t1, t1, (t0)      # 0 -> 1, returning the previous value
-    bnez    t1, 7f              # someone else claimed it: wait below
+7:
+    lr.w    t1, (t0)
+    li      t2, 2
+    beq     t1, t2, 3f          # already done: nothing to do, and nothing written
+    bnez    t1, 7b              # claimed by someone still working: keep watching
+    li      t2, 1
+    sc.w    t2, t2, (t0)        # 0 -> 1, only if the word is still untouched
+    bnez    t2, 7b              # lost the reservation: back to watching
     la      t2, _bss_start
     la      t3, _bss_end
     bgeu    t2, t3, 8f
@@ -89,16 +101,11 @@ _boot:
     addi    t2, t2, 8
     bltu    t2, t3, 2b
 8:
-    fence   w, w                # the zeroing must be visible before "done" is
+    fence   w, w                # the zeroing must land before "done" is published
     li      t1, 2
-    sw      t1, 0(t0)           # publish completion
-    j       3f
-7:
-    lw      t1, 0(t0)           # spin until the claiming hart publishes
-    li      t2, 2
-    bne     t1, t2, 7b
-    fence   r, r                # ...and do not read statics before that is seen
+    sw      t1, 0(t0)
 3:
+    fence   r, r                # do not read a static before the zeroing is visible
     # ---- Per-hart stack ----
     # Each hart's usable stack sits immediately above its own guard page, so its
     # top is _kernel_stack_start + stride * (hartid + 1). The stride is owned by

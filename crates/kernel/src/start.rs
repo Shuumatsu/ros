@@ -1,5 +1,3 @@
-use core::arch::asm;
-
 use crate::cpu;
 use crate::memory;
 use crate::trap;
@@ -39,6 +37,10 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
         // `memory` owns that ordering; see `memory::init`.
         memory::init();
         println!("initializing memory completed");
+
+        // Secondaries only after the kernel table is published: each one waits for it
+        // in `memory::init_secondary`, so there is nothing to gain by starting sooner.
+        cpu::start_secondaries();
     } else {
         // Physical memory and the heap are global and already up (or on their way);
         // this hart only needs to stop running on the boot table. Blocks until the
@@ -61,7 +63,10 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
-    kprintln!("enter kmain");
+    // Ordinary startup logging, so the *locked* writer: `kprintln!` is lock-free and
+    // would shred a secondary hart's output mid-line, which is exactly what it did
+    // once secondaries started announcing themselves concurrently.
+    println!("enter kmain");
 
     println!("This is my operating system!");
     println!("[kmain] higher-half kernel is live at high VAs — parking.");
@@ -75,21 +80,12 @@ unsafe extern "C" fn kmain() -> ! {
 #[unsafe(no_mangle)]
 // mark the function as extern "C" to tell the compiler that it should use the C calling convention for this function
 unsafe extern "C" fn kmain_ap() -> ! {
-    println!("enter kmain_ap");
+    println!("enter kmain_ap (running on the kernel page table)");
 
-    // while !KERNEL_STARTED {}
-
-    // println!("initializing paging...");
-    // memory::paging::init();
-    // println!("initializing paging completed");
-
-    scheduler();
-}
-
-fn scheduler() -> ! {
-    loop {
-        unsafe {
-            asm!("ebreak", options(nomem, nostack));
-        }
-    }
+    // Park. There is no scheduler to enter, and the previous placeholder here was a
+    // tight `ebreak` loop — harmless only because no secondary hart had ever actually
+    // reached it. The moment one did it would trap on every iteration and bury the
+    // console. `wfi` idles until an interrupt instead, which is what a hart with
+    // nothing to run should do.
+    crate::arch::riscv64::wait_forever()
 }

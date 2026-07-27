@@ -130,10 +130,16 @@ macro_rules! println {
     ($($arg:tt)*) => { $crate::print!("{}\r\n", format_args!($($arg)*)) };
 }
 
-// kprint!/kprintln! - for when already in interrupt/panic:
-// 1. Write directly to UART register (no lock)
-// 2. Print "[hart N] message"
-// Used only inside interrupt handlers or panic where interrupts are already disabled.
+// kprint!/kprintln! - lock-free, for contexts where THIS hart may already hold the
+// console lock: a panic, or an exception taken inside `_print` itself. Taking the
+// lock there would deadlock instead of printing, which is when the message matters
+// most.
+//
+// Not for interrupt handlers, and not for ordinary logging. `_print` masks interrupts
+// while it holds the lock, so an interrupt handler can safely use the locked path --
+// and must, because lock-free writes interleave character-by-character with every
+// other hart's output. With one hart that was invisible; with several it shreds the
+// console into unreadable garbage.
 #[macro_export]
 macro_rules! kprint {
     ($($arg:tt)*) => { $crate::console::_kprint(format_args!($($arg)*)) };

@@ -696,6 +696,80 @@ Verified both ways:
 > address* does not already exclude?" is the right one, and it has four answers on
 > this platform.
 
+### L. Stage 8 — SMP actually runs, and it found two bugs immediately
+
+`hart_start` was the last item, and its only purpose was to make already-written
+code *executable*. It did that, and the first successful boot found two bugs in
+code I had previously called "verified by disassembly".
+
+**Added:** an SBI v0.2 call form (`a6` = FID, `a7` = EID, `(error, value)` returned in
+`a0`/`a1`) — the legacy form can't express it — plus HSM `hart_start` and
+`hart_get_status`, and `device_tree::hart_ids()`.
+
+Two details that matter:
+
+- **`start_addr` must be physical.** SBI starts a hart with `satp = 0`, so the entry
+  cannot be a Rust function at a high VA — the first instruction fetch would fault.
+  It is `virt_to_phys(text_start())`, and each secondary walks the whole `boot.S`
+  path itself: early table, jump high, then diverge at `claim_boot_hart`.
+- **Hart ids are not a count.** `/cpus/cpu@N`'s `reg` *is* the hart id, and real
+  platforms leave gaps. `hart_ids()` returns the list; `stack::max_harts()` is a
+  different fact (how many we have stacks for) and `start_secondaries` is where the
+  two meet.
+
+#### Bug 1: `amoswap` cannot express a conditional claim
+
+The BSS claim used `amoswap.w` with 1. That writes 1 **whatever it finds**. A hart
+arriving after the flag reached 2 (done) clobbered it back to 1, then span forever
+waiting for a 2 that could never return. **All three secondaries deadlocked in
+`boot.S`** — started successfully per SBI, never printing a byte.
+
+Fixed with `lr.w`/`sc.w`, which stores only if nothing touched the word since the
+load, so a hart that observes 2 never writes at all.
+
+> §2.H said of this exact code: *"The losing branch is unexercised … verified by
+> disassembly and by 8/8 boots across four different winners, not by racing it."*
+> The caveat was correct and the code was still wrong. Disassembly confirms what the
+> instructions *are*, never what they *mean* under contention.
+
+#### Bug 2: the lock-free console writer shreds output
+
+`trap_handler` printed two lines per trap through `kprintln!`, which bypasses the UART
+lock. With one hart, invisible. With eight taking timer interrupts, the console became
+character-level garbage:
+
+```
+ c[hartod 0] [te: 5,r asep_pc: 0xffhaffndlefr]f scausc0e c80o20de2afc:
+```
+
+`kmain`'s `kprintln!` had the same effect on secondaries announcing themselves.
+
+The rule the code now follows: **`kprintln!` is only for contexts where this hart may
+already hold the lock** — a panic, or an exception taken inside `_print` itself.
+Not interrupts (`_print` masks them, so the locked path is safe), and not ordinary
+logging. Routine per-trap logging is gone entirely; `sepc` is reported on the
+*exception* arm only, where it is worth having and rare enough not to interleave.
+
+Also replaced `kmain_ap`'s placeholder tight `ebreak` loop with `wait_forever()`. It
+was harmless only because no secondary had ever reached it; the first one to arrive
+would have trapped on every iteration and buried the console.
+
+#### Verified
+
+| Config | Result |
+|---|---|
+| `-smp 2` | 6/6 |
+| `-smp 4` | 6/6 |
+| `-smp 8` | 6/6 |
+
+"Correct" meaning every hart appears, exactly `n-1` reach `kmain_ap`, and no panic or
+unexpected exception. Boot hart varied across 0, 1, 2, 3, 5, 6, 7 over these runs.
+
+**Paths that now genuinely execute for the first time:** `boot.S`'s BSS wait branch,
+`memory::init_secondary` → `kernel_table::install`, per-hart stacks and their guard
+pages on more than one hart, and `claim_boot_hart`'s compare-exchange with real
+contention.
+
 ---
 
 ## 3. Verified state
@@ -869,10 +943,11 @@ Struck-through items are closed; kept so the history of each is legible.
    at the crate level, but the kernel table is permanent so nothing tears down a
    tree. The least-exercised code in the subsystem; user paging (§4.5) is what will
    first run it.
-9. ~~Single-hart only.~~ **Mostly done** (§2.H). The boot hart is claimed, not
-   assumed — that was a live bug, panicking 5 of 8 boots at `-smp 4`. What is left
-   is that nothing *starts* a secondary hart, so `init_secondary` and `boot.S`'s
-   BSS wait-branch are unexercised. Needs SBI HSM; see §4.1.
+9. ~~Single-hart only.~~ **Done** (§2.H, §2.L). The boot hart is claimed rather than
+   assumed, and secondaries are started via SBI HSM. Verified at `-smp` 2/4/8, 6 runs
+   each. Doing so immediately exposed two bugs in code previously "verified by
+   disassembly" — an `amoswap` that could not express a conditional claim, and a
+   lock-free console writer that shredded concurrent output.
 10. **No `GLOBAL` bit on kernel mappings** — TLB optimisation, deferred to when
     address spaces exist (§4.2).
 11. ~~No guard page below the kernel stack.~~ **Done** (§2.H) — one unmapped guard

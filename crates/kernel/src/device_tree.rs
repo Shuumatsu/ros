@@ -117,6 +117,10 @@ const MAX_MMIO: usize = 48;
 /// entries, the initrd and the blob itself.
 const MAX_FOREIGN: usize = 24;
 
+/// Hart ids recordable. Independent of how many the kernel has stacks for — the
+/// machine reports what exists, `memory::stack` decides how many we can serve.
+const MAX_HART_IDS: usize = 64;
+
 /// A named physical address range taken from a device-tree node's `reg`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhysRegion {
@@ -153,8 +157,10 @@ enum RegKind {
     /// RAM carved out by the previous boot stage — present in memory, but not the
     /// kernel's to hand out.
     ReservedRam,
-    /// Not a device address: the RAM itself, or a hart id.
-    Neither,
+    /// `/cpus/cpu@N`: the `reg` is a **hart id**, not an address at all.
+    HartId,
+    /// The RAM itself, reported by [`ram_base`]/[`ram_end`] instead.
+    Ram,
 }
 
 /// Classify a node by its path. The single place this distinction is made.
@@ -171,8 +177,10 @@ enum RegKind {
 fn classify(name: &str, path: &str) -> RegKind {
     if path.starts_with("/reserved-memory") {
         RegKind::ReservedRam
+    } else if path.starts_with("/cpus") && name.starts_with("cpu@") {
+        RegKind::HartId
     } else if name.starts_with("memory") || path.starts_with("/cpus") {
-        RegKind::Neither
+        RegKind::Ram
     } else {
         RegKind::Mmio
     }
@@ -182,6 +190,7 @@ fn classify(name: &str, path: &str) -> RegKind {
 struct Discovered {
     mmio: Vec<PhysRegion, MAX_MMIO>,
     foreign: Vec<PhysRegion, MAX_FOREIGN>,
+    hart_ids: Vec<usize, MAX_HART_IDS>,
 }
 
 static DISCOVERED: Once<Discovered> = Once::new();
@@ -231,6 +240,21 @@ pub fn foreign_ram() -> &'static [PhysRegion] {
     DISCOVERED.get().map(|d| d.foreign.as_slice()).unwrap_or(&[])
 }
 
+/// Every hart id the machine reports, from `/cpus/cpu@N`'s `reg`.
+///
+/// These need not be `0..n`: a hart id is whatever the hardware calls it, and real
+/// platforms leave gaps (a management core, a disabled core). So this is the list to
+/// iterate when starting secondaries, never a range.
+///
+/// Distinct from [`crate::memory::stack::max_harts`], which is how many harts the
+/// kernel has *stack space* for. One is what exists, the other is what we can serve;
+/// conflating them is how a hart ends up running on another hart's stack.
+///
+/// Empty before the tree has been parsed.
+pub fn hart_ids() -> &'static [usize] {
+    DISCOVERED.get().map(|d| d.hart_ids.as_slice()).unwrap_or(&[])
+}
+
 /// Build a `PhysRegion`, truncating an over-long label but never the range.
 fn region(name: &str, base: usize, size: usize) -> PhysRegion {
     let mut label = String::new();
@@ -272,7 +296,8 @@ fn initrd_range(fdt: &Fdt<'_>) -> Option<(usize, usize)> {
 /// One pass and one classifier for both, so the two lists cannot disagree about
 /// which node is which.
 fn discover_regions(fdt: &Fdt<'_>, blob: usize, blob_size: usize) -> Discovered {
-    let mut found = Discovered { mmio: Vec::new(), foreign: Vec::new() };
+    let mut found =
+        Discovered { mmio: Vec::new(), foreign: Vec::new(), hart_ids: Vec::new() };
 
     // The blob is foreign RAM like any other: it sits in the pool and the allocator
     // would vend it.
@@ -301,10 +326,21 @@ fn discover_regions(fdt: &Fdt<'_>, blob: usize, blob_size: usize) -> Discovered 
         let name = node.name();
         let path = node.path();
         let kind = classify(name, &path);
-        if matches!(kind, RegKind::Neither) {
+        if matches!(kind, RegKind::Ram) {
             continue;
         }
         let Some(regs) = node.reg() else { continue };
+
+        // A hart id is an address-shaped value with no size, so it is taken before
+        // the size check that every real range must pass.
+        if matches!(kind, RegKind::HartId) {
+            for reg in regs {
+                if found.hart_ids.push(reg.address as usize).is_err() {
+                    println!("[dtb] WARNING: more than {MAX_HART_IDS} harts reported; ignoring rest");
+                }
+            }
+            continue;
+        }
 
         // A node may describe several ranges — QEMU virt's `flash` has two.
         for reg in regs {
@@ -323,7 +359,7 @@ fn discover_regions(fdt: &Fdt<'_>, blob: usize, blob_size: usize) -> Discovered 
                 RegKind::ReservedRam => {
                     found.foreign.push(entry).err().map(|_| ("foreign RAM range", MAX_FOREIGN))
                 }
-                RegKind::Neither => unreachable!("filtered above"),
+                RegKind::HartId | RegKind::Ram => unreachable!("handled above"),
             };
             if let Some((what, cap)) = overflowed {
                 // Dropping a reserved range silently would let the allocator vend
@@ -491,5 +527,6 @@ pub fn summary() {
         mmio_regions().len(),
         foreign_ram().len()
     );
+    println!("[dtb] harts: {:?} (ids as reported, not a count)", hart_ids());
     }
 }

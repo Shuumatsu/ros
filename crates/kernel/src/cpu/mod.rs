@@ -1,6 +1,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::memory::layout::*;
+use crate::arch::riscv64::sbi;
 use crate::memory::stack;
 use crate::{print, println};
 
@@ -35,6 +36,63 @@ pub fn boot_hart() -> Option<usize> {
     match BOOT_HART.load(Ordering::Acquire) {
         UNCLAIMED => None,
         hart => Some(hart),
+    }
+}
+
+/// Bring up every other hart the machine reports.
+///
+/// Call once, from the boot hart, **after** [`crate::memory::init`]: a secondary
+/// spins waiting for the kernel page table to be published, so starting one earlier
+/// only makes it wait longer.
+///
+/// # Why each hart re-runs `boot.S`
+///
+/// SBI starts a hart with `satp = 0` — translation off — so the entry point must be
+/// the *physical* address of `_start`, not a Rust function at a high virtual address.
+/// Each secondary therefore installs the early table and jumps high exactly as the
+/// boot hart did, then diverges at [`claim_boot_hart`], which it loses.
+///
+/// # Harts we refuse to start
+///
+/// A hart with no reserved stack would compute an `sp` inside its neighbour's stack.
+/// `boot.S` parks such a hart on arrival, but it is better not to invite it: the
+/// machine's hart count and the kernel's stack count are separate facts (see
+/// [`crate::device_tree::hart_ids`]) and this is where they meet.
+pub fn start_secondaries() {
+    let me = crate::arch::riscv64::hart_id();
+    let entry = crate::memory::virt_to_phys(text_start());
+    let servable = stack::max_harts();
+
+    for &hart in crate::device_tree::hart_ids() {
+        if hart == me {
+            continue;
+        }
+        if hart >= servable {
+            println!("[smp] hart {hart} not started: only {servable} harts have stacks");
+            continue;
+        }
+
+        // Ask first. "Already started" and "no such hart" are different problems, and
+        // a bare error code from hart_start would not distinguish them.
+        match sbi::hart_get_status(hart) {
+            Ok(sbi::HartState::Stopped) => {}
+            Ok(state) => {
+                println!("[smp] hart {hart} not started: firmware reports {state:?}");
+                continue;
+            }
+            Err(error) => {
+                println!("[smp] hart {hart} status unavailable: {error}");
+                continue;
+            }
+        }
+
+        // `opaque` lands in the hart's `a1`, where `boot.S` expects the device tree
+        // pointer. A secondary never parses it — that is boot-hart work — so the
+        // value is irrelevant and passed as zero rather than pretending otherwise.
+        match sbi::hart_start(hart, entry, 0) {
+            Ok(()) => println!("[smp] started hart {hart} at {entry:#x}"),
+            Err(error) => println!("[smp] hart {hart} failed to start: {error}"),
+        }
     }
 }
 
