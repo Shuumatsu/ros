@@ -79,22 +79,13 @@ unsafe extern "C" fn trap_handler(tf: &mut TrapFrame) {
 
     let cause: Trap<Interrupt, Exception> = scause.cause().try_into().expect("unknown trap cause");
     match cause {
-        Trap::Exception(e) => {
-            // Exceptions are not routine, and `sepc` is the one thing worth knowing
-            // about one, so it is reported here rather than left to each handler.
-            //
-            // Deliberately the lock-free `kprintln!`: an exception can fire on a hart
-            // that already holds the console lock — a fault inside `println!` is
-            // exactly when the message matters most — so taking it here would
-            // deadlock instead of printing.
-            kprintln!("[trap] exception {e:?} at sepc {epc:#x}");
-            exceptions::handler(e, tf)
-        }
-        // No logging on this path. It used to print two lines per trap through the
-        // lock-free writer, which was invisible with one hart and shredded the console
-        // character-by-character the moment several harts took timer interrupts
-        // concurrently. Routine interrupts are the handler's business, and the
-        // handlers that do print use the locked `println!`.
+        // Neither arm logs. Both used to, through the lock-free writer, and both were
+        // doing it on *routine* paths: every timer tick on one, and — after the first
+        // attempt at this fix — every system call on the other, since `UserEnvCall`
+        // goes through here. Whatever is worth saying belongs to the handler that
+        // knows the trap is not routine, so `epc` is threaded down to the one place
+        // that does: the catch-all in `exceptions::handler`.
+        Trap::Exception(e) => exceptions::handler(e, tf, epc),
         Trap::Interrupt(intr) => unsafe { interrupts::handler(intr, tf) },
     }
 }

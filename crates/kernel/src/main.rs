@@ -31,9 +31,9 @@ global_asm!(include_str!("boot.S"));
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     if let Some(p) = info.location() {
-        kprintln!("Aborting: file {}:{}: \n\t{}", p.file(), p.line(), info.message());
+        emergency_println!("Aborting: file {}:{}: \n\t{}", p.file(), p.line(), info.message());
     } else {
-        kprintln!("Aborting: no information available.");
+        emergency_println!("Aborting: no information available.");
     }
     abort();
 }
@@ -42,7 +42,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 // turns off Rust's name mangling so the symbol is exactly eh_personality
 #[unsafe(no_mangle)]
 extern "C" fn abort() -> ! {
-    kprintln!("[cpu: {}] enter extern \"C\" fn abort()", arch::riscv64::hart_id());
+    emergency_println!("[cpu: {}] enter extern \"C\" fn abort()", arch::riscv64::hart_id());
     loop {
         riscv::asm::wfi();
     }

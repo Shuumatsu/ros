@@ -63,9 +63,6 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn kmain() -> ! {
-    // Ordinary startup logging, so the *locked* writer: `kprintln!` is lock-free and
-    // would shred a secondary hart's output mid-line, which is exactly what it did
-    // once secondaries started announcing themselves concurrently.
     println!("enter kmain");
 
     println!("This is my operating system!");

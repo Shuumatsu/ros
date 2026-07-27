@@ -7,7 +7,10 @@ use crate::trap::TrapFrame;
 /// error in `a0` rather than pretend to service it. A real dispatch table will
 /// replace this body.
 pub fn handler(tf: &mut TrapFrame) {
-    kprintln!("[ecall] unexpected syscall {} — none implemented yet", tf.a7);
+    // The locked writer, not the emergency one: an `ecall` is executed deliberately,
+    // so it can never arrive while this hart is inside `_print` holding the lock —
+    // which is the only thing the emergency path exists for.
+    println!("[ecall] unexpected syscall {} — none implemented yet", tf.a7);
     tf.a0 = usize::MAX;
     tf.increase_sepc();
 }

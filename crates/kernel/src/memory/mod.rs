@@ -51,6 +51,30 @@ fn alloc_error(layout: Layout) -> ! {
     );
 }
 
+/// Print the kernel's static memory layout.
+///
+/// Lives here rather than in `cpu`, where it used to: every fact it prints comes from
+/// [`layout`] or [`stack`], both of which this module owns. A CPU module that imports
+/// nothing but memory internals is reporting someone else's business.
+pub fn report_layout() {
+    println!("kernel image layout:");
+    println!("    load base:    {:#x}", layout::memory_start());
+    println!("    text:         {:#x}..{:#x}", layout::text_start(), layout::text_end());
+    println!("    rodata:       {:#x}..{:#x}", layout::rodata_start(), layout::rodata_end());
+    println!("    data:         {:#x}..{:#x}", layout::data_start(), layout::data_end());
+    println!("    bss:          {:#x}..{:#x}", layout::bss_start(), layout::bss_end());
+    println!(
+        "    hart stacks:  {:#x}..{:#x} ({} x {}, each above a {} guard)",
+        layout::kernel_stack_start(),
+        layout::kernel_stack_end(),
+        stack::max_harts(),
+        crate::utils::ByteSize(stack::SIZE),
+        crate::utils::ByteSize(stack::GUARD_SIZE)
+    );
+    // The heap's end is a runtime fact from the device tree, not a linker symbol.
+    println!("    heap start:   {:#x}", layout::heap_start());
+}
+
 /// Bring up the memory subsystem. **Boot hart only** — see [`init_secondary`].
 ///
 /// Physical frames, then the kernel heap carved out of them, then the kernel page
@@ -66,6 +90,8 @@ fn alloc_error(layout: Layout) -> ! {
 /// RAM top, the heap as a fixed [`KERNEL_HEAP_SIZE`] slice of those frames — so
 /// nothing here is a compile-time guess about how much RAM exists.
 pub fn init() {
+    report_layout();
+
     // Before anything derives an address from the linker symbols: confirm the linker
     // script and Rust agree about the page size and that every section it lays out is
     // page aligned.

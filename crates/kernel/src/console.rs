@@ -40,7 +40,8 @@ fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
     }
 }
 
-/// Lock-free write via the SBI console — needs no address, safe in panic/IRQ.
+/// Lock-free write via the SBI console — needs no address, so it works when the
+/// UART's own mapping is the thing that broke.
 fn sbi_write(s: &str) {
     for b in s.bytes() {
         sbi::console_putchar(b as usize);
@@ -56,9 +57,9 @@ impl fmt::Write for Uart<'_> {
     }
 }
 
-/// Lock-free SBI-console sink for interrupt/panic contexts.
-struct KernelStdout;
-impl fmt::Write for KernelStdout {
+/// Lock-free SBI-console sink, for when the lock cannot be taken.
+struct SbiConsole;
+impl fmt::Write for SbiConsole {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         sbi_write(s);
         Ok(())
@@ -105,12 +106,11 @@ pub fn _print(args: fmt::Arguments) {
     restore_interrupts(was_enabled);
 }
 
-/// For interrupt/panic contexts - writes directly without lock
 #[doc(hidden)]
-pub fn _kprint(args: fmt::Arguments) {
+pub fn _emergency_print(args: fmt::Arguments) {
     let hart = hart_id();
-    let _ = write!(KernelStdout, "[hart {}] ", hart);
-    let _ = KernelStdout.write_fmt(args);
+    let _ = write!(SbiConsole, "[hart {}] ", hart);
+    let _ = SbiConsole.write_fmt(args);
 }
 
 // print!/println! - interrupt-safe, locked:
@@ -130,23 +130,34 @@ macro_rules! println {
     ($($arg:tt)*) => { $crate::print!("{}\r\n", format_args!($($arg)*)) };
 }
 
-// kprint!/kprintln! - lock-free, for contexts where THIS hart may already hold the
-// console lock: a panic, or an exception taken inside `_print` itself. Taking the
-// lock there would deadlock instead of printing, which is when the message matters
-// most.
+// emergency_print!/emergency_println! - lock-free, for the one situation the locked
+// path cannot serve: THIS hart already holds the console lock. That happens when a
+// fault is taken inside `_print` itself, and when panicking from anywhere. Taking the
+// lock there would deadlock instead of printing, which is exactly when the message
+// matters most.
 //
-// Not for interrupt handlers, and not for ordinary logging. `_print` masks interrupts
-// while it holds the lock, so an interrupt handler can safely use the locked path --
-// and must, because lock-free writes interleave character-by-character with every
-// other hart's output. With one hart that was invisible; with several it shreds the
-// console into unreadable garbage.
+// NOT for anything else. Lock-free writes interleave character-by-character with
+// every other hart's output; with one hart that is invisible, with several it shreds
+// the console into unreadable garbage:
+//
+//     c[hartod 0] [te: 5,r asep_pc: 0xffhaffndlefr]f scausc0e c80o20de2afc:
+//
+// The name is deliberately long and alarming. Its predecessor was `kprintln!`, one
+// letter from `println!` and reading like a drop-in for it, and that name alone was
+// enough for the mistake to be made twice independently — in the trap handler and in
+// `kmain` — each time looking perfectly reasonable in review. Renaming it is the fix;
+// the comment is only the explanation.
+//
+// Ordinary logging, including from interrupt handlers, uses `println!`: `_print`
+// masks interrupts while it holds the lock, so an interrupt cannot arrive to
+// contend with it on this hart.
 #[macro_export]
-macro_rules! kprint {
-    ($($arg:tt)*) => { $crate::console::_kprint(format_args!($($arg)*)) };
+macro_rules! emergency_print {
+    ($($arg:tt)*) => { $crate::console::_emergency_print(format_args!($($arg)*)) };
 }
 
 #[macro_export]
-macro_rules! kprintln {
-    () => { $crate::kprint!("\r\n") };
-    ($($arg:tt)*) => { $crate::kprint!("{}\r\n", format_args!($($arg)*)) };
+macro_rules! emergency_println {
+    () => { $crate::emergency_print!("\r\n") };
+    ($($arg:tt)*) => { $crate::emergency_print!("{}\r\n", format_args!($($arg)*)) };
 }

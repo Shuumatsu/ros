@@ -770,6 +770,85 @@ unexpected exception. Boot hart varied across 0, 1, 2, 3, 5, 6, 7 over these run
 pages on more than one hart, and `claim_boot_hart`'s compare-exchange with real
 contention.
 
+### M. AGENTS.md compliance pass on §2.L
+
+Auditing the SMP commit found three violations, **two of which that commit
+introduced** — one of them a straight regression of the bug it had just fixed.
+
+**1. The console fix was a comment, not a fix.** Rule 1 is *don't paper over a
+problem at the symptom site*, and that is precisely what happened: two call sites
+corrected, a paragraph written, the trap left in place. The root cause was the
+**name**:
+
+```
+println!      locked, safe
+kprintln!     lock-free, shreds concurrent output
+```
+
+One letter apart, reading like a drop-in. That name alone was enough for the same
+mistake to be made twice independently — `trap_handler` and `kmain` — each looking
+reasonable in review.
+
+Renamed to `emergency_print!` / `emergency_println!`, long and alarming on purpose:
+`emergency_println!("enter kmain")` does not survive a second look, where
+`kprintln!("enter kmain")` did. `_kprint` → `_emergency_print`, and the misleading
+`KernelStdout` sink → `SbiConsole`. It now has exactly three users, all in the
+panic/abort handler — its only reason to exist.
+
+**2. The fix re-introduced the same bug one arm over.** §2.L removed routine logging
+from the interrupt arm and put this on the exception arm:
+
+```rust
+Trap::Exception(e) => {
+    kprintln!("[trap] exception {e:?} at sepc {epc:#x}");
+    exceptions::handler(e, tf)
+}
+```
+
+But `exceptions::handler` dispatches `UserEnvCall` — **every system call**. So the
+moment syscalls exist, each one prints through the lock-free writer: the identical
+failure mode, moved from timer interrupts to syscalls. It was also redundant, since
+the catch-all `panic!` already named the exception.
+
+`epc` is now threaded into `exceptions::handler` and reported *in* that panic:
+
+```
+Aborting: file crates/kernel/src/trap/exceptions/mod.rs:23:
+        unexpected exception: StorePageFault at sepc 0xffffffc0802061d8
+```
+
+One message, on the fatal path only. `ecall.rs` moved to the locked `println!` — an
+`ecall` is executed deliberately, so it can never arrive while this hart is inside
+`_print`, which is the only thing the emergency path is for.
+
+**3. `print_info` reported memory layout from inside `cpu/`.** It imported nothing but
+`memory::layout` and `memory::stack` — a CPU module reporting another subsystem's
+business. Split: `memory::report_layout()` prints the image layout and stack geometry
+(called from `memory::init`, which owns those symbols), and `cpu::print_info()` keeps
+only CPU identity.
+
+> And while doing that I added a duplicate: `cpu::print_info` printed the hart list
+> that `device_tree::summary` already prints. Caught in the boot log on the next run
+> and removed. Fixing DRY violations is apparently a good way to create one.
+
+#### Considered and rejected
+
+- `start_secondaries` checking `hart >= max_harts` while `boot.S` also parks such a
+  hart — different responsibilities: `boot.S` must guard *any* entry, including one
+  the firmware initiates, while `start_secondaries` merely declines to invite one.
+  Both derive from the same constant, pinned by `check_layout`.
+- `MAX_MMIO` / `MAX_FOREIGN` / `MAX_HART_IDS` fixed capacities — `device_tree::init`
+  runs before the heap exists, so these cannot be `Vec`s the way `MAX_REGIONS` could.
+- `sbi_call` vs `sbi_call_ext` — genuinely different ABIs.
+
+#### Flagged, not fixed (pre-existing)
+
+All four legacy SBI IPI/fence wrappers pass `&hart_mask as *const _ as usize` — a
+**virtual stack address** where the firmware expects a pointer. All unused, but IPIs
+are the natural next reach from HSM, so the landmine now sits next to live code.
+
+Verified: `-smp` 1/2/4/8, 5 runs each, 20/20.
+
 ---
 
 ## 3. Verified state

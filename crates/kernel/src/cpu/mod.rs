@@ -1,6 +1,5 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::memory::layout::*;
 use crate::arch::riscv64::sbi;
 use crate::memory::stack;
 use crate::{print, println};
@@ -60,7 +59,7 @@ pub fn boot_hart() -> Option<usize> {
 /// [`crate::device_tree::hart_ids`]) and this is where they meet.
 pub fn start_secondaries() {
     let me = crate::arch::riscv64::hart_id();
-    let entry = crate::memory::virt_to_phys(text_start());
+    let entry = crate::memory::virt_to_phys(crate::memory::layout::text_start());
     let servable = stack::max_harts();
 
     for &hart in crate::device_tree::hart_ids() {
@@ -96,30 +95,17 @@ pub fn start_secondaries() {
     }
 }
 
+/// Report what this hart is, as opposed to what memory looks like.
+///
+/// The kernel image layout used to be printed here too, which put a function that
+/// imports nothing but `memory::layout` and `memory::stack` in the CPU module. It
+/// lives in [`crate::memory::report_layout`] now; this reports CPU facts only.
 pub fn print_info() {
     // Logged because it is not a constant and not necessarily 0: OpenSBI runs a
     // lottery, so at `-smp 4` this varies from boot to boot. Having it in the log is
     // what makes a hart-dependent failure obvious instead of mysterious.
-    if let Some(hart) = boot_hart() {
-        println!("boot hart: {hart} (chosen by the firmware, not assumed)");
+    match boot_hart() {
+        Some(hart) => println!("boot hart: {hart} (chosen by the firmware, not assumed)"),
+        None => println!("boot hart: unclaimed"),
     }
-    println!("kernel image layout: ");
-    println!("    load base: {:#x}", memory_start());
-    println!("    text_start: {:#x}, text_end: {:#x}", text_start(), text_end());
-    println!("    rodata_start: {:#x}, rodata_end: {:#x}", rodata_start(), rodata_end());
-    println!("    data_start: {:#x}, data_end: {:#x}", data_start(), data_end());
-    println!("    bss_start: {:#x}, bss_end: {:#x}", bss_start(), bss_end());
-    println!(
-        "    kernel_stack_start: {:#x}, kernel_stack_end: {:#x}",
-        kernel_stack_start(),
-        kernel_stack_end()
-    );
-    println!(
-        "    hart stacks: {} x {} KiB, each above a {} KiB guard page",
-        stack::max_harts(),
-        stack::SIZE / 1024,
-        stack::GUARD_SIZE / 1024
-    );
-    // Heap end is discovered from the device tree at runtime; see `memory::init`.
-    println!("    heap_start: {:#x}", heap_start());
 }
