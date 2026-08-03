@@ -12,4 +12,5 @@
 ---
 
 - git history does not make sense. focus on current codes
-- Write comments in a conservative and restrained manner
+- be simple on git commit messages
+- write comments in a conservative and restrained manner
