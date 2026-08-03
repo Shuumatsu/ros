@@ -1,5 +1,29 @@
 use core::fmt;
 
+use heapless::String;
+
+/// Copy `name` into a fixed-capacity string, truncating at a character boundary.
+///
+/// The obvious spelling, `&name[..name.len().min(N)]`, slices by **bytes** and
+/// panics outright when the cut lands inside a multi-byte character. That matters
+/// because every caller here is naming something after a device-tree node, and node
+/// names are firmware input: `fdt-raw` validates them as UTF-8 but does not hold
+/// them to the device-tree spec's ASCII subset. A node whose name is long enough to
+/// truncate and has a multi-byte character across the boundary would abort the boot
+/// from inside the DTB walk — before the console exists to say so.
+///
+/// Pushing characters instead of bytes cannot land mid-character, so the failure is
+/// structurally impossible rather than merely unlikely.
+pub fn truncated<const N: usize>(name: &str) -> String<N> {
+    let mut out = String::new();
+    for c in name.chars() {
+        if out.push(c).is_err() {
+            break;
+        }
+    }
+    out
+}
+
 /// A byte count rendered in the largest binary unit that divides it exactly,
 /// falling back to plain bytes.
 ///

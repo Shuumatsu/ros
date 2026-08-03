@@ -229,10 +229,8 @@ fn reserve(
         range.len()
     );
 
-    let mut label = String::new();
-    let _ = label.push_str(&name[..name.len().min(RESERVATION_NAME_LEN)]);
     let record = Reservation {
-        name: label,
+        name: crate::utils::truncated(name),
         start: PhysicalAddr::from_ppn(range.start()).bits(),
         end: PhysicalAddr::from_ppn(range.end()).bits(),
     };

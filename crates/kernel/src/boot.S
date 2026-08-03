@@ -4,6 +4,19 @@
 .option norvc
 .option norelax
 
+# The boot-role claim below uses lr.w/sc.w, so this file needs the A extension —
+# state it here rather than inherit it. Without this line the RELEASE build does
+# not compile at all: `instruction requires the following: 'Zalrsc'` on the lr.w.
+# Debug builds fine, which is why it went unnoticed.
+#
+# The target (riscv64imac) does have A; the feature string reaching the assembler
+# for a module-level `global_asm!` is simply not the one the target spec declares,
+# and what it turns out to be depends on codegen-unit partitioning — hence the
+# opt-level dependence. Declaring the requirement in the file that has it is the
+# fix, not a workaround: this is the same thing `norvc` and `norelax` above already
+# do for this file's other assembly-level needs.
+.option arch, +a
+
 .section .text.init
 
 # ---------------------------------------------------------------------------
@@ -167,6 +180,13 @@ _secondary_start:
 
     # start(hartid = a0, dtb = a1, measured va_offset = a2)
     call    start
+    # start() is `-> !`, so this is reachable only if something has already gone
+    # very wrong. Falling through would be the worst available outcome: the next
+    # label is the SECONDARY path, which would re-write satp and then `mv sp, a1`
+    # — and on the boot hart a1 still holds the DTB POINTER. It would run
+    # secondary_start on a stack pointed into the device tree blob. One instruction
+    # buys a deterministic stop instead.
+    j       .Lpark
 
 # ---------------------------------------------------------------------------
 # Secondary hart. Its stack was allocated and mapped by the boot hart.
@@ -192,6 +212,10 @@ _secondary_start:
 
     # secondary_start(hartid = a0)
     call    secondary_start
+    # Also `-> !`. The fall-through here happens to land on .Lpark anyway, but
+    # relying on label order for that is how the boot-hart case above became a
+    # real hazard. Say it.
+    j       .Lpark
 
 # A hart with nowhere to run. Only reachable by a second arrival at _boot, i.e.
 # a loader that ignored the SBI boot protocol and released every hart into the

@@ -185,11 +185,33 @@ pub fn report(regions: &[Region]) {
             continue;
         }
 
-        // Consume the whole run of same-named, same-sized, non-empty regions.
+        // Consume the run of regions this one is genuinely contiguous with.
+        //
+        // Adjacency is checked rather than assumed, because the doc above promises
+        // it and the code did not deliver it. Collapsing on name and page size alone
+        // turned eleven scattered MMIO windows — `test@100000`, `rtc@101000`,
+        // `uart@10000000` and eight virtio slots spread over 0x100000..0x10009000 —
+        // into `11 x 4 KiB` printed against the base of one of them, which reads as
+        // a single contiguous 44 KiB mapping. That is the same class of lie the
+        // page-size check was added for: a summary line has to describe the mapping
+        // or it is worse than no line at all.
+        //
+        // `flags` is compared for the same reason. A run mixing rights would print
+        // the first region's for all of them, and this log exists specifically to
+        // put the protection policy where a failing boot can be read off it.
+        let page_size = region.page_size();
         let mut run = 1;
         let mut pages = region.pages();
         while let Some(next) = regions.get(index + run) {
-            if next.name != region.name || next.level != region.level || next.is_empty() {
+            // Against the rounded footprint, which is what `install` occupies.
+            let span = pages * page_size;
+            if next.name != region.name
+                || next.level != region.level
+                || next.flags != region.flags
+                || next.is_empty()
+                || next.va != region.va + span
+                || next.pa != region.pa + span
+            {
                 break;
             }
             pages += next.pages();

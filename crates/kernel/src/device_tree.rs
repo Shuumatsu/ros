@@ -253,9 +253,7 @@ pub fn hart_ids() -> &'static [usize] {
 
 /// Build a `PhysRegion`, truncating an over-long label but never the range.
 fn region(name: &str, base: usize, size: usize) -> PhysRegion {
-    let mut label = String::new();
-    let _ = label.push_str(&name[..name.len().min(REGION_NAME_LEN)]);
-    PhysRegion { name: label, base, size }
+    PhysRegion { name: crate::utils::truncated(name), base, size }
 }
 
 /// Record a foreign range, warning if the list is full rather than dropping it
@@ -518,11 +516,15 @@ pub fn summary() {
     }
     if CLINT_BASE.load(Ordering::Relaxed) != 0 {
         println!("[dtb] clint: {:#x} (size {:#x})", clint_base(), clint_size());
+    }
+    // Outside the CLINT block. A misplaced brace used to nest these two inside it,
+    // so on any platform without a `riscv,clint0` node — QEMU's own
+    // `-machine virt,aclint=on`, for one — the counts that say how much of the tree
+    // we understood vanished from the boot log, gated on an unrelated device.
     println!(
-        "[dtb] mmio:  {} windows, {} foreign RAM ranges (from one pass over the tree)",
+        "[dtb] mmio:  {} windows, {} foreign RAM ranges",
         mmio_regions().len(),
         foreign_ram().len()
     );
     println!("[dtb] harts: {:?} (ids as reported, not a count)", hart_ids());
-    }
 }
