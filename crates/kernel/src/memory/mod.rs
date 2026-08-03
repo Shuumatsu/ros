@@ -1,7 +1,8 @@
 use buddy_system_allocator::LockedHeap;
 use core::alloc::Layout;
 
-use paging::sv39::PAGE_SIZE;
+use paging::sv39::{PAGE_SIZE, page_size_at};
+use paging::utils::align_up;
 
 pub mod direct_map;
 pub mod frame;
@@ -9,6 +10,32 @@ pub mod kernel_table;
 pub mod layout;
 pub mod region;
 pub mod stack;
+
+/// Bytes mapped by one leaf at the middle level.
+///
+/// The unit the bulk direct map is tiled in, and therefore the grain at which
+/// anything placing itself *next to* the direct map has to align. Lives here rather
+/// than in one of its two users so they cannot end up with different ideas of it.
+pub const SUPERPAGE: usize = page_size_at(1);
+
+/// First virtual address above everything the direct map occupies.
+///
+/// **The single owner of that boundary.** Whatever wants virtual address space of its
+/// own — [`stack`] today, per-thread kernel stacks later — starts here, and
+/// [`kernel_table`] refuses to map anything past it. Two modules deriving this
+/// separately is exactly how a stack would come to sit inside a live superpage: the
+/// two would agree right up until one of them rounded differently.
+///
+/// Rounded up to a whole [`SUPERPAGE`], so those finer mappings begin a page-table
+/// slot of their own rather than landing inside one the bulk direct map covers with a
+/// single leaf.
+///
+/// Only meaningful once [`frame::init`] has run — it is the allocator that decides how
+/// much physical memory the kernel owns, and therefore how far the direct map reaches.
+pub fn kernel_va_free_start() -> usize {
+    let (_, pool_end) = frame::owned_range();
+    align_up(phys_to_virt(pool_end), SUPERPAGE)
+}
 
 /// ORDER determines max allocation size: 2^(ORDER-1) bytes
 /// ORDER=32 supports up to 2GB allocations
@@ -63,24 +90,34 @@ pub fn report_layout() {
     println!("    rodata:       {:#x}..{:#x}", layout::rodata_start(), layout::rodata_end());
     println!("    data:         {:#x}..{:#x}", layout::data_start(), layout::data_end());
     println!("    bss:          {:#x}..{:#x}", layout::bss_start(), layout::bss_end());
+    // Where the linker put it, and nothing more: the geometry inside that range —
+    // sizes, guards, the secondaries — belongs to `stack` and is printed by
+    // `stack::report`, which runs once the secondaries exist.
     println!(
-        "    hart stacks:  {:#x}..{:#x} ({} x {}, each above a {} guard)",
-        layout::kernel_stack_start(),
-        layout::kernel_stack_end(),
-        stack::max_harts(),
-        crate::utils::ByteSize(stack::SIZE),
-        crate::utils::ByteSize(stack::GUARD_SIZE)
+        "    boot stack:   {:#x}..{:#x}",
+        layout::boot_stack_start(),
+        layout::boot_stack_end()
     );
     // The heap's end is a runtime fact from the device tree, not a linker symbol.
     println!("    heap start:   {:#x}", layout::heap_start());
 }
 
-/// Bring up the memory subsystem. **Boot hart only** — see [`init_secondary`].
+/// Bring up the memory subsystem. **Boot hart only.**
 ///
-/// Physical frames, then the kernel heap carved out of them, then the kernel page
-/// table built from both. The ordering lives here rather than in the caller: it is a
-/// property of how these three depend on each other, not something `start` should
-/// have to know.
+/// Physical frames, then the kernel heap carved out of them, then one stack per hart
+/// in `secondary_harts`, then the kernel page table built from all of it. The
+/// ordering lives here rather than in the caller: it is a property of how these
+/// depend on each other, not something `start` should have to know.
+///
+/// `secondary_harts` is a *parameter* rather than something looked up here, because
+/// deciding which harts this kernel will start is `cpu`'s business and `cpu` already
+/// depends on this module. Reaching up to ask it would make the dependency circular;
+/// `start`, which knows both, supplies it instead.
+///
+/// A secondary hart runs none of this. It is handed a finished page table and a
+/// finished stack by `boot.S` before it reaches Rust at all, which is what makes
+/// re-initialising the allocator over live RAM impossible rather than merely
+/// discouraged.
 ///
 /// Order is load-bearing and now the canonical way round. The frame allocator
 /// (`frame`) keeps its metadata in a bitmap it reserves from RAM, so it depends
@@ -89,7 +126,7 @@ pub fn report_layout() {
 /// from the linker's `_heap_start` (top of the kernel image) to the device-tree
 /// RAM top, the heap as a fixed [`KERNEL_HEAP_SIZE`] slice of those frames — so
 /// nothing here is a compile-time guess about how much RAM exists.
-pub fn init() {
+pub fn init(secondary_harts: impl Iterator<Item = usize>) {
     report_layout();
 
     // Before anything derives an address from the linker symbols: confirm the linker
@@ -152,23 +189,15 @@ pub fn init() {
         crate::utils::ByteSize(KERNEL_HEAP_SIZE)
     );
 
-    // 3. The real kernel page table LAST: it needs frames for its tree, and it
+    // 3. Secondary hart stacks THIRD, one per hart in `secondary_harts`. Before the
+    //    page table, because that is what maps them: a secondary switches to the
+    //    kernel table before it touches its stack, so the mapping has to be there
+    //    from the start rather than added afterwards.
+    stack::init(secondary_harts);
+    stack::report();
+
+    // 4. The real kernel page table LAST: it needs frames for its tree, and it
     //    derives its direct map from what the allocator ended up owning. Replaces
     //    boot.S's blanket-RWX gigapages with per-section rights and W^X.
     kernel_table::init();
-}
-
-/// Adopt the boot hart's memory setup. **Secondary harts only.**
-///
-/// Physical memory and the heap are global and already up; all this hart needs is
-/// to stop running on the boot table. It blocks until the boot hart has published
-/// the kernel table, so it is also the barrier that keeps a secondary from touching
-/// memory before there is any.
-///
-/// Currently unreachable — nothing calls SBI HSM `hart_start`, so no secondary hart
-/// enters the kernel. Its purpose is to make the split explicit, so that when one
-/// does, it cannot accidentally re-run [`init`] and re-initialise the allocator over
-/// RAM already in use.
-pub fn init_secondary() {
-    kernel_table::install();
 }

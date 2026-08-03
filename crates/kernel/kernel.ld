@@ -149,53 +149,44 @@ SECTIONS {
     } :bss
 
 
-    /* Per-hart kernel stacks. Stacks grow DOWN, so each hart's usable stack sits
-       immediately above an unmapped guard page: an overflow walks off the bottom
-       into the guard and faults, instead of silently eating whatever is below it
-       (hart 0's neighbour is .bss; every other hart's is the previous hart's
-       stack). The guards are holes because memory::kernel_table maps each stack
-       as its own region and never the guards.
+    /* The BOOT HART's kernel stack, and only that one. Secondary harts get theirs
+       from the frame allocator at runtime, because by the time one starts there is
+       an allocator to ask — and because the number of harts is a property of the
+       machine, not of this file. There is deliberately no per-hart array here any
+       more; memory::stack's module docs own that story, including why indexing one
+       by hart id was wrong.
 
-       Layout for hart h, with stride = guard + stack:
-           guard  [start + stride*h,         start + stride*h + guard)
-           stack  [start + stride*h + guard, start + stride*(h+1))
-       which makes the stack top — and therefore sp — simply
-           start + stride*(h+1)
-       so boot.S needs only the stride.
+       NO SIZE APPEARS HERE, only placement. `memory::stack` declares the area as a
+       single `.boot_stack` static and this section takes the size from it, so the
+       guard size and the stack size are stated exactly once, in Rust, where they can
+       be read and checked. A byte count written here would be a composite magic
+       number encoding both, verifiable by nothing.
+       `memory::stack::check_layout` asserts at boot that the section landed with the
+       span the geometry expects.
 
-       NO SIZE APPEARS HERE. `memory::stack` declares the whole area as one
-       `.hart_stacks` static sized `STRIDE * MAX_HARTS`, and this section merely
-       places it — so the size comes from the section itself and the guard size, the
-       stack size and the hart count are stated exactly once, in Rust, where they can
-       be read and checked.
-
-       Writing the total by hand instead (`. = . + 0x110000`) is a composite magic
-       number: it silently encodes all three values, nothing can verify it, and
-       changing the stack size in Rust would leave it stale while quietly altering
-       the hart count. `memory::stack::check_layout` asserts at boot that the section
-       landed with the span the geometry expects.
-
-       NOLOAD because these are uninitialised stacks: reserve the address space, but
+       NOLOAD because this is an uninitialised stack: reserve the address space, but
        put no zeros in the image. */
     . = ALIGN(_page_size);
-    .hart_stacks (NOLOAD) : {
-        PROVIDE(_kernel_stack_start = .);
+    .boot_stack (NOLOAD) : {
+        PROVIDE(_boot_stack_start = .);
         /* KEEP: nothing in Rust references the static, so --gc-sections would
-           otherwise discard the kernel's stacks. */
-        KEEP(*(.hart_stacks))
-        PROVIDE(_kernel_stack_end = .);
+           otherwise discard the kernel's stack. */
+        KEEP(*(.boot_stack))
+        PROVIDE(_boot_stack_end = .);
     } :bss
-    
 
-    /* our heap starts right after the kernel stack. Its END is not a linker
+
+    /* our heap starts right after the boot stack. Its END is not a linker
     symbol: the heap runs up to the RAM top discovered from the device tree at
     runtime (see memory::init), not to a compile-time LENGTH. */
     . = ALIGN(_page_size);
-    PROVIDE(_heap_start = _kernel_stack_end + _page_size);
+    PROVIDE(_heap_start = _boot_stack_end + _page_size);
 }
 
 /* Effective image size for the RISC-V Image header: everything the loader must
-   reserve for the kernel — loaded image + BSS + kernel stack. This is an
-   absolute symbol (a constant difference), so `.8byte _image_size` in boot.S
-   emits its value, not an address. */
-_image_size = _kernel_stack_end - _memory_start;
+   reserve for the kernel — loaded image + BSS + boot stack. Secondary hart
+   stacks are absent on purpose: they come from the frame allocator, out of RAM
+   the loader has already been told about. This is an absolute symbol (a constant
+   difference), so `.8byte _image_size` in boot.S emits its value, not an
+   address. */
+_image_size = _boot_stack_end - _memory_start;

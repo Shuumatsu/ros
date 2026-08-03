@@ -25,13 +25,53 @@ _start:
     .4byte  0x05435352          # 0x38  magic2 = "RSC\x05"
     .4byte  0                   # 0x3C  res3 (PE COFF header offset)
 
+# ---------------------------------------------------------------------------
+# Two entry points, one shared body.
+#
+# The boot hart arrives at _boot, chosen by the firmware, with the device tree
+# in a1. Every other hart arrives at _secondary_start because the boot hart
+# asked SBI HSM to start it there, with its stack in a1. Both have to install
+# the early page table and relocate to high virtual addresses first, so that is
+# written once below and t6 records which path to take afterwards.
+#
+# NOTHING HERE IS INDEXED BY HART ID. Neither path computes an address from a0.
+# Why that rule exists, and what it cost to learn: memory::stack's module docs.
+# ---------------------------------------------------------------------------
 .global _boot
 _boot:
-    # Entered in S-mode by OpenSBI: a0 = hartid, a1 = dtb. We execute at the
-    # PHYSICAL load address (~0x8020_0040), but the kernel is LINKED at high VAs,
-    # so until paging is on we may only use PC-relative addressing (lla) — never
-    # an absolute symbol load. a0/a1 are preserved untouched until `call start`.
+    # Entered in S-mode by OpenSBI: a0 = hartid, a1 = dtb.
+    li      t6, 0               # t6 = 0: take the boot-hart path below
+    j       .Lenable_paging
+
+.global _secondary_start
+_secondary_start:
+    # Entered in S-mode by SBI HSM: a0 = hartid, a1 = opaque, which the boot hart
+    # set to the VIRTUAL address of this hart's stack top (cpu::start_secondaries).
+    li      t6, 1               # t6 = 1: take the secondary path below
+
+.Lenable_paging:
+    # We execute at the PHYSICAL load address (~0x8020_0040), but the kernel is
+    # LINKED at high VAs, so until paging is on we may only use PC-relative
+    # addressing (lla) — never an absolute symbol load. a0/a1 are preserved
+    # untouched until the call at the end.
     mv      tp, a0              # hart_id() reads tp
+
+    # ---- A trap vector, before anything can trap ----
+    # stvec is UNDEFINED here: the firmware does not set it for us and trap::init
+    # is a long way off, so until now any exception in the boot path jumped to
+    # whatever stvec happened to hold. Point it at a parking loop instead: a fault
+    # then stops the hart deterministically with sepc/scause/stval intact for a
+    # debugger, rather than executing garbage. Linux does exactly this, first
+    # thing, in secondary_start_sbi.
+    #
+    # PHYSICAL, because that is what the PC is — `lla` pre-paging yields the load
+    # address. Re-pointed at the high alias after the jump below, since the kernel
+    # table has no identity mapping and this address stops resolving there.
+    #
+    # The low two bits of stvec are MODE, so the target must be 4-byte aligned;
+    # .Ltrap_park is declared `.balign 4` for that reason. 0 = Direct.
+    lla     t0, .Ltrap_park
+    csrw    stvec, t0
 
     # ---- Install the early page table ----
     # The table is CONST-BUILT IN RUST (see memory::direct_map) and loaded as
@@ -54,89 +94,127 @@ _boot:
     # purely as a CROSS-CHECK against direct_map::VA_OFFSET (which the linker
     # cannot read) — translation itself no longer depends on measuring it. ----
     lla     t0, .Lhigh_entry
-    ld      t1, 0(t0)           # t1 = VMA(1f)  (linker-provided absolute high VA)
-    lla     t0, 1f              # t0 = PMA(1f)  (where we actually are)
+    ld      t1, 0(t0)           # t1 = VMA(.Lhigh)  (linker-provided high VA)
+    lla     t0, .Lhigh          # t0 = PMA(.Lhigh)  (where we actually are)
     sub     a2, t1, t0          # a2 = measured VA - PA  -> start()'s 3rd arg
     jr      t1                  # enter the high half
 .balign 8
 .Lhigh_entry:
-    .dword  1f
-1:
+    .dword  .Lhigh
+.Lhigh:
     # Now executing at HIGH VAs: PC-relative lla yields high addresses, and the
     # absolute references in Rust resolve correctly.
 
     la      gp, _global_pointer # high gp (norelax above keeps this absolute-safe)
 
-    # ---- Zero the BSS, exactly once, by whichever hart gets here first ----
-    # NOT "if hartid == 0". The firmware picks which hart enters the kernel and is
-    # not required to pick 0 — OpenSBI runs a lottery, so at -smp 4 the winner
-    # genuinely varies from boot to boot. Gating on a0 meant that on every boot
-    # whose winner was not hart 0, the BSS was never cleared at all; it only looked
-    # fine because QEMU hands out zeroed memory.
-    #
-    # So claim the job through a flag in .data — it cannot live in .bss, which is
-    # the thing being cleared — and make every hart that loses wait for completion
-    # before it can read a static. Flag: 0 = untouched, 1 = claimed, 2 = done.
-    #
-    # The claim MUST be conditional, which is why this is lr/sc and not amoswap.
-    # An unconditional `amoswap.w 1` writes 1 whatever it finds, so a hart arriving
-    # after the flag reached 2 clobbered the 2 back to 1 and then span forever
-    # waiting for a 2 that could never return — deadlocking every secondary hart.
-    # lr/sc stores only when nothing has touched the word since the load, so a hart
-    # that observes 2 never writes at all.
-    lla     t0, .Lbss_state
-7:
-    lr.w    t1, (t0)
-    li      t2, 2
-    beq     t1, t2, 3f          # already done: nothing to do, and nothing written
-    bnez    t1, 7b              # claimed by someone still working: keep watching
-    li      t2, 1
-    sc.w    t2, t2, (t0)        # 0 -> 1, only if the word is still untouched
-    bnez    t2, 7b              # lost the reservation: back to watching
-    la      t2, _bss_start
-    la      t3, _bss_end
-    bgeu    t2, t3, 8f
-2:
-    sd      zero, (t2)
-    addi    t2, t2, 8
-    bltu    t2, t3, 2b
-8:
-    fence   w, w                # the zeroing must land before "done" is published
-    li      t1, 2
-    sw      t1, 0(t0)
-3:
-    fence   r, r                # do not read a static before the zeroing is visible
-    # ---- Per-hart stack ----
-    # Each hart's usable stack sits immediately above its own guard page, so its
-    # top is _kernel_stack_start + stride * (hartid + 1). The stride is owned by
-    # memory::stack and read from the word it exports; the hart count is *derived*
-    # from the area the linker reserved, which is exactly how Rust derives it. So
-    # neither side restates the other, and there is no constant here to drift.
-    lla     t0, HART_STACK_STRIDE
-    ld      t0, 0(t0)           # t0 = guard + stack, per hart
-    la      t1, _kernel_stack_start
-    la      t2, _kernel_stack_end
-    sub     t2, t2, t1          # t2 = bytes reserved for all stacks
-    divu    t2, t2, t0          # t2 = harts we have stack space for
+    # The same parking loop, now named by its linked address. The physical one set
+    # above dies with the identity mapping when a secondary installs the kernel
+    # table, so it has to be re-pointed while both still resolve.
+    la      t0, .Ltrap_park
+    csrw    stvec, t0
 
-    # A hartid at or beyond that has no stack. Continuing would put sp on another
-    # hart's stack — or past the area entirely — and corrupt memory before Rust
-    # runs, so there is nothing safe to do but park.
-    bltu    tp, t2, 4f
-5:
-    wfi
-    j       5b
-4:
-    addi    t3, tp, 1
-    mul     t0, t0, t3
-    add     sp, t1, t0          # sp = start + stride * (hartid + 1)
+    bnez    t6, .Lsecondary
+
+# ---------------------------------------------------------------------------
+# Boot hart. Owns the one static stack, and therefore the one-time setup.
+# ---------------------------------------------------------------------------
+    # ---- Claim the boot role, exactly once ----
+    # There is exactly ONE boot stack and nothing here can allocate another, so
+    # only one hart may continue. The SBI boot protocol says the firmware enters
+    # the kernel on a single hart and leaves the rest STOPPED for hart_start, but
+    # a loader that released all of them would otherwise put every hart on the
+    # same sp — and the resulting corruption would be untraceable.
+    #
+    # NOT "if hartid == 0" — the firmware's choice of entry hart is its own, and
+    # cpu::record_boot_hart says what assuming otherwise cost. This is the election;
+    # that function only records the winner.
+    #
+    # The flag lives in .data, not .bss: .bss is what the winner is about to zero.
+    #
+    # lr/sc rather than amoswap because the claim must be CONDITIONAL — an
+    # unconditional swap writes 1 over whatever it finds and cannot report a loss.
+    # The retry is not optional either: an sc may fail spuriously, and only the
+    # re-read distinguishes that from a genuine loss.
+    lla     t0, .Lboot_claim
+.Lclaim:
+    lr.w    t1, (t0)
+    bnez    t1, .Lpark          # taken: another hart owns the boot stack
+    li      t2, 1
+    sc.w    t2, t2, (t0)
+    bnez    t2, .Lclaim         # spurious failure or a racing hart: look again
+
+    # ---- Zero the BSS ----
+    # Uncontended, and not because no other hart exists — the claim above exists
+    # precisely because one might. It is that a hart which loses parks at .Lpark
+    # without ever reaching here, so nothing else can read or write .bss while this
+    # runs. Rust may therefore touch a static the instant it is entered.
+    la      t0, _bss_start
+    la      t1, _bss_end
+    bgeu    t0, t1, .Lbss_done
+.Lbss_loop:
+    sd      zero, (t0)
+    addi    t0, t0, 8
+    bltu    t0, t1, .Lbss_loop
+.Lbss_done:
+
+    # The one static stack, taken whole. No arithmetic and no hart id: its top is
+    # the end of the reserved area, because memory::stack puts the guard page at
+    # the bottom.
+    la      sp, _boot_stack_end
 
     # start(hartid = a0, dtb = a1, measured va_offset = a2)
     call    start
 
-# BSS-zeroing claim flag: 0 = untouched, 1 = claimed, 2 = done. In .data so it is
-# loaded as zero from the image and is NOT itself cleared by the loop it guards.
+# ---------------------------------------------------------------------------
+# Secondary hart. Its stack was allocated and mapped by the boot hart.
+# ---------------------------------------------------------------------------
+.Lsecondary:
+    # ---- Adopt the kernel page table before touching the stack ----
+    # It has to happen in assembly, and it has to happen before sp: a1 is an address
+    # only the kernel table maps, so there is no stack to run Rust on until this is
+    # done. memory::kernel_table explains why the stacks live where they do and why
+    # no handshake is needed here.
+    la      t0, KERNEL_SATP
+    ld      t0, 0(t0)
+    fence   r, rw               # acquire, pairing with the release store in
+                                # kernel_table::init: the tree the boot hart built
+                                # must be visible before the walker reads it. The
+                                # sfence below only orders the walker against THIS
+                                # hart's memory operations, so it cannot substitute.
+    csrw    satp, t0
+    sfence.vma                  # identity mapping is gone from here on; the PC is
+                                # high, which the kernel table maps
+
+    mv      sp, a1              # the stack top the boot hart chose for us
+
+    # secondary_start(hartid = a0)
+    call    secondary_start
+
+# A hart with nowhere to run. Only reachable by a second arrival at _boot, i.e.
+# a loader that ignored the SBI boot protocol and released every hart into the
+# kernel. There is no stack for it and no way to make one here, so it idles.
+#
+# It stays idle: the firmware already considers it STARTED, so start_secondaries
+# will find it in that state and report it rather than trying to start it. That
+# is a real loss of a hart on such a platform, and the honest price of refusing
+# to let two harts share one stack.
+.balign 4
+.Lpark:
+    wfi
+    j       .Lpark
+
+# A trap taken before trap::init installed a real handler — see the stvec write at
+# the top. A separate loop from .Lpark on purpose, even though the two do the same
+# thing: the PC alone then says which of the two happened, which matters in a boot
+# path that has no console. scause/sepc/stval describe the fault itself.
+.balign 4
+.Ltrap_park:
+    wfi
+    j       .Ltrap_park
+
+# Boot-role claim flag: 0 = free, 1 = taken. In .data so it is loaded as zero
+# from the image and is NOT itself cleared by the loop it guards.
 .section .data
 .balign 4
-.Lbss_state:
+.Lboot_claim:
     .word   0

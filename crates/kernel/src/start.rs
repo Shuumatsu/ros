@@ -4,10 +4,16 @@ use crate::trap;
 
 // static mut KERNEL_STARTED: bool = false;
 
-/// Kernel entry, called from `boot.S`. Entered in **S-mode** by the SBI firmware
+/// Boot-hart entry, called from `boot.S`. Entered in **S-mode** by the SBI firmware
 /// (OpenSBI): `a0 = hartid`, `a1 = dtb`. All M-mode setup (PMP, trap delegation,
 /// timer) was done by the SBI, so there is no `mret` here — we are already in
 /// supervisor mode.
+///
+/// Exactly one hart reaches this — `boot.S` claims the single boot stack before
+/// jumping here and parks anything that loses; [`cpu::record_boot_hart`] says which
+/// hart that turns out to be and why it is not predictable. Secondary harts enter at
+/// [`secondary_start`] instead, so there is no runtime branch on "am I the boot hart":
+/// the two roles are two entry points.
 ///
 /// `va_offset` is the VA↔PA skew `boot.S` measured from the linked-vs-real
 /// address of its high-half jump. It is not used to translate — that is a
@@ -18,35 +24,26 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
     // where the direct map lives; every address below depends on it.
     memory::direct_map::verify(va_offset);
 
-    // One-time setup belongs to whichever hart arrived first, *not* to hart 0. The
-    // previous boot stage chooses which hart enters the kernel and is not required
-    // to choose 0; gating on `hartid == 0` would mean a platform whose boot hart is
-    // 1 never parses the device tree and then fails somewhere unrelated.
-    let boot_hart = cpu::claim_boot_hart(hartid);
+    cpu::record_boot_hart(hartid);
 
-    if boot_hart {
-        // Parse the DTB the SBI handed us in a1: it populates the device table
-        // (the console learns the UART base from here). Zero-allocation, so it
-        // is safe to run before the heap exists.
-        unsafe { crate::device_tree::init(dtb) };
-        crate::device_tree::summary();
-        cpu::print_info();
+    // Parse the DTB the SBI handed us in a1: it populates the device table
+    // (the console learns the UART base from here). Zero-allocation, so it
+    // is safe to run before the heap exists.
+    unsafe { crate::device_tree::init(dtb) };
+    crate::device_tree::summary();
+    cpu::print_info();
 
-        println!("initializing memory...");
-        // Frames, then the heap carved from them, then the real kernel page table.
-        // `memory` owns that ordering; see `memory::init`.
-        memory::init();
-        println!("initializing memory completed");
+    println!("initializing memory...");
+    // `memory` owns the ordering of what it brings up; see `memory::init`. It is
+    // handed the hart list rather than looking it up, because which harts this kernel
+    // will start is `cpu`'s decision and `cpu` already depends on `memory` — asking
+    // upwards would make that circular. This is the one place that knows both.
+    memory::init(cpu::secondary_hart_ids());
+    println!("initializing memory completed");
 
-        // Secondaries only after the kernel table is published: each one waits for it
-        // in `memory::init_secondary`, so there is nothing to gain by starting sooner.
-        cpu::start_secondaries();
-    } else {
-        // Physical memory and the heap are global and already up (or on their way);
-        // this hart only needs to stop running on the boot table. Blocks until the
-        // boot hart publishes.
-        memory::init_secondary();
-    }
+    // Only now: each secondary is handed a stack that lives above the direct map,
+    // which nothing but the published kernel table describes.
+    cpu::start_secondaries();
 
     println!("initializing traps...");
     // Per-hart: `stvec` is a CSR, so every hart sets its own.
@@ -54,11 +51,24 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
     println!("initializing traps completed");
 
     // Already in S-mode — go straight into the kernel.
-    if boot_hart {
-        unsafe { kmain() }
-    } else {
-        unsafe { kmain_ap() }
-    }
+    unsafe { kmain() }
+}
+
+/// Secondary-hart entry, called from `boot.S`. `a0 = hartid`.
+///
+/// Nothing global to set up, and nothing to wait for. By the time a hart is here it
+/// is already running on the kernel page table and on a stack the boot hart
+/// allocated, mapped and passed to it — `boot.S` installs both before there is a
+/// stack to run Rust on. That is what makes re-initialising the allocator over live
+/// RAM impossible here rather than merely discouraged.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn secondary_start(hartid: usize) -> ! {
+    println!("[smp] hart {hartid} online on the kernel page table");
+
+    // Per-hart: `stvec` is a CSR, so every hart sets its own.
+    unsafe { trap::init() };
+
+    unsafe { kmain_ap() }
 }
 
 #[unsafe(no_mangle)]

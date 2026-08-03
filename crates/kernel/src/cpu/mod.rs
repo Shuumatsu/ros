@@ -1,36 +1,53 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::arch::riscv64::sbi;
-use crate::memory::stack;
-use crate::{print, println};
+use crate::memory::{kernel_table, layout, stack, virt_to_phys};
+use crate::println;
 
-/// Sentinel for "no hart has claimed the boot role yet". A real hartid can never
-/// reach it — `boot.S` parks anything at or above the hart count.
+/// Sentinel for "no hart has recorded the boot role yet".
+///
+/// A boot hart whose id really were `usize::MAX` would be reported as unrecorded.
+/// That costs one wrong word in one log line and nothing else — [`boot_hart`] is
+/// diagnostic, and no hart id is used as an index anywhere. It is a sentinel, not a
+/// claim about the id space.
 const UNCLAIMED: usize = usize::MAX;
 
 /// Which hart ran the one-time kernel initialisation.
 static BOOT_HART: AtomicUsize = AtomicUsize::new(UNCLAIMED);
 
-/// Claim the boot-hart role, returning `true` for exactly one caller.
+/// Record which hart ran the one-time initialisation.
 ///
-/// # Why this is not `hart_id() == 0`
+/// # This is not the election
 ///
-/// The previous boot stage picks which hart enters the kernel, and it is *not
-/// required to be hart 0* — OpenSBI's boot hart is configurable and differs across
-/// platforms. Gating one-time setup on `hartid == 0` therefore risks a boot where
-/// nothing runs `device_tree::init` and every later step fails for an unrelated
-/// reason. Claiming the role instead makes it whoever actually arrived first, which
-/// is the property that matters.
+/// `boot.S` elects the boot hart, with an `lr`/`sc` claim taken before anything
+/// else runs: there is exactly one boot stack, so exactly one hart may proceed and
+/// the rest park. Electing again here would be a second answer to the same
+/// question. This records the winner — and asserts the property, so a second
+/// arrival is a loud panic rather than two harts quietly sharing a stack.
 ///
-/// (On QEMU virt with OpenSBI this happens to be hart 0, so the distinction is
-/// latent rather than currently observable.)
-pub fn claim_boot_hart(hartid: usize) -> bool {
+/// # Why the winner is not hart 0
+///
+/// **The owner of this fact; elsewhere just points here.** The previous boot stage
+/// picks which hart enters the kernel and is *not required to pick 0* — OpenSBI's
+/// boot hart is configurable, and on QEMU virt it is a lottery that genuinely varies
+/// from boot to boot: at `-smp 32` it has been observed as 0, 5, 8, 13, 21, 24, 25
+/// and 31 across consecutive runs of the same image.
+///
+/// So nothing may assume a value here, and nothing may assume a *range* either —
+/// which is the same mistake one step removed, and the one that used to park the boot
+/// hart outright. See [`crate::memory::stack`].
+pub fn record_boot_hart(hartid: usize) {
     BOOT_HART
         .compare_exchange(UNCLAIMED, hartid, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
+        .unwrap_or_else(|winner| {
+            panic!(
+                "hart {hartid} reached the boot path, but hart {winner} already holds the \
+                 boot stack; boot.S's claim did not hold"
+            )
+        });
 }
 
-/// The hart that ran the one-time initialisation, once one has claimed it.
+/// The hart that ran the one-time initialisation, once one has recorded it.
 pub fn boot_hart() -> Option<usize> {
     match BOOT_HART.load(Ordering::Acquire) {
         UNCLAIMED => None,
@@ -38,39 +55,52 @@ pub fn boot_hart() -> Option<usize> {
     }
 }
 
-/// Bring up every other hart the machine reports.
+/// Every hart the machine reports except the boot hart.
 ///
-/// Call once, from the boot hart, **after** [`crate::memory::init`]: a secondary
-/// spins waiting for the kernel page table to be published, so starting one earlier
-/// only makes it wait longer.
+/// Defined against [`boot_hart`] rather than against whoever happens to be asking, so
+/// the answer does not depend on which hart calls it. Iterated, never ranged over:
+/// hart ids need not be `0..n`.
 ///
-/// # Why each hart re-runs `boot.S`
+/// Consumed exactly once, by [`crate::memory::init`], which allocates a stack per
+/// entry and stores the pairing. [`start_secondaries`] then reads that pairing back
+/// instead of walking this again — one traversal, so there is no second answer to
+/// disagree with the first.
 ///
-/// SBI starts a hart with `satp = 0` — translation off — so the entry point must be
-/// the *physical* address of `_start`, not a Rust function at a high virtual address.
-/// Each secondary therefore installs the early table and jumps high exactly as the
-/// boot hart did, then diverges at [`claim_boot_hart`], which it loses.
+/// # Panics
+/// Before [`record_boot_hart`], since "every hart except the boot hart" has no
+/// meaning yet.
+pub fn secondary_hart_ids() -> impl Iterator<Item = usize> {
+    let boot = boot_hart().expect("secondary_hart_ids called before the boot hart was recorded");
+    crate::device_tree::hart_ids().iter().copied().filter(move |&hart| hart != boot)
+}
+
+/// Bring up every hart [`crate::memory::init`] reserved a stack for.
 ///
-/// # Harts we refuse to start
+/// Call once, from the boot hart, **after** [`crate::memory::init`]: it hands each
+/// hart a stack that only the kernel page table maps, so both have to exist first.
 ///
-/// A hart with no reserved stack would compute an `sp` inside its neighbour's stack.
-/// `boot.S` parks such a hart on arrival, but it is better not to invite it: the
-/// machine's hart count and the kernel's stack count are separate facts (see
-/// [`crate::device_tree::hart_ids`]) and this is where they meet.
+/// # What the hart is told
+///
+/// Two things, and it derives nothing:
+///
+/// - `start_addr` is the *physical* address of `_secondary_start`. SBI starts a hart
+///   with `satp = 0` — translation off — so this cannot be a Rust function at a high
+///   virtual address, and it is not `_start` either: that entry is the boot hart's,
+///   with the image header and the one-time BSS zeroing behind it.
+/// - `opaque`, which lands in the hart's `a1`, is the top of the stack allocated for
+///   it. The hart computes no address of its own; see [`crate::memory::stack`] for
+///   why deriving one from a hart id was the bug this replaced.
 pub fn start_secondaries() {
-    let me = crate::arch::riscv64::hart_id();
-    let entry = crate::memory::virt_to_phys(crate::memory::layout::text_start());
-    let servable = stack::max_harts();
+    let entry = virt_to_phys(layout::secondary_entry());
+    // Not a wait: the value only exists because the table is live, and it is what
+    // `boot.S` reads to get onto it. Checking it here turns a would-be silent hang
+    // on the far side into a panic on this one.
+    assert!(
+        kernel_table::satp().is_some(),
+        "no kernel page table published; start_secondaries ran before memory::init"
+    );
 
-    for &hart in crate::device_tree::hart_ids() {
-        if hart == me {
-            continue;
-        }
-        if hart >= servable {
-            println!("[smp] hart {hart} not started: only {servable} harts have stacks");
-            continue;
-        }
-
+    for &stack::Secondary { hart, stack } in stack::secondaries() {
         // Ask first. "Already started" and "no such hart" are different problems, and
         // a bare error code from hart_start would not distinguish them.
         match sbi::hart_get_status(hart) {
@@ -85,11 +115,10 @@ pub fn start_secondaries() {
             }
         }
 
-        // `opaque` lands in the hart's `a1`, where `boot.S` expects the device tree
-        // pointer. A secondary never parses it — that is boot-hart work — so the
-        // value is irrelevant and passed as zero rather than pretending otherwise.
-        match sbi::hart_start(hart, entry, 0) {
-            Ok(()) => println!("[smp] started hart {hart} at {entry:#x}"),
+        match sbi::hart_start(hart, entry, stack.top()) {
+            Ok(()) => {
+                println!("[smp] started hart {hart} at {entry:#x}, stack top {:#x}", stack.top())
+            }
             Err(error) => println!("[smp] hart {hart} failed to start: {error}"),
         }
     }
@@ -101,11 +130,11 @@ pub fn start_secondaries() {
 /// imports nothing but `memory::layout` and `memory::stack` in the CPU module. It
 /// lives in [`crate::memory::report_layout`] now; this reports CPU facts only.
 pub fn print_info() {
-    // Logged because it is not a constant and not necessarily 0: OpenSBI runs a
-    // lottery, so at `-smp 4` this varies from boot to boot. Having it in the log is
-    // what makes a hart-dependent failure obvious instead of mysterious.
+    // Logged because it varies from boot to boot (see `record_boot_hart`). Having it
+    // in every log is what makes a hart-dependent failure obvious instead of
+    // mysterious — and it is how the parked-boot-hart bug was finally pinned down.
     match boot_hart() {
         Some(hart) => println!("boot hart: {hart} (chosen by the firmware, not assumed)"),
-        None => println!("boot hart: unclaimed"),
+        None => println!("boot hart: unrecorded"),
     }
 }

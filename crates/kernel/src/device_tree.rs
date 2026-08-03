@@ -242,13 +242,9 @@ pub fn foreign_ram() -> &'static [PhysRegion] {
 
 /// Every hart id the machine reports, from `/cpus/cpu@N`'s `reg`.
 ///
-/// These need not be `0..n`: a hart id is whatever the hardware calls it, and real
-/// platforms leave gaps (a management core, a disabled core). So this is the list to
-/// iterate when starting secondaries, never a range.
-///
-/// Distinct from [`crate::memory::stack::max_harts`], which is how many harts the
-/// kernel has *stack space* for. One is what exists, the other is what we can serve;
-/// conflating them is how a hart ends up running on another hart's stack.
+/// A list to iterate, never a range to count, and never a source of array indices:
+/// these ids need not be `0..n`. See [`crate::memory::stack`] for why that matters
+/// and what ignoring it cost.
 ///
 /// Empty before the tree has been parsed.
 pub fn hart_ids() -> &'static [usize] {

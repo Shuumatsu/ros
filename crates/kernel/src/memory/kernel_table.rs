@@ -51,12 +51,22 @@
 //! still live, along with the running PC and stack pointer, and the switch happens
 //! only if all of it checks out.
 //!
+//! # One table, adopted rather than rebuilt
+//!
+//! Secondary harts install *this* table; they do not build their own. Two trees
+//! mapping the same kernel would work, but they would double the page-table memory
+//! and, worse, drift the moment anything mapped something at run time.
+//!
+//! They adopt it in `boot.S`, reading [`KERNEL_SATP`] directly, because a secondary
+//! has to be on this table *before* it can touch its stack — the stack lives above
+//! the direct map, in address space no other table describes. There is no handshake:
+//! the boot hart cannot start a hart before publishing, since the stack address it
+//! passes is only meaningful under the published table.
+//!
 //! # Not yet
 //!
 //! - `GLOBAL` is deliberately not set. It is a TLB optimisation whose correctness
 //!   depends on address spaces that do not exist yet.
-//! - Secondary harts adopt this table via [`install`] rather than building their
-//!   own, but nothing starts one yet, so that path is unexercised.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -70,7 +80,7 @@ use paging::{LinearOffset, Mapper, PhysicalAddr, PteFlags, Satp, Table, VirtualA
 use crate::memory::frame::{self, TableFrames};
 use crate::memory::region::{self, Region};
 use crate::memory::stack;
-use crate::memory::{direct_map, layout, phys_to_virt, virt_to_phys};
+use crate::memory::{SUPERPAGE, direct_map, layout, phys_to_virt, virt_to_phys};
 
 /// This kernel's one mapper flavour: frames from the physical allocator, physical
 /// memory reached through the direct map.
@@ -84,15 +94,14 @@ const READ_EXEC: PteFlags = PteFlags::READ_EXECUTE.union(PteFlags::ACCESS);
 const READ_WRITE: PteFlags =
     PteFlags::READ_WRITE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
 
-/// Bytes mapped by one leaf at the middle level.
-const SUPERPAGE: usize = page_size_at(1);
-
-// No MAX_REGIONS. The count is one per hart stack plus four sections, three
-// direct-map pieces and however many MMIO windows the device tree happens to
-// describe — a bound would be a hand-computed composite of all four, in the same
-// class as the `0x110000` that used to sit in kernel.ld, and it would silently
-// become too small the moment any of them grew. The heap is already up by the time
-// this runs (`super::init` adds it before calling here), so the list simply grows.
+// No MAX_REGIONS. The count is four sections, one boot stack, one per secondary
+// hart the machine reports, three direct-map pieces and however many MMIO windows
+// the device tree happens to describe — a bound would be a hand-computed composite
+// of all five, in the same class as the `0x110000` that used to sit in kernel.ld,
+// and it would silently become too small the moment any of them grew. Two of the
+// five are runtime facts now, so it could not even be written. The heap is already
+// up by the time this runs (`super::init` adds it before calling here), so the list
+// simply grows.
 
 /// The largest page-table level that can tile `[base, base + len)` exactly.
 ///
@@ -169,17 +178,28 @@ fn regions() -> Vec<Region> {
     push(direct("rodata", layout::rodata_start(), layout::rodata_end(), 0, READ_ONLY));
     push(direct("data", layout::data_start(), layout::data_end(), 0, READ_WRITE));
     push(direct("bss", layout::bss_start(), layout::bss_end(), 0, READ_WRITE));
-    // Per-hart stacks, one region each. Mapping them individually is precisely
-    // what leaves the guard pages unmapped — a single region spanning the whole
-    // stack area would map straight over them and the overflow protection with it.
+    // Every kernel stack, one region each. Individually is precisely what leaves the
+    // guard pages unmapped: a single region spanning the area would map straight over
+    // them, and the overflow protection with them.
     //
-    // All `_max_harts` are mapped, not just the harts running: a secondary hart
-    // enters on the boot table (which maps everything) and then installs *this*
-    // table, so its stack has to already be here or it faults on the instruction
-    // after `csrw satp`.
-    for hart in 0..stack::max_harts() {
-        let (bottom, top) = stack::stack(hart);
-        push(direct("hart stacks", bottom, top, 0, READ_WRITE));
+    // Boot and secondary stacks go through the same loop and the same `Region`, which
+    // is why this asks `stack::all()` rather than assembling the set here. A secondary
+    // is not direct mapped — `stack` explains why it is deliberately double mapped —
+    // but nothing at this level has to know that: each stack reports its own `va` and
+    // `pa` and the difference stops mattering.
+    //
+    // Mapped now, before any secondary starts, because a starting hart installs this
+    // table and *then* sets `sp`. There is no window in which it could fault on a
+    // stack that had not been mapped yet.
+    for stack in stack::all() {
+        push(Region {
+            name: stack.name,
+            va: stack.bottom(),
+            pa: stack.pa(),
+            len: stack.len(),
+            level: 0,
+            flags: READ_WRITE,
+        });
     }
 
     // ---- The direct map, covering exactly what the frame allocator owns ----
@@ -218,7 +238,43 @@ fn regions() -> Vec<Region> {
     // Whatever sub-superpage remainder is left at the top.
     push(direct("direct map tail", bulk_end, pool_end_va, 0, READ_WRITE));
 
+    audit_disjoint(&regions);
     regions
+}
+
+/// Require the regions to tile the address space rather than overlap it.
+///
+/// Two regions covering one page is not a mapping error the hardware can report: the
+/// second `install` simply wins, and the loser's rights vanish. So it is checked here,
+/// while the list is still just data.
+///
+/// The specific hazard this exists for: the stacks sit *above* the direct map, at
+/// [`super::kernel_va_free_start`], and the direct map's own extent is a runtime fact.
+/// They cannot collide today, but they are computed in different modules, and "these
+/// two happen not to overlap" is exactly the kind of agreement that holds until
+/// someone rounds one of them differently.
+///
+/// `O(n²)` over ~30 regions, once, at boot.
+fn audit_disjoint(regions: &[Region]) {
+    for (index, a) in regions.iter().enumerate() {
+        if a.is_empty() {
+            continue;
+        }
+        for b in regions[index + 1..].iter().filter(|b| !b.is_empty()) {
+            let disjoint = a.va + a.len <= b.va || b.va + b.len <= a.va;
+            assert!(
+                disjoint,
+                "regions '{}' ({:#x}..{:#x}) and '{}' ({:#x}..{:#x}) overlap; one would \
+                 silently replace the other's rights",
+                a.name,
+                a.va,
+                a.va + a.len,
+                b.name,
+                b.va,
+                b.va + b.len
+            );
+        }
+    }
 }
 
 /// Build the kernel's page table, audit it, and switch `satp` to it.
@@ -261,44 +317,31 @@ pub fn init() {
     // table does, so execution continues across the write.
     unsafe { switch_to(satp.bits()) };
 
-    // Published last, so it doubles as the barrier secondary harts wait on: a
-    // non-zero value here means frames, heap and table are all up.
+    // Published last, so a non-zero value means frames, heap, stacks and table are
+    // all up. Release, so the tree itself is visible to any hart that reads it —
+    // `boot.S` pairs this with an acquire fence on the far side.
     KERNEL_SATP.store(satp.bits(), Ordering::Release);
 
     println!("[memory] kernel page table live (satp {:#x}); boot table retired", satp.bits());
 }
 
 /// The `satp` the boot hart installed. Zero until [`init`] has finished.
+///
+/// `no_mangle` because `boot.S` loads it: a starting hart has to be on this table
+/// before it can touch the stack it was given, so the switch happens in assembly,
+/// before there is a stack to run Rust on. Reading the same word both places is what
+/// keeps assembly and Rust from having separate ideas of which table is live.
+///
+/// No `#[used]`: [`satp`] reads it from Rust, so it cannot be dropped.
+#[unsafe(no_mangle)]
 static KERNEL_SATP: AtomicUsize = AtomicUsize::new(0);
 
-/// Adopt the boot hart's kernel page table. For secondary harts only.
-///
-/// Waits for the boot hart to publish, then installs the *same* table rather than
-/// building another. Two trees mapping the same kernel would work, but they would
-/// double the page-table memory and, worse, drift the moment anything maps
-/// something at run time.
-///
-/// Every hart's stack is already mapped in that table (see [`regions`]), so the
-/// switch is safe from any hart with a reserved stack — which `boot.S` guarantees,
-/// since it parks the rest.
-///
-/// Currently unreachable: nothing calls SBI HSM `hart_start`, so no secondary hart
-/// ever enters the kernel. It exists so that when one does, memory setup is not
-/// duplicated by construction.
-pub fn install() {
-    // The boot hart may still be mid-`init`. Spinning is fine here: there is
-    // nothing else for this hart to do until the kernel has memory.
-    let bits = loop {
-        match KERNEL_SATP.load(Ordering::Acquire) {
-            0 => core::hint::spin_loop(),
-            bits => break bits,
-        }
-    };
-
-    // SAFETY: the boot hart audited this tree page by page before installing it,
-    // and it maps every hart's stack and all of the kernel image, so execution
-    // continues across the write on this hart too.
-    unsafe { switch_to(bits) };
+/// The live kernel page table, or `None` before [`init`] has published one.
+pub fn satp() -> Option<usize> {
+    match KERNEL_SATP.load(Ordering::Acquire) {
+        0 => None,
+        bits => Some(bits),
+    }
 }
 
 /// Point `satp` at `bits` and flush the TLB.
@@ -343,24 +386,22 @@ unsafe fn switch_to(bits: usize) {
 fn audit_holes(mapper: &KernelMapper<'_>) {
     let unmapped = |va: usize| mapper.entry_of(VirtualAddr::new(va)).is_none();
 
-    // One guard page below every hart's stack, so an overflow faults instead of
-    // eating .bss (hart 0) or the previous hart's stack (everyone else).
-    for hart in 0..stack::max_harts() {
-        let guard = stack::guard(hart);
+    // One guard page below every stack. `stack` says which; this only checks them.
+    for guard in stack::guards() {
         assert!(
             unmapped(guard),
-            "hart {hart}'s stack guard page at {guard:#x} is mapped; it must stay a hole \
-             or a stack overflow will corrupt its neighbour silently"
+            "the stack guard page at {guard:#x} is mapped; it must stay a hole or a \
+             stack overflow will corrupt its neighbour silently"
         );
     }
 
-    // The linker also reserves a page between the stack area and the heap
-    // (`_heap_start = _kernel_stack_end + 4096`); a mapping there would mean the
+    // The linker also reserves a page between the boot stack and the heap
+    // (`_heap_start = _boot_stack_end + _page_size`); a mapping there would mean the
     // region list had grown over it.
-    let tail = layout::kernel_stack_end();
+    let tail = layout::boot_stack_end();
     assert!(
         unmapped(tail),
-        "the page at {tail:#x} between the stacks and the heap is mapped; it must stay a hole"
+        "the page at {tail:#x} between the boot stack and the heap is mapped; it must stay a hole"
     );
 }
 

@@ -168,9 +168,10 @@ impl Region {
 /// The rights come from [`PteFlags::rwx`] rather than being spelled out here.
 ///
 /// A run of adjacent regions sharing a name **and a page size** is collapsed into one
-/// line with the run's total page count and a `xN` marker. That is not cosmetic: the
-/// per-hart stacks are one region each — which is what leaves their guard pages
-/// unmapped — and printing sixteen identical lines would bury everything else.
+/// line with the run's total page count and a `xN` marker. That is not cosmetic:
+/// secondary hart stacks are one region each — which is what leaves their guard pages
+/// unmapped — so a big machine would otherwise bury everything else under one line
+/// per hart.
 ///
 /// The page size has to match too, or the total is a lie. Collapsing on name alone
 /// summed 4 KiB and 2 MiB device windows into "271 x 4KiB", which understated the

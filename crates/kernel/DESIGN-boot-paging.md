@@ -46,6 +46,13 @@ Key corrections to the intuitions we started from:
 
 ## 2. Completed work
 
+> **This section is an append-only log, not a description of the current design.**
+> Each stage records what was built and why *at the time*; later stages supersede
+> earlier ones without rewriting them, so a symbol named here may no longer exist.
+> §3 is the current state. Where a stage's design has been replaced wholesale it
+> carries a banner naming its successor — but treat every stage below as history
+> first and documentation second.
+
 ### A. `crates/frame-allocator` — simplification + DRY audit
 
 Landed: `thiserror` 2 derives replacing ~65 lines of hand-written
@@ -461,6 +468,11 @@ zeroing is visible. Correct whether one hart enters or many.
 
 #### Per-hart stack guard pages
 
+> **Superseded by §2.N.** The guard pages survive; the array they guarded does not.
+> Everything below indexed it by hart id, which is not an index — including the park
+> that this section presents as a safety feature and that could park the boot hart.
+> Read this as history.
+
 Stacks grow down, and `_bss_end` sat immediately below `_kernel_stack_start`, so
 hart 0's overflow ran into `.bss` — and every other hart's into the previous hart's
 stack. Each hart's stack now sits above its own unmapped guard page:
@@ -520,6 +532,12 @@ stack. Still unreachable — no `hart_start` caller — but the split is now exp
 rather than a comment.
 
 ### I. AGENTS.md compliance pass on §2.H — the magic number
+
+> **Superseded by §2.N.** The single-source argument holds and is still how
+> `.boot_stack` is sized; the `MAX_HARTS` it was applied to is gone. Note what this
+> pass did *not* catch: it audited whether the hart count was stated once, never
+> whether indexing by hart id was legitimate at all. A DRY audit cannot find a wrong
+> premise, only a repeated one.
 
 §2.H claimed the stack geometry had "exactly one definition". It did not. The linker
 script reserved the area with a bare literal:
@@ -849,6 +867,256 @@ are the natural next reach from HSM, so the landmine now sits next to live code.
 
 Verified: `-smp` 1/2/4/8, 5 runs each, 20/20.
 
+### N. Stage 9 — a hart id is not an index
+
+Everything from §2.H through §2.M was built on one assumption that was never true:
+that a hart id can be used as an array subscript. `boot.S` computed
+
+```
+sp = _kernel_stack_start + stride * (hartid + 1)
+```
+
+against a `.hart_stacks` area of `STRIDE * MAX_HARTS` (16), and parked any hart whose
+id reached 16. `start_secondaries` declined to invite one, for the same reason.
+
+The privileged spec says the opposite, in as many words (§3.1.5, `mhartid`): *"Hart
+IDs might not necessarily be numbered contiguously in a multiprocessor system, but at
+least one hart must have a hart ID of zero."* An id is a unique opaque name, and real
+platforms leave gaps — a management core, a disabled core, a cluster number in the
+high bits. OpenSBI carries a `hart_index2id[]` array and Linux a
+`__cpuid_to_hartid_map[]` precisely because of this.
+
+Three consequences, in descending severity:
+
+1. **The boot hart could park itself, silently.** §2.H's entire argument is that the
+   firmware chooses the entry hart and the kernel may not assume which — and then
+   `boot.S` assumed its *id* was below 16. On a platform whose firmware picks a hart
+   with a larger id, the kernel stops at `wfi` before the console exists: no panic, no
+   output, no way in. The fix in §2.H replaced "assume hart 0" with "assume hart < 16";
+   it did not remove the assumption.
+
+   **Not theoretical, and not even hardware-specific — it reproduces in QEMU.** The
+   pre-§2.N image, booted ten times at `-smp 32`:
+
+   ```
+   OLD image, -smp 32, boot hart chosen by the firmware:
+     31  24  31  21              -> never reached kmain   (4/10)
+      0   5   5   8  13   5      -> booted normally       (6/10)
+   ```
+
+   Correlation with "firmware picked ≥ 16" is 10 out of 10. Every previous stage
+   tested at `-smp` ≤ 8, where hart ids only run 0..7 and the lottery *cannot* produce
+   a losing draw — so the bug was invisible to the entire test matrix that had been
+   declared sufficient three times over.
+
+   ```
+   NEW image, same command, 10 runs:
+      4   1   5  10  10   4  25  25  16   1   -> all reached kmain (10/10)
+   ```
+
+   Three of those draws (25, 25, 16) are ids that killed the old image.
+2. **Cost scaled with the largest id, not the hart count.** Ids `{0, 1, 0x100, 0x101}`
+   — four harts — needed 258 slots, 17.5 MiB. Even at `-smp 1` the old kernel reserved
+   1.0625 MiB of `.hart_stacks` and mapped 256 leaves for it.
+3. `start_secondaries`' `hart >= max_harts` compared an id against a count. On a
+   3-hart machine with ids `{0, 32, 33}` it started nothing and blamed a stack
+   shortage that did not exist.
+
+#### The fix: two kinds of stack, neither indexed
+
+**Boot hart — one static stack, claimed not indexed.** `.hart_stacks` became
+`.boot_stack`, a single `STRIDE` slot. `boot.S` takes it whole with `la sp,
+_boot_stack_end`: no arithmetic, no id, nothing to be wrong about. Exactly one hart
+may have it, so the claim moved to the front — an `lr`/`sc` on `.Lboot_claim`, with
+anything that loses parking. That subsumes §2.H's three-state BSS protocol (`0/1/2`
+plus two fences): the losers no longer proceed, so there is nothing to wait for. The
+winner zeroes `.bss` uncontended.
+
+**Secondaries — the stack is handed over, in `opaque`.** SBI's third `hart_start`
+argument lands in the new hart's `a1`, and §2.L was passing 0 there with a comment
+saying the value was irrelevant. It is exactly the channel this needs: the boot hart
+allocates the stack, maps it, and passes its top. The hart derives nothing. This is
+what Linux does with `struct sbi_hart_boot_data {task_ptr, stack_ptr}`.
+
+Secondaries also got their own entry point, `_secondary_start`, instead of re-entering
+`_start` — they have no business behind the Image header or the BSS claim. Both
+entries share one body (`.Lenable_paging`) and diverge on `t6`, so the early-table
+install and the high-half jump are still written once.
+
+#### The ordering that falls out of it
+
+A secondary's stack lives **above the direct map** (`align_up(phys_to_virt(pool_end),
+SUPERPAGE)`), at a VA only the *kernel* table describes. So it cannot set `sp` under
+the early table, which means it must switch tables first — in assembly, because there
+is no stack to run Rust on until it has. `boot.S` reads `KERNEL_SATP` directly (now
+`no_mangle`), `fence r, rw` against the release store, `csrw satp`, then `mv sp, a1`.
+
+That deleted machinery rather than adding it:
+
+- `memory::init_secondary` and `kernel_table::install` are gone. A secondary reaches
+  Rust already on the kernel table and already on its stack.
+- The spin on `KERNEL_SATP` is gone. The boot hart *cannot* start a hart before
+  publishing, because the address it must pass is only meaningful under the published
+  table. The barrier became a data dependency.
+- `cpu::claim_boot_hart`'s compare-exchange is no longer an election — `boot.S` holds
+  the only one. It is now `record_boot_hart`, which panics if a second hart arrives.
+  Two mechanisms electing one winner was a split-brain waiting to drift.
+- `start()` and `secondary_start()` are separate entry points, so the `if boot_hart`
+  branch through the middle of `start` is gone.
+
+The stacks are frames from the allocator, mapped a second time above the direct map so
+the page below each can be a hole — the same aliasing Linux accepts for `VMAP_STACK`,
+and for the same reason: no `sp` ever points into the direct-map alias. They are laid
+out in `memory::init` *before* `kernel_table::init`, which is what lets them be in the
+table from the start rather than needing a live mapper.
+
+#### What is left bounding hart count
+
+`device_tree::MAX_HART_IDS = 64`, which is a **count** and always was, and warns when
+it overflows. `MAX_HARTS`, `max_harts()`, `stack(hart)`, `guard(hart)` and
+`HART_STACK_STRIDE` are all deleted; `arch::NCPU` was already gone (§2.H).
+
+#### Verified
+
+| Config | Result |
+|---|---|
+| `-smp 1` | 0 secondary stacks allocated, no secondary regions, 68 KiB total |
+| `-smp 4` | 3/3 secondaries online, boot hart varied 0 and 2 across runs |
+| `-smp 32` | 31/31 secondaries online — the old kernel refused everything from 16 up |
+
+Stack VAs at `-smp 4`: guards at `0xffffffc088000000`, `…88011000`, `…88022000`;
+tops at `…88011000`, `…88022000`, `…88033000` (stride `0x11000`). Region list shows
+`secondary stack 0xffffffc088001000 -> 0x0080250000`, i.e. a VA genuinely distinct
+from `phys_to_virt(pa)` = `0xffffffc080250000`.
+
+Guard page probed, not assumed: a `write_volatile` 8 bytes below secondary stack 0's
+bottom (`0xffffffc088000ff8`) gives `unexpected exception: StorePageFault at sepc
+0xffffffc08020667a`. `audit_holes` checking `entry_of().is_none()` is a claim about
+the table; this is the hardware agreeing.
+
+`.boot_stack` is `NOBITS`, `0x11000` bytes — down from `.hart_stacks` at `0x110000`.
+
+#### AGENTS.md compliance pass on §2.N
+
+Folded into the same change rather than left for a follow-up. Eleven findings; the
+three that were more than tidying:
+
+**1. The `zip` was a symptom-site patch.** `memory::init` traversed the hart list to
+size the stack pool, `start_secondaries` traversed it again to decide who got which,
+and the two were married by positional `zip` — guarded by an assert whose own message
+named the two functions that might disagree. An assertion that two components had
+better agree is the tell that the design has two answers where it needs one. The
+pairing is now built once: `Secondary { hart, stack }`, produced by `stack::init` and
+read back by `start_secondaries`. The second traversal, the `zip` and the assert all
+disappear together.
+
+**2. `memory` → `cpu` → `memory`.** `memory::init` called `cpu::secondary_count()`
+while `cpu` imports `memory`. The in-line comment *argued for* the cycle ("`cpu`
+decides which harts those are") instead of removing it. `memory::init` now takes the
+hart iterator as a parameter and `start` — which legitimately knows both layers —
+supplies it. Arrows point one way again.
+
+**3. Two derivations of where the direct map ends.** `stack::area_start` and
+`kernel_table::regions` each computed the boundary from `frame::owned_range()`. They
+agreed, but only because `kernel_table` happened to round its tail *down*; changing
+that one line to `align_up` would have silently placed a hart's stack inside a live
+superpage. Now `memory::kernel_va_free_start()` is the single owner, and
+`audit_disjoint` checks the whole region list pairwise for overlap — a general
+invariant, `O(n²)` over ~30 regions, once, at boot.
+
+The rest: `Stack` grew accessors so `top`/`guard`/`len` are derived from two stored
+fields rather than restated (`kernel_table` was setting `len: stack::SIZE` beside a
+struct that already carried both endpoints); `stack::all()`/`guards()` replaced
+`kernel_table` hand-assembling "the set of all stacks" from a boot special-case plus a
+secondary loop; `secondary_hart_ids` now defines itself against `boot_hart()` rather
+than re-reading `tp`; `secondary_entry` went through the existing `linker_symbol!`
+macro instead of hand-rolling a second `extern "C" { static … }`; duplicate reporting
+of stack geometry from two places in `memory` collapsed into `stack::report()`.
+
+**And the prose.** The "a hart id is not a dense index" argument had been written out
+in full in six files, the `VMAP_STACK` paragraph in two, "a secondary must be on the
+kernel table before it can touch its stack" in seven. Every one of those is a place to
+update when the reasoning moves. `memory::stack` owns the first, `stack::init` the
+second, `kernel_table`'s "One table, adopted rather than rebuilt" the third; everyone
+else states the local consequence in one line and points. **The duplication had
+already drifted inside this very change** — this document said the secondary's barrier
+was `fence r, r` while `boot.S` emitted `fence r, rw`.
+
+Worth recording plainly: §2.I was itself a DRY audit of §2.H, and it did not catch any
+of this. It checked whether the hart count was *stated* once. It never asked whether
+indexing by hart id was legitimate at all. A DRY pass finds repeated premises, not
+wrong ones.
+
+### O. Stage 10 — the two things §2.N deferred
+
+Both were flagged in §4.1 as "noticed, not folded in". Deferring a known defect
+because it is orthogonal is still deferring a known defect, so they are closed here.
+
+#### A trap vector before there is a trap handler
+
+`stvec` is **undefined** from hart entry until `trap::init()` — the firmware does not
+set it, and on a secondary nothing has. Every exception in that window jumped to
+whatever the register happened to hold. `boot.S` now points it at a parking loop as
+almost its first act: physically at entry (`lla`, since that is what the PC is), then
+re-pointed at the high alias after the jump, because a secondary installs the kernel
+table and the identity mapping stops resolving.
+
+`.Ltrap_park` is deliberately a *second* loop rather than a reuse of `.Lpark`. In a
+boot path with no console the program counter is the only diagnostic there is, and it
+should say which of the two happened.
+
+**Verified by A/B, and the control is the interesting half.** A deliberate
+`StorePageFault` before `trap::init` (`VA_OFFSET + 8 GiB`, canonical Sv39 and outside
+the early table's 4 GiB window), with the PC read over QEMU's gdb stub:
+
+| build | parked PC | meaning |
+|---|---|---|
+| `csrw stvec` present | `0x…13c` | `.Ltrap_park` — stopped at the fault, `sepc`/`scause`/`stval` intact |
+| `csrw stvec` → `nop` | `0x…134` | `.Lpark` — **the machine had restarted** |
+
+The control is worth reading twice. With `stvec` at 0 the trap jumped to VA 0, which
+the early table identity-maps to QEMU virt's boot ROM, which reset to OpenSBI, which
+re-entered `_start`. The claim flag in `.data` was still `1` from the first pass, so
+the hart parked as a *duplicate boot hart*. A crash presenting as a lost race, with no
+console output and a plausible-looking parked PC — and the first thing anyone would
+have investigated is the claim protocol, which was working perfectly.
+
+Note the first attempt at this test was worthless: counting traps in `-d int` showed
+20 lines for both builds, because the reset path does not re-fault. The discriminator
+had to be the PC, not the symptom count.
+
+#### The legacy IPI/fence wrappers: deleted, not fixed
+
+`clear_ipi`, `send_ipi`, `remote_fence_i`, `remote_sfence_vma` and
+`remote_sfence_vma_asid`. All five dead, all five hidden from the compiler by this
+file's `allow(dead_code)`.
+
+**§2.M mischaracterised them, and so did §4.1 until now.** The note said they passed
+"a virtual stack address where the firmware expects a physical pointer". The v0.1 spec
+calls that argument a virtual address, so the pointer is not the flat error claimed —
+though it is the underspecified corner that got the legacy interface deprecated, since
+implementations disagreed about how M-mode should translate a pointer handed to it.
+The actual indefensible defect was different and simpler: both `remote_sfence_vma*`
+took `start` and `size`, discarded them, and passed `0, 0`. A signature that names a
+range and then flushes something else cannot be caught at the call site.
+
+Deleted rather than rewritten. The modern replacements cannot be exercised until
+`SupervisorSoft` is handled (§4.1), so writing them now means verifying them by
+reading them — which is precisely how this file acquired five broken functions. The
+EIDs are recorded in §4.1 so the next author does not re-derive them. The gap left in
+the legacy function-id constants (3..=7) is deliberate.
+
+#### Still not done, deliberately
+
+Kernel stacks come from a bespoke path rather than a general kernel-VA allocator.
+Building one now, for a handful of idle boot stacks, would mean building it again when
+`proc/` needs per-thread kernel stacks — and *that* is the caller that should shape
+it. The VA base is derived from `frame::owned_range()` via
+`memory::kernel_va_free_start`, so it costs no constant in the meantime.
+
+Unlike the two items above, this one is a *design* deferral rather than a known
+defect: nothing is wrong today, it is only narrower than it will need to be.
+
 ---
 
 ## 3. Verified state
@@ -884,7 +1152,8 @@ boot hart: 0 (chosen by the firmware, not assumed)
 [memory]   rodata                 0xffffffc08021a000 -> 0x008021a000  r--    14 x 4KiB
 [memory]   data                   0xffffffc080229000 -> 0x0080229000  rw-     2 x 4KiB
 [memory]   bss                    0xffffffc08022b000 -> 0x008022b000  rw-     2 x 4KiB
-[memory]   hart stacks            0xffffffc08022e000 -> 0x008022e000  rw-   256 x 4KiB (x16)
+[memory]   boot stack             0xffffffc08023d000 -> 0x008023d000  rw-    16 x 4KiB
+[memory]   secondary stack        0xffffffc088001000 -> 0x0080250000  rw-    48 x 4KiB (x3)
 [memory]   frame pool head        0xffffffc08033e000 -> 0x008033e000  rw-   194 x 4KiB
 [memory]   direct map             0xffffffc080400000 -> 0x0080400000  rw-    62 x 2MiB
 [memory] kernel page table live (satp 0x8000000000087e02); boot table retired
@@ -892,9 +1161,12 @@ enter kmain
 [timer] tick 1
 ```
 
-`hart stacks (x16)` is sixteen regions collapsed into one line by `region::report`; they are separate regions precisely so the guard page between each pair stays unmapped. The `direct map tail` region is absent because this platform's RAM top is already
-superpage-aligned, so it is empty and skipped. `tick 1` is the proof traps still
-work *after* the switch.
+`secondary stack (x3)` is three regions collapsed into one line by `region::report`
+(this excerpt is from an `-smp 4` run); they are separate regions precisely so the
+guard page below each stays unmapped, and their VA is above the direct map rather than
+`phys_to_virt(pa)` — see §2.N. The `direct map tail` region is absent because this
+platform's RAM top is already superpage-aligned, so it is empty and skipped. `tick 1`
+is the proof traps still work *after* the switch.
 
 ELF facts verified by inspection after the relink (`llvm-readelf`, `llvm-nm`,
 and a byte-level dump of the table out of the image):
@@ -942,20 +1214,34 @@ table over a linear direct map, a W^X kernel table with no identity mapping, and
 the DTB withheld. What is left in this area is small and mostly about *scale*
 rather than correctness.
 
-### 4.1 SMP — mostly closed, one piece left
+### 4.1 SMP — closed for bring-up, open for everything after it
 
-The reachable half is fixed (§2.H): the boot hart is claimed rather than assumed,
-the BSS is claimed rather than gated on hart 0, and secondary harts have an
-`init_secondary` that adopts the kernel table instead of rebuilding it.
+Bring-up is done (§2.H, §2.L, §2.N): the boot hart is elected rather than assumed, it
+runs on a stack nothing indexes, secondaries are started via SBI HSM and handed a
+mapped stack in `opaque`, and no hart id is used as a subscript anywhere. Verified to
+`-smp 32`.
 
-What remains is that **nothing starts a secondary hart**. `sbi.rs` implements only
-legacy SBI v0.1 — there is no HSM `hart_start`, so `init_secondary`, `install`, and
-`boot.S`'s BSS wait-branch are all correct-by-construction but unexercised. Bringing
-APs up means adding the HSM extension, and only then can those paths be tested by
-racing them rather than by inspection.
+What is missing is everything a hart is *for*. Every secondary reaches `kmain_ap` and
+calls `wait_forever`; there is no scheduler, no IPI path, no per-CPU state and no
+cross-hart TLB shootdown. Concretely, the next pieces:
 
-Note `-smp 4` now boots reliably, which it did not before — but that is one hart
-running, chosen from four, not four harts running.
+- **A per-hart control block reached through `tp`.** `tp` currently holds the raw hart
+  id, which is fine for a console prefix and useless as a per-CPU pointer. When there
+  is per-CPU state to hold — current process, scheduler context, preempt count — `tp`
+  should point at it, and a dense logical-cpu index should appear alongside the hart
+  id at the same time. Not before: an index with no array to index is the `NCPU`
+  mistake again.
+- **IPIs.** The natural next reach from HSM. Needs `SupervisorSoft` handled first:
+  `interrupts::handler` currently sends it to `unimplemented!()` and
+  `clint::software::init` is never called, so enabling it today would panic on the
+  first delivery.
+- **`sfence.vma` shootdown**, once anything unmaps. Nothing does yet: the kernel table
+  is permanent and only ever grows at boot.
+
+When those land, the calls to make are the **IPI** (EID `0x735049`) and **RFENCE**
+(EID `0x52464E43`) extensions, which take `hart_mask` and `hart_mask_base` *by value*.
+OpenSBI advertises both. Do not reach for the v0.1 legacy equivalents — see §2.O for
+why the wrappers that used to be here were deleted rather than fixed.
 
 ### 4.2 `GLOBAL` on kernel mappings
 
@@ -1022,21 +1308,32 @@ Struck-through items are closed; kept so the history of each is legible.
    at the crate level, but the kernel table is permanent so nothing tears down a
    tree. The least-exercised code in the subsystem; user paging (§4.5) is what will
    first run it.
-9. ~~Single-hart only.~~ **Done** (§2.H, §2.L). The boot hart is claimed rather than
-   assumed, and secondaries are started via SBI HSM. Verified at `-smp` 2/4/8, 6 runs
-   each. Doing so immediately exposed two bugs in code previously "verified by
-   disassembly" — an `amoswap` that could not express a conditional claim, and a
-   lock-free console writer that shredded concurrent output.
+9. ~~Single-hart only.~~ **Done** (§2.H, §2.L, §2.N). The boot hart is elected rather
+   than assumed, secondaries are started via SBI HSM, and each is handed a mapped
+   stack rather than computing one. Verified to `-smp 32`. Each round exposed bugs in
+   code the previous round had "verified by disassembly": an `amoswap` that could not
+   express a conditional claim, a lock-free console writer that shredded concurrent
+   output, and — the one that would have bricked a real board — a boot hart that
+   parked itself whenever the firmware picked an id ≥ 16.
 10. **No `GLOBAL` bit on kernel mappings** — TLB optimisation, deferred to when
     address spaces exist (§4.2).
-11. ~~No guard page below the kernel stack.~~ **Done** (§2.H) — one unmapped guard
-    page per hart, all 16 audited, verified by a `StorePageFault` probe 8 bytes
-    below hart 0's stack bottom.
+11. ~~No guard page below the kernel stack.~~ **Done** (§2.H, §2.N) — one unmapped
+    guard page below every stack, boot and secondary alike, all audited by
+    `audit_holes` and verified by a `StorePageFault` probe 8 bytes below a stack
+    bottom (§2.H probed the boot hart's, §2.N a secondary's).
 12. ~~Reservations are not enumerable.~~ **Done** (§2.J) — `frame::reservations()`
     records every withholding, the boot log prints from it, and `/reserved-memory` is
     now fed in rather than discovered and discarded.
-13. **~34 pre-existing dead-code warnings** in `plic`/`utils`/`trap`/`proc`.
-    Unrelated to memory; the count has not moved across four stages.
+13. **~30 pre-existing dead-code warnings** in `plic`/`utils`/`trap`/`proc`.
+    Unrelated to memory; the count has not moved across six stages.
+14. ~~`stvec` undefined until `trap::init`.~~ **Done** (§2.O) — `boot.S` points it at
+    `.Ltrap_park` on entry and again after the high jump. Verified by A/B on the
+    parked PC over the gdb stub; the control build silently *reset the machine* and
+    re-parked as a duplicate boot hart.
+15. ~~Legacy SBI IPI/fence wrappers are wrong.~~ **Done** (§2.O) — deleted, not fixed.
+    The `remote_sfence_vma*` pair took a range and discarded it. Modern IPI/RFENCE
+    EIDs recorded in §4.1, to be written with their first caller so they can be
+    tested rather than inspected.
 
 
 ---
