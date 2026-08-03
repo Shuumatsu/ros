@@ -10,16 +10,13 @@ use core::arch::global_asm;
 extern crate static_assertions;
 
 mod arch;
-mod collections;
 mod cpu;
-mod drivers;
 mod isa;
 mod lang_items;
 #[macro_use]
 mod console;
 mod device_tree;
 mod memory;
-mod proc;
 mod sbi;
 mod start;
 mod utils;
