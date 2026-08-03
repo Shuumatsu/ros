@@ -120,10 +120,10 @@ pub fn init(secondary_harts: impl Iterator<Item = usize>) {
     stack::check_layout();
 
     println!(
-        "[memory] boot window: PA 0x0..{:#x} -> VA {:#x}.. ({})",
-        direct_map::WINDOW_END,
+        "[memory] boot map: PA 0x0..{:#x} -> VA {:#x}.. ({})",
+        direct_map::DIRECT_MAP_END,
         direct_map::VA_OFFSET,
-        crate::utils::ByteSize(direct_map::WINDOW_END.bits())
+        crate::utils::ByteSize(direct_map::DIRECT_MAP_END.bits())
     );
 
     // 1. Physical frames FIRST: [free_start, ram_end). `free_start` is the top of the
@@ -141,7 +141,7 @@ pub fn init(secondary_harts: impl Iterator<Item = usize>) {
     );
     frame::init(free_start_pa, ram_end);
     // What `frame` owns, not what it was asked for: it aligns both ends and clamps the
-    // top to `direct_map::WINDOW_END`.
+    // top to the Sv39 direct-map capacity.
     let (pool_start, pool_end) = frame::owned_range();
     println!(
         "[memory] frames: {:#x}..{:#x} ({}, physical)",

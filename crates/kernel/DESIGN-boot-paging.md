@@ -175,11 +175,11 @@ Landed:
 | File | Change |
 |---|---|
 | `paging/src/satp.rs` **(new)** | `Satp` + `Mode` — the CSR layout, `MODE=8` included. Sits *above* `sv39/` because the RV64 satp format doesn't vary with mode. `const fn new/sv39/with_root`, asserts a page-aligned root and an in-range ASID. 8 tests. |
-| `memory/direct_map.rs` **(new)** | The single source: `VA_OFFSET`, `WINDOW_END`, the `const fn early_table()`, `EARLY_PGTABLE`, `EARLY_SATP_TEMPLATE`, `verify()`. |
+| `memory/direct_map.rs` **(new)** | The single source: `VA_OFFSET`, `DIRECT_MAP_END`, the `const fn early_table()`, `EARLY_PGTABLE`, `EARLY_SATP_TEMPLATE`, `verify()`. |
 | `kernel.ld` | `_va_offset` = pure constant; `_kernel_va_base` deleted (it was only ever an input to the skew). |
 | `boot.S` | ~25 lines of PTE/RAM-base/satp arithmetic → 7 lines that only point satp at a table. The `.data`/`early_pgtable` `.space 4096` block is gone. |
 | `memory/mod.rs` | `VA_OFFSET: AtomicUsize` + `set_va_offset` + `va_offset()` **deleted**; `phys_to_virt`/`virt_to_phys` are now `const fn`. |
-| `memory/frame.rs` | Window clamp reads `direct_map::WINDOW_END` instead of re-deriving `ram_base + 1 GiB`. |
+| `memory/frame.rs` | The allocator limit reads `direct_map::DIRECT_MAP_END` instead of re-deriving an address-space bound. |
 | `start.rs` | `set_va_offset(va_offset)` → `direct_map::verify(va_offset)`. |
 
 Details worth preserving:
@@ -198,7 +198,7 @@ Details worth preserving:
 - **`VA_OFFSET` is still duplicated in `kernel.ld`** — unavoidable, the linker
   cannot read a Rust `const` and a `build.rs` linker-script parser (Option 3) is
   worse glue. What makes it safe: `boot.S` already computes the *real* VA−PA skew
-  for its jump-high (`.Lhigh_entry` VMA − `lla` PMA), and `direct_map::verify()`
+  for its jump-high (`_high_entry` VMA − `lla` PMA), and `direct_map::verify()`
   asserts it equals `VA_OFFSET`. This checks **reality**, not just the linker's
   intent, so it also catches a loader that put us somewhere unexpected. It is a
   plain `assert_eq!`, so it is live in release too.
@@ -213,8 +213,9 @@ Details worth preserving:
   relocations) are sidestepped rather than mitigated. Confirmed by disassembly:
   the whole pre-`satp` path is `auipc`/`addi`, and `llvm-readelf -r` reports **no
   relocations in the image at all**.
-- `page_size_at(ROOT_LEVEL)` supplies the gigapage size; `WINDOW_GIGAPAGES = 4` is
-  the only tunable, and `WINDOW_END` is derived from it.
+- `page_size_at(ROOT_LEVEL)` supplies the gigapage size;
+  `CANONICAL_HALF_ENTRIES` comes from the Sv39 root geometry, and
+  `DIRECT_MAP_END` is derived from both. There is no tunable boot window.
 
 **Also fixed here (rot the previous handoff missed):** `memory/mod.rs`'s
 `KERNEL_HEAP_SIZE` comment still described the *pre-reorder* world — "the physical
@@ -340,7 +341,7 @@ the mechanism.
 
 **4. Latent split-brain: two owners for "which frames are reachable".** The table
 mapped up to `device_tree::ram_end()` while `frame::init` clamped to
-`direct_map::WINDOW_END` — the *boot* table's window, retired by then. They agreed,
+`direct_map::DIRECT_MAP_END` — the address-space limit. They agreed,
 but by parallel reasoning. Fixed by dependency inversion: `frame::owned_range()`
 publishes the physical span the allocator took (bitmap included, since the
 allocator's own `range()` excludes it), and the table maps exactly that. The
@@ -927,7 +928,7 @@ Three consequences, in descending severity:
 **Boot hart — one static stack, claimed not indexed.** `.hart_stacks` became
 `.boot_stack`, a single `STRIDE` slot. `boot.S` takes it whole with `la sp,
 _boot_stack_end`: no arithmetic, no id, nothing to be wrong about. Exactly one hart
-may have it, so the claim moved to the front — an `lr`/`sc` on `.Lboot_claim`, with
+may have it, so the claim moved to the front — an `lr`/`sc` on `_boot_claim`, with
 anything that loses parking. That subsumes §2.H's three-state BSS protocol (`0/1/2`
 plus two fences): the losers no longer proceed, so there is nothing to wait for. The
 winner zeroes `.bss` uncontended.
@@ -940,7 +941,7 @@ what Linux does with `struct sbi_hart_boot_data {task_ptr, stack_ptr}`.
 
 Secondaries also got their own entry point, `_secondary_start`, instead of re-entering
 `_start` — they have no business behind the Image header or the BSS claim. Both
-entries share one body (`.Lenable_paging`) and diverge on `t6`, so the early-table
+entries share one body (`_enable_paging`) and diverge on `t6`, so the early-table
 install and the high-half jump are still written once.
 
 #### The ordering that falls out of it
@@ -1061,7 +1062,7 @@ almost its first act: physically at entry (`lla`, since that is what the PC is),
 re-pointed at the high alias after the jump, because a secondary installs the kernel
 table and the identity mapping stops resolving.
 
-`.Ltrap_park` is deliberately a *second* loop rather than a reuse of `.Lpark`. In a
+`_trap_park` is deliberately a *second* loop rather than a reuse of `_park`. In a
 boot path with no console the program counter is the only diagnostic there is, and it
 should say which of the two happened.
 
@@ -1071,8 +1072,8 @@ the early table's 4 GiB window), with the PC read over QEMU's gdb stub:
 
 | build | parked PC | meaning |
 |---|---|---|
-| `csrw stvec` present | `0x…13c` | `.Ltrap_park` — stopped at the fault, `sepc`/`scause`/`stval` intact |
-| `csrw stvec` → `nop` | `0x…134` | `.Lpark` — **the machine had restarted** |
+| `csrw stvec` present | `0x…13c` | `_trap_park` — stopped at the fault, `sepc`/`scause`/`stval` intact |
+| `csrw stvec` → `nop` | `0x…134` | `_park` — **the machine had restarted** |
 
 The control is worth reading twice. With `stvec` at 0 the trap jumped to VA 0, which
 the early table identity-maps to QEMU virt's boot ROM, which reset to OpenSBI, which
@@ -1251,15 +1252,13 @@ optimisation and it has no observable effect until there is more than one addres
 space — which is why it was deferred, and why it should land *with* user paging
 rather than before it.
 
-### 4.3 RAM above the direct-map window
+### 4.3 RAM above the Sv39 direct-map capacity
 
-`direct_map::WINDOW_GIGAPAGES = 4` bounds what the *boot* table reaches, and
-`frame::init` clamps to it, warning loudly about anything above. Only bites on a
-machine with more than 4 GiB below the window; lifting it is a one-line change plus
-a check that the const table still fits (512 root entries, 8 in use).
-
-Note the kernel table has no such bound — it maps exactly `frame::owned_range()` —
-so this is purely a boot-phase limit.
+The boot table uses all 512 root entries: 256 identity-map the low canonical half
+and 256 mirror the same physical range in the high half. `DIRECT_MAP_END` is
+therefore 256 GiB, the architectural capacity of this Sv39 layout rather than a
+tunable boot limit. `frame::init` warns and drops RAM beyond it; supporting that
+memory requires Sv48 or a different mapping layout.
 
 ### 4.4 Nice-to-haves, in rough order of value
 
@@ -1288,9 +1287,9 @@ Struck-through items are closed; kept so the history of each is legible.
 1. ~~DTB not reserved.~~ **Done** (§2.G) — `FrameAllocator::reserve` withholds
    `0x87e00000..0x87e02000`. Note the earlier suggested fix ("allocate over it and
    never free") was **impossible**: `allocate` cannot target an address.
-2. **RAM above the direct-map window is dropped.** Warned loudly, never silently
-   truncated. Bounds the *boot* table only — the kernel table maps exactly
-   `frame::owned_range()`. One constant, `direct_map::WINDOW_GIGAPAGES`. §4.3.
+2. ~~Arbitrary 4 GiB boot-map limit.~~ **Done** (§4.3) — the Sv39 root is filled
+   completely. RAM beyond the resulting 256 GiB direct-map capacity is still
+   rejected explicitly.
 3. ~~No free-by-PFN.~~ **Done** — `deallocate_at` (§2.E). Residual sharp edge: the
    *order* passed cannot be validated, so it is `unsafe` and the token-based
    `deallocate` stays the default. `frame::free_at` hardcodes order 0, correct for
@@ -1327,7 +1326,7 @@ Struck-through items are closed; kept so the history of each is legible.
 13. **~30 pre-existing dead-code warnings** in `plic`/`utils`/`trap`/`proc`.
     Unrelated to memory; the count has not moved across six stages.
 14. ~~`stvec` undefined until `trap::init`.~~ **Done** (§2.O) — `boot.S` points it at
-    `.Ltrap_park` on entry and again after the high jump. Verified by A/B on the
+    `_trap_park` on entry and again after the high jump. Verified by A/B on the
     parked PC over the gdb stub; the control build silently *reset the machine* and
     re-parked as a duplicate boot hart.
 15. ~~Legacy SBI IPI/fence wrappers are wrong.~~ **Done** (§2.O) — deleted, not fixed.

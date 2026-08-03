@@ -1,4 +1,5 @@
-//! The kernel's direct map — `VA = PA + `[`VA_OFFSET`] for all of physical memory.
+//! The kernel's direct map — `VA = PA + `[`VA_OFFSET`] across the full physical
+//! range that fits in Sv39's high canonical half.
 //!
 //! The single source for the mapping `boot.S` installs:
 //!
@@ -7,20 +8,21 @@
 //! 2. [`EARLY_PGTABLE`] / [`EARLY_SATP_TEMPLATE`] — the boot page table and the
 //!    `satp` value that installs it, both built by `paging` at **compile time**, so
 //!    no PTE format and no translation mode appears in `boot.S`.
-//! 3. [`WINDOW_END`] — how much physical memory those mappings actually reach,
+//! 3. [`DIRECT_MAP_END`] — how much physical memory those mappings actually reach,
 //!    which is what bounds the frame allocator (see [`super::frame::init`]).
 //!
 //! # Why a *linear* map
 //!
-//! `VA = PA + VA_OFFSET` holds unconditionally, with no RAM base subtracted out,
-//! which buys two things:
+//! `VA = PA + VA_OFFSET` holds throughout [`DIRECT_MAP_END`], with no RAM base
+//! subtracted out, which buys two things:
 //!
 //! - [`super::phys_to_virt`] is a compile-time add — no runtime offset to record
 //!   and no window in which it silently returns garbage because it has not been
 //!   recorded yet.
-//! - It is valid for *every* physical address, MMIO included — skew the offset by
-//!   the RAM base and `phys_to_virt` on a device address yields a non-canonical
-//!   Sv39 address. That is what makes eventually dropping the identity map possible.
+//! - It is valid for *every* physical address in that range, MMIO included — skew
+//!   the offset by the RAM base and `phys_to_virt` on a device address yields a
+//!   non-canonical Sv39 address. That is what makes eventually dropping the
+//!   identity map possible.
 //!
 //! # Why it is `const`
 //!
@@ -34,7 +36,7 @@
 //! Because every leaf pre-sets `A`/`D`, the hardware walker never writes to the
 //! table, so it is genuinely immutable and lives in `.rodata`.
 
-use paging::sv39::{PteFlags, ROOT_LEVEL, page_size_at};
+use paging::sv39::{ENTRIES_PER_PAGE, PteFlags, ROOT_LEVEL, page_size_at};
 use paging::{PhysicalAddr, Satp, Table, VirtualAddr};
 
 /// Bottom of the Sv39 high half, and the base of the kernel's direct map.
@@ -50,27 +52,27 @@ pub const VA_OFFSET: usize = 0xffff_ffc0_0000_0000;
 /// Bytes mapped by one root-level leaf.
 const GIGAPAGE: usize = page_size_at(ROOT_LEVEL);
 
-/// Root-level leaves the boot table installs, counting up from physical 0.
+/// Root-level leaves in either canonical half of the Sv39 address space.
 ///
-/// Four is not tuning: it is the smallest window that covers low MMIO *and* the
-/// RAM base on every RISC-V platform we target, while still fitting in a table
-/// we can afford to build at compile time.
-const WINDOW_GIGAPAGES: usize = 4;
+/// The low half is the identity map and the high half is the direct map, so every
+/// root entry has one fixed role. Filling all of them costs no more memory than a
+/// partial table: an Sv39 root is always one 4 KiB page.
+const CANONICAL_HALF_ENTRIES: usize = ENTRIES_PER_PAGE / 2;
 
-/// One past the highest physical address the boot mappings reach.
+/// Exclusive end of the physical range representable by the Sv39 direct map.
 ///
-/// Frames above this are addressable through neither boot mapping, so the frame
-/// allocator must not hand them out.
-pub const WINDOW_END: PhysicalAddr = PhysicalAddr::new(WINDOW_GIGAPAGES * GIGAPAGE);
+/// Frames at or above this address have no high-half alias, so the frame allocator
+/// must not hand them out.
+pub const DIRECT_MAP_END: PhysicalAddr =
+    PhysicalAddr::new(CANONICAL_HALF_ENTRIES * GIGAPAGE);
 
 /// Permissions for a boot mapping: full access, with `A`/`D` pre-set so the
 /// hardware walker never needs to write back into the table.
-const BOOT: PteFlags =
-    PteFlags::READ_WRITE_EXECUTE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
+const BOOT: PteFlags = PteFlags::READ_WRITE_EXECUTE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
 
 /// Build the early page table at compile time.
 ///
-/// Each of the low [`WINDOW_GIGAPAGES`] gigapages of physical memory is mapped
+/// Each physical gigapage that fits in one canonical half is mapped
 /// **twice**:
 ///
 /// - *identity*, so the instruction stream survives the `csrw satp` that turns
@@ -85,7 +87,7 @@ const BOOT: PteFlags =
 const fn early_table() -> Table {
     let mut table = Table::new();
     let mut i = 0;
-    while i < WINDOW_GIGAPAGES {
+    while i < CANONICAL_HALF_ENTRIES {
         let pa = PhysicalAddr::new(i * GIGAPAGE);
         table.map_gigapage(VirtualAddr::new(i * GIGAPAGE), pa, BOOT);
         table.map_gigapage(VirtualAddr::new(VA_OFFSET + i * GIGAPAGE), pa, BOOT);

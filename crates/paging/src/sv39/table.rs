@@ -89,14 +89,13 @@ mod tests {
     const BOOT: PteFlags =
         PteFlags::READ_WRITE_EXECUTE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
 
-    /// Build a boot-style table **at compile time**: the low 4 GiB identity
-    /// mapped, and mirrored into the high half. This is the shape the early
-    /// boot table needs, and evaluating it here proves it costs nothing at run
-    /// time and requires no allocator.
+    /// Build a boot-style table **at compile time**: the full low canonical half
+    /// identity mapped, and mirrored into the high half. Evaluating it here proves
+    /// it costs nothing at run time and requires no allocator.
     const fn early_table() -> Table {
         let mut table = Table::new();
         let mut i = 0;
-        while i < 4 {
+        while i < ENTRIES_PER_PAGE / 2 {
             let pa = PhysicalAddr::new(i * GIGAPAGE);
             table.map_gigapage(VirtualAddr::new(i * GIGAPAGE), pa, BOOT);
             table.map_gigapage(VirtualAddr::new(HIGH_BASE + i * GIGAPAGE), pa, BOOT);
@@ -128,7 +127,7 @@ mod tests {
         let high_index = VirtualAddr::new(HIGH_BASE).vpn(ROOT_LEVEL);
         assert_eq!(high_index, 256, "high half begins at root entry 256");
 
-        for i in 0..4usize {
+        for i in 0..ENTRIES_PER_PAGE / 2 {
             let expected = PhysicalAddr::new(i * GIGAPAGE);
 
             let identity = EARLY.entries[i];
@@ -141,9 +140,10 @@ mod tests {
             assert_eq!(high.flags(), BOOT | PteFlags::VALID, "high-half entry {i} lost flags");
         }
 
-        // Everything outside the two mapped windows stays invalid.
-        assert!(!EARLY.entries[4].is_valid(), "gap above the identity window must be unmapped");
-        assert!(!EARLY.entries[high_index - 1].is_valid(), "gap below the high half must be unmapped");
+        assert!(
+            EARLY.entries.iter().all(|entry| entry.is_valid()),
+            "the two canonical halves must fill the root table"
+        );
     }
 
     #[test]

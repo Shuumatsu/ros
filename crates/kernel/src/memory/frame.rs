@@ -80,26 +80,21 @@ impl Frames {
 /// Bring the allocator up over free physical RAM `[free_start, ram_end)`.
 ///
 /// The bitmap is reserved from the front of the range and excluded from the
-/// managed frames. RAM above the window `boot.S` maps is dropped (loudly),
-/// because its frames would not be addressable through either boot mapping.
+/// managed frames. RAM beyond the Sv39 direct-map capacity is dropped (loudly),
+/// because its frames would have no high-half alias.
 pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr) {
-    // Frames past the boot mappings are unreachable and must not be handed out. The
-    // bound comes from the module that *builds* those mappings.
-    let window_end = crate::memory::direct_map::WINDOW_END;
-    // The window is absolute (from PA 0), not RAM-relative, so state the case it cannot
-    // serve rather than letting `FrameRange::new` below fail with a confusing "range
-    // empty after alignment".
+    let direct_map_end = crate::memory::direct_map::DIRECT_MAP_END;
     assert!(
-        free_start < window_end,
-        "kernel image top {free_start:#x} lies outside the {window_end:#x} boot mapping window; \
-         the direct map does not reach this platform's RAM (see memory::direct_map)"
+        free_start < direct_map_end,
+        "kernel image top {free_start:#x} lies outside the Sv39 direct map ending at \
+         {direct_map_end:#x}"
     );
-    let usable_end = ram_end.min(window_end);
-    if ram_end > window_end {
+    let usable_end = ram_end.min(direct_map_end);
+    if ram_end > direct_map_end {
         println!(
-            "[memory] WARNING: {} of RAM above the {:#x} boot window is unmanaged",
-            crate::utils::ByteSize(ram_end.sub_addr(window_end)),
-            window_end
+            "[memory] WARNING: {} of RAM above the {:#x} Sv39 direct-map limit is unmanaged",
+            crate::utils::ByteSize(ram_end.sub_addr(direct_map_end)),
+            direct_map_end
         );
     }
 
