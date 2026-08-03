@@ -66,7 +66,10 @@ unsafe extern "C" fn secondary_start(hartid: usize) -> ! {
     // Before the log line, not after: this is what `start_secondaries` waits on, and
     // the console is far slower than that wait needs to be.
     cpu::record_online();
-    println!("[smp] hart {hartid} online on the kernel page table");
+    println!(
+        "[smp] hart {hartid} (cpu {}) online on the kernel page table",
+        cpu::current().index()
+    );
 
     // No trap init on any hart, boot or secondary: the trap subsystem is parked in
     // `crates/kernel/attic/trap/` while the boot and memory-init path is finalised.

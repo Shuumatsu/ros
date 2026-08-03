@@ -1,16 +1,8 @@
 pub mod interrupts;
 pub mod sbi;
 
-use core::arch::asm;
-
-#[inline(always)]
-pub fn hart_id() -> usize {
-    let hart_id: usize;
-    unsafe {
-        asm!("mv {0}, tp", out(reg) hart_id, options(nomem, nostack));
-    }
-    hart_id
-}
+// Hart identity lives in `cpu`: `tp` points at a per-hart control block, and
+// reading a field out of it is that module's business, not the ISA layer's.
 
 /// Park this hart for good. The one parking primitive: `abort` and both `kmain`s
 /// call it rather than open-coding the loop.

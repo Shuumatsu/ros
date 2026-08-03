@@ -2,7 +2,8 @@ use core::fmt::{self, Write};
 use spin::Mutex;
 use uart_16550::MmioSerialPort;
 
-use crate::arch::riscv64::{hart_id, interrupts, sbi};
+use crate::arch::riscv64::{interrupts, sbi};
+use crate::cpu::hart_id;
 use crate::device_tree;
 
 /// The primary MMIO UART, bound to the device-tree base the first time we print

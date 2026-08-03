@@ -4,6 +4,84 @@ use crate::arch::riscv64::sbi;
 use crate::memory::{kernel_table, layout, stack, virt_to_phys};
 use crate::println;
 
+/// Per-hart control block. `tp` points at this hart's.
+///
+/// Following Linux, which keeps a pointer here rather than a bare id: `tp` is the
+/// one register that is per-hart for free, so spending it on an integer we were
+/// already handed in `a0` means every future piece of per-hart state needs a new
+/// home and a new lookup.
+///
+/// # Layout is load-bearing
+///
+/// `boot.S` reads and writes this in assembly before there is a stack to run Rust
+/// on, by fixed offset. The `offset_of!` assertions below are what keep the two in
+/// step; reorder a field and the build fails rather than the boot.
+///
+/// Fields are atomics because `boot.S` writes `hartid` from assembly while Rust
+/// holds a shared reference to the same block.
+#[repr(C)]
+pub struct Cpu {
+    /// Top of this hart's stack. **Offset 0**: `boot.S` loads `sp` from here, which
+    /// is why the whole block can travel in SBI's single `opaque` word.
+    stack_top: AtomicUsize,
+    /// Physical hart id from the SBI boot protocol. Sparse — never an array index.
+    hartid: AtomicUsize,
+    /// Dense logical index, `0..cpus`. This is the array subscript; `hartid` is not.
+    index: AtomicUsize,
+}
+
+const _: () = assert!(core::mem::offset_of!(Cpu, stack_top) == 0, "boot.S loads sp from 0(tp)");
+const _: () = assert!(core::mem::offset_of!(Cpu, hartid) == 8, "boot.S stores a0 to 8(tp)");
+
+impl Cpu {
+    const fn new() -> Self {
+        Self {
+            stack_top: AtomicUsize::new(0),
+            hartid: AtomicUsize::new(0),
+            index: AtomicUsize::new(0),
+        }
+    }
+
+    /// Physical hart id, for SBI calls and diagnostics.
+    pub fn hartid(&self) -> usize {
+        self.hartid.load(Ordering::Relaxed)
+    }
+
+    /// Dense logical index, for anything array-shaped.
+    pub fn index(&self) -> usize {
+        self.index.load(Ordering::Relaxed)
+    }
+}
+
+/// Upper bound on harts this kernel will run. Matches what the device tree module
+/// will report; the blocks are `.bss`, so the whole array costs 1.5 KiB.
+const MAX_CPUS: usize = 64;
+
+/// Every hart's control block. Slot 0 is the boot hart's — `boot.S` points its `tp`
+/// straight at this symbol, so slot 0 must stay first.
+#[unsafe(no_mangle)]
+static KERNEL_CPUS: [Cpu; MAX_CPUS] = [const { Cpu::new() }; MAX_CPUS];
+
+/// This hart's control block.
+///
+/// # Panics
+/// If `tp` is null, which means `boot.S` did not point it at a block before
+/// entering Rust.
+pub fn current() -> &'static Cpu {
+    let tp: usize;
+    // SAFETY: reading a register.
+    unsafe { core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack)) };
+    assert!(tp != 0, "tp is null: boot.S must point it at a Cpu block before calling Rust");
+    // SAFETY: `boot.S` sets `tp` from `KERNEL_CPUS`, either slot 0 directly or a slot
+    // address the boot hart passed through SBI's `opaque`. Both are `'static`.
+    unsafe { &*(tp as *const Cpu) }
+}
+
+/// This hart's physical id. Every `[hart N]` console prefix comes from here.
+pub fn hart_id() -> usize {
+    current().hartid()
+}
+
 /// Sentinel for "no hart has recorded the boot role yet".
 ///
 /// A boot hart whose id really were `usize::MAX` would be reported as unrecorded.
@@ -18,26 +96,20 @@ static BOOT_HART: AtomicUsize = AtomicUsize::new(UNCLAIMED);
 /// Secondary harts that have reached [`crate::start::secondary_start`].
 static ONLINE: AtomicUsize = AtomicUsize::new(0);
 
-/// Reconcile the two carriers of "which hart am I", and adopt the id.
+/// Reconcile the two carriers of "which hart am I".
 ///
 /// Every hart calls this once, first thing, boot or secondary.
 ///
 /// The SBI boot protocol hands the id in `a0`, which arrives as the `hartid`
-/// argument. `boot.S` also copies it into `tp`, which is what
-/// [`crate::arch::riscv64::hart_id`] reads and therefore where every `[hart N]`
-/// console prefix comes from. One value, two carriers.
-///
-/// `cpu` owns hart identity and the `tp` convention answers to it. Without this
-/// check, repurposing `tp` — the obvious next step is a pointer to a per-hart
-/// control block, which is where Linux keeps it — would make every log line and
-/// every `hart_id()` caller silently report garbage while `BOOT_HART` kept
-/// reporting the truth. Nothing would fail and nothing would assert.
+/// argument. `boot.S` also stores it into this hart's [`Cpu`] block, which is what
+/// [`hart_id`] reads and therefore where every `[hart N]` console prefix comes from.
+/// One value, two carriers; this is what stops them drifting apart silently.
 pub fn adopt(hartid: usize) {
-    let from_tp = crate::arch::riscv64::hart_id();
+    let from_block = current().hartid();
     assert_eq!(
-        hartid, from_tp,
-        "hart id disagreement: the SBI boot protocol says {hartid}, tp says {from_tp}. \
-         boot.S must keep `mv tp, a0` in step with what it passes to the entry point"
+        hartid, from_block,
+        "hart id disagreement: the SBI boot protocol says {hartid}, this hart's Cpu \
+         block says {from_block}. boot.S must store a0 into 8(tp) on both entry paths"
     );
 }
 
@@ -118,9 +190,10 @@ pub fn secondary_hart_ids() -> impl Iterator<Item = usize> {
 ///   with `satp = 0` — translation off — so this cannot be a Rust function at a high
 ///   virtual address, and it is not `_start` either: that entry is the boot hart's,
 ///   with the image header and the one-time BSS zeroing behind it.
-/// - `opaque`, which lands in the hart's `a1`, is the top of the stack allocated for
-///   it. The hart computes no address of its own; see [`crate::memory::stack`] for
-///   why deriving one from a hart id was the bug this replaced.
+/// - `opaque`, which lands in the hart's `a1`, is the address of its [`Cpu`] block,
+///   already filled in with the stack top and logical index. One word carries both
+///   because `stack_top` is the block's first field, so `boot.S` can load `sp` from
+///   `0(tp)`. The hart computes no address of its own.
 pub fn start_secondaries() {
     let entry = virt_to_phys(layout::secondary_entry());
     // Not a wait: the value only exists because the table is live, and it is what
@@ -131,8 +204,16 @@ pub fn start_secondaries() {
         "no kernel page table published; start_secondaries ran before memory::init"
     );
 
+    // Slot 0 belongs to the boot hart, so secondaries start at 1.
     let mut requested = 0;
-    for &stack::Secondary { hart, stack } in stack::secondaries() {
+    for (slot, &stack::Secondary { hart, stack }) in
+        (1..).zip(stack::secondaries())
+    {
+        assert!(
+            slot < MAX_CPUS,
+            "machine reports more than {MAX_CPUS} harts; raise MAX_CPUS"
+        );
+        let block = &KERNEL_CPUS[slot];
         // Ask first. "Already started" and "no such hart" are different problems, and
         // a bare error code from hart_start would not distinguish them.
         match sbi::hart_get_status(hart) {
@@ -160,10 +241,21 @@ pub fn start_secondaries() {
             stack.top()
         );
 
-        match sbi::hart_start(hart, entry, stack.top()) {
+        // Fill the block before the hart can reach it. `boot.S` loads `sp` from
+        // `stack_top` as its first act, so this store has to be visible first;
+        // `hart_start` is an `ecall` through the firmware, which orders it.
+        block.stack_top.store(stack.top(), Ordering::Relaxed);
+        block.index.store(slot, Ordering::Relaxed);
+        block.hartid.store(hart, Ordering::Release);
+
+        let opaque = block as *const Cpu as usize;
+        match sbi::hart_start(hart, entry, opaque) {
             Ok(()) => {
                 requested += 1;
-                println!("[smp] started hart {hart} at {entry:#x}, stack top {:#x}", stack.top())
+                println!(
+                    "[smp] started hart {hart} (cpu {slot}) at {entry:#x}, stack top {:#x}",
+                    stack.top()
+                )
             }
             Err(error) => println!("[smp] hart {hart} failed to start: {error}"),
         }

@@ -63,7 +63,10 @@ _secondary_start:
     # LINKED at high VAs, so until paging is on we may only use PC-relative
     # addressing (lla) — never an absolute symbol load. a0/a1 are preserved
     # untouched until the call at the end.
-    mv      tp, a0              # hart_id() reads tp
+    # tp is NOT set here. It holds a pointer to this hart's cpu::Cpu block, and both
+    # KERNEL_CPUS and a secondary's block address are only reachable once paging is
+    # on and we are running high. Each path sets it after the jump; nothing between
+    # here and there reads it.
 
     # ---- A trap vector, before anything can trap ----
     # stvec is UNDEFINED at hart entry: the firmware does not set it, so an exception
@@ -173,6 +176,13 @@ _secondary_start:
     # the bottom.
     la      sp, _boot_stack_end
 
+    # ---- This hart's control block ----
+    # Slot 0 of KERNEL_CPUS is the boot hart's by definition, so the array symbol is
+    # the block address. Record a0 in it: cpu::hart_id() reads that field, and it has
+    # to be right before the first println!, which happens well before start().
+    la      tp, KERNEL_CPUS
+    sd      a0, 8(tp)           # Cpu.hartid — offset asserted in cpu/mod.rs
+
     # start(hartid = a0, dtb = a1, measured va_offset = a2)
     call    start
     # start() is `-> !`, so reaching here means something is already badly wrong.
@@ -202,7 +212,13 @@ _secondary_start:
     sfence.vma                  # identity mapping is gone from here on; the PC is
                                 # high, which the kernel table maps
 
-    mv      sp, a1              # the stack top the boot hart chose for us
+    # ---- This hart's control block, and the stack inside it ----
+    # a1 is the SBI `opaque` the boot hart passed: the address of this hart's
+    # cpu::Cpu block, already filled in. stack_top is its first field, which is what
+    # lets one opaque word carry both. Offsets are asserted in cpu/mod.rs.
+    mv      tp, a1
+    ld      sp, 0(tp)           # Cpu.stack_top
+    sd      a0, 8(tp)           # Cpu.hartid
 
     # secondary_start(hartid = a0)
     call    secondary_start
