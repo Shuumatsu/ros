@@ -11,6 +11,17 @@
 
 .section .text.init
 
+# The linker assigns every symbol a high-half virtual address, but gives each section
+# a physical load address through `AT(VMA - VA_OFFSET)`. Firmware loads the image at
+# that physical address and enters it in S-mode with satp disabled, so the first
+# instructions execute from the low physical alias even though their symbols are high.
+#
+# Consequently, all accesses before paging use PC-relative `lla`. The early page table
+# maps the image at both its physical and linked addresses: the identity mapping keeps
+# the next instruction valid after satp is written, then the explicit jump to
+# `_high_entry` moves execution to the linked high-half alias. Only after that jump may
+# the kernel initialize gp and enter Rust using normal linked addresses.
+
 # ---------------------------------------------------------------------------
 # RISC-V Linux Image header (64 bytes), per Documentation/riscv/boot-image-header.rst.
 # A loader enters the image at offset 0, so code0 jumps past the header.
@@ -51,57 +62,34 @@ _secondary_start:
     li      t6, 1               # t6 = 1: take the secondary path below
 
 _enable_paging:
-    # We execute at the PHYSICAL load address (~0x8020_0040) but the kernel is LINKED
-    # high, so until paging is on only PC-relative addressing (lla) is valid — never an
-    # absolute symbol load. a0/a1 stay untouched until the call at the end.
-    #
-    # tp is not set here: it points at this hart's cpu::Cpu block, and neither
-    # KERNEL_CPUS nor a secondary's block is reachable until we are running high.
-
-    # ---- A trap vector, before anything can trap ----
-    # stvec is UNDEFINED at hart entry, so a fault before this point jumps to whatever
-    # the register happens to hold. Point it at a parking loop instead, which stops the
-    # hart with sepc/scause/stval intact.
-    #
-    # Physical, because that is what the PC is. Re-pointed at the high alias after the
-    # jump below, since the kernel table has no identity mapping. The low two bits of
-    # stvec are MODE, so the target must be 4-byte aligned; 0 = Direct.
+    # Install a physical trap target for faults during the paging transition.
     lla     t0, _trap_park
     csrw    stvec, t0
 
-    # ---- Install the early page table ----
-    # The table is const-built in Rust (memory::direct_map) and loaded as ordinary
-    # data, so no PTE format, RAM base or translation mode appears here — this only
-    # points satp at it. Pre-paging the PC is physical and the image's VMA-LMA skew is
-    # uniform, so `lla` yields both PHYSICAL addresses.
-    lla     t0, EARLY_PGTABLE   # PA of the root table
+    # Enable Sv39 using EARLY_PGTABLE as the root page table.
+    # satp stores its physical page number, so remove the 12-bit 4 KiB page offset.
+    lla     t0, EARLY_PGTABLE
     lla     t1, EARLY_SATP_TEMPLATE
-    ld      t1, 0(t1)           # MODE=Sv39, ASID=0, PPN=0 — composed by `paging`
-    srli    t2, t0, 12          # satp.PPN = the table's page number: the one
-    or      t1, t1, t2          #   field a const cannot know (a link-time fact)
+    ld      t1, 0(t1)           # Sv39 mode with an empty root-table PPN
+    srli    t2, t0, 12          # Root-table physical page number
+    or      t1, t1, t2          # Sv39 mode | root-table PPN
     csrw    satp, t1
-    sfence.vma                  # new translation active; PC still physical,
-                                # kept alive by the identity half of the map
+    sfence.vma
 
-    # ---- Jump high ----
-    # The linker knows this continuation's virtual address; subtracting the physical
-    # address we actually reached it at yields the real VA - PA skew. That goes to
-    # start() purely as a cross-check against direct_map::VA_OFFSET, which the linker
-    # cannot read — translation no longer depends on measuring it.
+    # Jump to the linked high-half address. Pass the measured VA-to-PA offset to
+    # Rust so it can verify the configured direct-map offset.
     lla     t0, _high_entry_ptr
-    ld      t1, 0(t0)           # t1 = VMA(_high_entry)  (linker-provided high VA)
-    lla     t0, _high_entry     # t0 = PMA(_high_entry)  (where we actually are)
-    sub     a2, t1, t0          # a2 = measured VA - PA  -> start()'s 3rd arg
-    jr      t1                  # enter the high half
+    ld      t1, 0(t0)           # Linked virtual address of _high_entry
+    lla     t0, _high_entry     # Current physical address of _high_entry
+    sub     a2, t1, t0
+    jr      t1
 .balign 8
 _high_entry_ptr:
     .dword  _high_entry
 _high_entry:
-    la      gp, _global_pointer # high gp (norelax above keeps this absolute-safe)
+    la      gp, _global_pointer
 
-    # The same parking loop, now by its linked address. The physical one dies with the
-    # identity mapping when a secondary installs the kernel table, so it has to be
-    # re-pointed while both still resolve.
+    # Use the high-half trap target before the identity mapping is removed.
     la      t0, _trap_park
     csrw    stvec, t0
 

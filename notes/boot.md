@@ -74,7 +74,7 @@ the frame allocator physical bounds while the heap lives at high VAs).
 **There is no trap handler and no timer right now.** The whole subsystem was moved
 out of the crate to `crates/kernel/attic/trap/` while boot and memory init are being
 finalised; that directory's README says why and what has to happen before it returns.
-`stvec` stays on `boot.S`'s `.Ltrap_park` for the life of the kernel, so any trap
+`stvec` stays on `boot.S`'s `_trap_park` for the life of the kernel, so any trap
 parks the faulting hart with `scause`/`sepc`/`stval` intact. `sstatus.SIE` is never
 set and no interrupt source is enabled, which makes the `wfi` loops in `kmain` /
 `kmain_ap` true halts rather than idles.

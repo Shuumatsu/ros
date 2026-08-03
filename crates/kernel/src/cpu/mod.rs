@@ -269,7 +269,7 @@ pub fn start_secondaries() {
 ///
 /// `hart_start` returning `Ok` means only that the firmware *accepted* the request —
 /// the hart is `StartPending`. Without confirming arrival, a secondary that faults
-/// inside `boot.S` (a bad stack mapping, say) parks in `.Ltrap_park` forever while
+/// inside `boot.S` (a bad stack mapping, say) parks in `_trap_park` forever while
 /// the boot hart continues and `kmain` prints its success line: a boot with N-1 dead
 /// harts is indistinguishable from a good one.
 ///

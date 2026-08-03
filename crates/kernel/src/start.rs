@@ -47,7 +47,7 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
     cpu::start_secondaries();
 
     // No trap init here — see the note on `secondary_start`. `stvec` still points at
-    // `boot.S`'s `.Ltrap_park`.
+    // `boot.S`'s `_trap_park`.
 
     // Already in S-mode — go straight into the kernel.
     unsafe { kmain() }
@@ -74,7 +74,7 @@ unsafe extern "C" fn secondary_start(hartid: usize) -> ! {
     // No trap init on any hart, boot or secondary: the trap subsystem is parked in
     // `crates/kernel/attic/trap/` while the boot and memory-init path is finalised.
     //
-    // `stvec` is not left undefined. `boot.S` points every hart at `.Ltrap_park`
+    // `stvec` is not left undefined. `boot.S` points every hart at `_trap_park`
     // before Rust runs and re-points it at the high alias after the jump, so a trap
     // stops the faulting hart deterministically with `scause`/`sepc`/`stval` intact.
     // In this phase every trap is a bug, and a handler could do nothing about it

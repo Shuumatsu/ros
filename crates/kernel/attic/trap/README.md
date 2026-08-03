@@ -13,7 +13,7 @@ moving, and would have implied a level of correctness it does not have — see t
 defects below. Commenting out the bodies would have been worse: that is what version
 control is for.
 
-Nothing was lost in the move. `boot.S` points every hart's `stvec` at `.Ltrap_park`
+Nothing was lost in the move. `boot.S` points every hart's `stvec` at `_trap_park`
 before any Rust runs, and re-points it at the high alias after the jump to high VAs.
 So a trap in the current kernel stops the faulting hart deterministically with
 `scause`/`sepc`/`stval` intact. For a boot path with no console guarantees that is
