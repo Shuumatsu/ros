@@ -1,0 +1,57 @@
+//! Printing the resolved device map.
+//!
+//! Reads only the stored table — no re-parse — so printing is fully decoupled from
+//! discovery. Kept in its own file because reporting is the one part of this module
+//! that must run *after* the console exists, while everything else must run before.
+
+use super::table;
+use crate::utils::ByteSize;
+
+/// Print the resolved device map. Call once the console is up, i.e. after
+/// [`super::init`] (which is what backs the console with the real UART).
+pub fn summary() {
+    let Some(table) = table::get() else {
+        println!("[dtb] not parsed");
+        return;
+    };
+
+    // Size included so the frame reservation in `memory::frame` can be checked
+    // against it straight from the boot log.
+    println!("[dtb] blob at {:#x} (size {:#x})", table.blob.base, table.blob.size);
+    println!(
+        "[dtb] ram:   {:#x}..{:#x} ({})",
+        table.ram.base,
+        table.ram.end,
+        ByteSize(table.ram.end - table.ram.base)
+    );
+
+    let device = |what: &str, dev: &table::Device| match dev.irq {
+        Some(irq) => println!("[dtb] {what}: {:#x} (size {:#x}, irq {irq})", dev.base, dev.size),
+        None => println!("[dtb] {what}: {:#x} (size {:#x})", dev.base, dev.size),
+    };
+    device("uart ", &table.uart);
+    if let Some(plic) = &table.plic {
+        device("plic ", plic);
+    }
+    if let Some(clint) = &table.clint {
+        device("clint", clint);
+    }
+
+    // Unconditional. A misplaced brace used to nest these inside the CLINT check, so
+    // on a platform without a `riscv,clint0` node — QEMU's own
+    // `-machine virt,aclint=on`, for one — the counts saying how much of the tree we
+    // understood vanished, gated on an unrelated device.
+    println!(
+        "[dtb] mmio:  {} windows, {} foreign RAM ranges",
+        table.mmio.len(),
+        table.foreign.len()
+    );
+    println!("[dtb] harts: {:?} (ids as reported, not a count)", table.hart_ids);
+    match table.timebase_hz {
+        Some(hz) => println!("[dtb] timebase: {hz} Hz"),
+        None => println!("[dtb] timebase: absent (bounded waits will be skipped)"),
+    }
+    if table.disabled > 0 {
+        println!("[dtb] skipped {} node(s) whose status is not okay", table.disabled);
+    }
+}
