@@ -1,14 +1,12 @@
 //! The kernel's direct map — `VA = PA + `[`VA_OFFSET`] for all of physical memory.
 //!
-//! This module is the single source for the mapping `boot.S` installs. Three
-//! facts used to be spread across assembly, the linker script and `frame.rs`,
-//! each re-deriving them its own way; they live here now:
+//! The single source for the mapping `boot.S` installs:
 //!
-//! 1. [`VA_OFFSET`] — the direct-map base. Mirrored by `kernel.ld`'s
-//!    `_va_offset`, and checked against reality at boot by [`verify`].
+//! 1. [`VA_OFFSET`] — the direct-map base. Mirrored by `kernel.ld`'s `_va_offset`,
+//!    and checked against reality at boot by [`verify`].
 //! 2. [`EARLY_PGTABLE`] / [`EARLY_SATP_TEMPLATE`] — the boot page table and the
-//!    `satp` value that installs it, both built by `paging` at **compile time**,
-//!    so no PTE format and no translation mode appears in `boot.S`.
+//!    `satp` value that installs it, both built by `paging` at **compile time**, so
+//!    no PTE format and no translation mode appears in `boot.S`.
 //! 3. [`WINDOW_END`] — how much physical memory those mappings actually reach,
 //!    which is what bounds the frame allocator (see [`super::frame::init`]).
 //!
@@ -20,12 +18,9 @@
 //! - [`super::phys_to_virt`] is a compile-time add — no runtime offset to record
 //!   and no window in which it silently returns garbage because it has not been
 //!   recorded yet.
-//! - It is valid for *every* physical address, MMIO included. The predecessor
-//!   skewed the offset by the RAM base (`0xffffffbf80000000`), so
-//!   `phys_to_virt(0x1000_0000)` — the UART — produced `0xffffffbf90000000`,
-//!   which is not even a canonical Sv39 address. It never faulted only because
-//!   nothing called it on a device address. That trap is now gone, which is what
-//!   makes eventually dropping the identity map possible.
+//! - It is valid for *every* physical address, MMIO included — skew the offset by
+//!   the RAM base and `phys_to_virt` on a device address yields a non-canonical
+//!   Sv39 address. That is what makes eventually dropping the identity map possible.
 //!
 //! # Why it is `const`
 //!
@@ -44,9 +39,8 @@ use paging::{PhysicalAddr, Satp, Table, VirtualAddr};
 
 /// Bottom of the Sv39 high half, and the base of the kernel's direct map.
 ///
-/// Duplicated in `kernel.ld` as `_va_offset` out of necessity — the linker
-/// cannot read a Rust `const`, and parsing the linker script from a `build.rs`
-/// trades this for worse glue. [`verify`] is what keeps the duplicate honest.
+/// Duplicated in `kernel.ld` as `_va_offset` out of necessity — the linker cannot read
+/// a Rust `const`. [`verify`] is what keeps the duplicate honest.
 pub const VA_OFFSET: usize = 0xffff_ffc0_0000_0000;
 
 /// Bytes mapped by one root-level leaf.
@@ -62,8 +56,7 @@ const WINDOW_GIGAPAGES: usize = 4;
 /// One past the highest physical address the boot mappings reach.
 ///
 /// Frames above this are addressable through neither boot mapping, so the frame
-/// allocator must not hand them out. This is the constant `frame.rs` used to
-/// re-derive as `device_tree::ram_base() + 1 GiB`.
+/// allocator must not hand them out.
 pub const WINDOW_END: usize = WINDOW_GIGAPAGES * GIGAPAGE;
 
 /// Permissions for a boot mapping: full access, with `A`/`D` pre-set so the

@@ -8,12 +8,9 @@
 //! ([`FrameSource`], [`PhysAccess`]) so it never depends on the kernel's choice
 //! of either.
 //!
-//! # Validation happens at the choke point
-//!
 //! [`Region::install`] refuses a region before writing any PTE — W^X and page
-//! alignment both. Putting the checks *there* rather than in a separate pass over
-//! the list means no caller can forget to run them: there is exactly one way to
-//! turn a `Region` into mappings, and it is the way that validates.
+//! alignment both. Validating *there* rather than in a separate pass means no caller
+//! can forget: there is exactly one way to turn a `Region` into mappings.
 
 use paging::sv39::{FrameSource, PhysAccess, page_size_at};
 use paging::{MapError, Mapper, PhysicalAddr, PteFlags, VirtualAddr};
@@ -68,11 +65,9 @@ impl Region {
 
     /// Reject a region the kernel must never install.
     ///
-    /// Alignment matters more than it looks: [`Mapper::map_range_at_level`] rounds
-    /// outward, so a misaligned superpage region would quietly pull in its
-    /// neighbourhood — which for this kernel means OpenSBI's memory, whose PMP
-    /// entry denies supervisor access. Refuse it loudly instead of mapping the
-    /// wrong span.
+    /// [`Mapper::map_range_at_level`] rounds outward, so a misaligned superpage region
+    /// would quietly pull in its neighbourhood — which for this kernel means OpenSBI's
+    /// memory, whose PMP entry denies supervisor access.
     fn validate(&self) {
         let writable = self.flags.contains(PteFlags::WRITE);
         let executable = self.flags.contains(PteFlags::EXECUTE);
@@ -124,7 +119,7 @@ impl Region {
     /// Walk every page of this region and require it to be exactly what was asked
     /// for: right level, right rights, right frame.
     ///
-    /// Every page, not a sample. This runs once at boot, and a wrong leaf anywhere
+    /// Every page, not a sample — this runs once at boot, and a wrong leaf anywhere
     /// is either a fault or a silent protection hole.
     pub fn audit<F: FrameSource, A: PhysAccess>(&self, mapper: &Mapper<'_, F, A>) {
         if self.is_empty() {
@@ -163,19 +158,15 @@ impl Region {
 
 /// Print a region list as a memory map.
 ///
-/// Worth the lines: it puts the protection policy in the boot log, where it can be
-/// read off a failing run, instead of leaving it to be inferred from the source.
-/// The rights come from [`PteFlags::rwx`] rather than being spelled out here.
+/// Puts the protection policy in the boot log, where it can be read off a failing run.
+/// The rights come from [`PteFlags::rwx`].
 ///
 /// A run of adjacent regions sharing a name **and a page size** is collapsed into one
-/// line with the run's total page count and a `xN` marker. That is not cosmetic:
-/// secondary hart stacks are one region each — which is what leaves their guard pages
-/// unmapped — so a big machine would otherwise bury everything else under one line
-/// per hart.
-///
-/// The page size has to match too, or the total is a lie. Collapsing on name alone
-/// summed 4 KiB and 2 MiB device windows into "271 x 4KiB", which understated the
-/// mapping by two orders of magnitude.
+/// line with the run's total page count and a `xN` marker: secondary hart stacks are
+/// one region each, so a big machine would otherwise bury everything else under one
+/// line per hart. The page size has to match too, or the total is a lie — collapsing
+/// 4 KiB and 2 MiB device windows into one count understates the mapping by orders of
+/// magnitude.
 pub fn report(regions: &[Region]) {
     let mut index = 0;
     while index < regions.len() {
@@ -185,14 +176,11 @@ pub fn report(regions: &[Region]) {
             continue;
         }
 
-        // Consume the run of regions this one is genuinely contiguous with.
-        //
-        // Every field here is load-bearing; dropping any one makes the line a lie.
-        // Without the address checks, scattered MMIO windows sharing a name collapse
-        // into "11 x 4 KiB" printed against one of their bases, reading as a single
-        // contiguous mapping. Without `flags`, a run mixing rights shows the first
-        // region's for all of them — in a log whose purpose is to put the protection
-        // policy where a failing boot can be read off it.
+        // Consume the run of regions this one is genuinely contiguous with. Every
+        // field below is load-bearing: without the address checks, scattered MMIO
+        // windows sharing a name collapse into one line printed against one of their
+        // bases, reading as a single contiguous mapping; without `flags`, a run mixing
+        // rights shows the first region's for all of them.
         let page_size = region.page_size();
         let mut run = 1;
         let mut pages = region.pages();

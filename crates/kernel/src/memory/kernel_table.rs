@@ -11,22 +11,12 @@
 //!
 //! # Nothing here decides a fact it can look up
 //!
-//! Every input is owned by whoever actually knows it:
-//!
 //! | Fact | Owner |
 //! |---|---|
 //! | section bounds | the linker, via [`layout`] |
 //! | where device memory is | the device tree, via [`crate::device_tree::mmio_regions`] |
 //! | which physical memory is ours | [`frame::owned_range`] |
 //! | the direct-map base | [`super::direct_map::VA_OFFSET`] |
-//!
-//! The device list has been wrong twice, in opposite directions, so it is worth
-//! recording both. First this module mapped "the low gigabyte" as one gigapage,
-//! justified by a comment listing the QEMU virt addresses — a coarser second
-//! encoding of what the DTB already said. Then `mmio_regions()` replaced it but
-//! returned only UART, PLIC and CLINT while *claiming* to be every window, which
-//! left a future driver nowhere to look up its own. It is now a real walk of the
-//! tree, and this maps all of it.
 //!
 //! # No identity mapping
 //!
@@ -93,23 +83,16 @@ const READ_EXEC: PteFlags = PteFlags::READ_EXECUTE.union(PteFlags::ACCESS);
 const READ_WRITE: PteFlags =
     PteFlags::READ_WRITE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
 
-// No MAX_REGIONS. The count is four sections, one boot stack, one per secondary
-// hart the machine reports, three direct-map pieces and however many MMIO windows
-// the device tree happens to describe — a bound would be a hand-computed composite
-// of all five, in the same class as the `0x110000` that used to sit in kernel.ld,
-// and it would silently become too small the moment any of them grew. Two of the
-// five are runtime facts now, so it could not even be written. The heap is already
-// up by the time this runs (`super::init` adds it before calling here), so the list
-// simply grows.
+// No MAX_REGIONS. The count is four sections, one boot stack, one per secondary hart
+// the machine reports, three direct-map pieces and however many MMIO windows the device
+// tree describes; two of those are runtime facts, so the bound could not even be
+// written. The heap is up by the time this runs, so the list simply grows.
 
 /// The largest page-table level that can tile `[base, base + len)` exactly.
 ///
 /// "Exactly" is the requirement, not "approximately": a superpage rounds outward, so
 /// using one that does not divide the window would map whatever sits next to the
 /// device. Both the base and the length must be multiples of the page size.
-///
-/// This is why big apertures are affordable — QEMU virt's PCI ECAM is 256 MiB, which
-/// is 128 superpages rather than 65536 pages.
 fn largest_level_for(base: usize, len: usize) -> usize {
     (0..LEVELS)
         .rev()
@@ -150,23 +133,20 @@ fn regions() -> Vec<Region> {
 
     // ---- Device memory, exactly as the device tree describes it ----
     //
-    // Direct map only, no identity alias: everything that touches a device goes
-    // through `phys_to_virt` now (`console.rs`, `plic::register`,
-    // `device_tree::init`), so a physical address is never dereferenced as one.
+    // Direct map only, no identity alias: everything that touches a device goes through
+    // `phys_to_virt`, so a physical address is never dereferenced as one.
     //
-    // Every window the tree describes, not a list of the devices this kernel
-    // currently drives. Mapping them all is what makes a new driver just work
-    // through `phys_to_virt` instead of needing its own base constant, and
-    // `largest_level_for` keeps it cheap.
+    // Every window the tree describes, not just the devices this kernel drives today —
+    // that is what makes a new driver work through `phys_to_virt` instead of needing its
+    // own base constant.
     for device in crate::device_tree::mmio_regions() {
         push(Region {
             name: "mmio",
             va: phys_to_virt(device.base),
             pa: device.base,
             len: device.size,
-            // Largest page the window's own geometry permits, so a big aperture does
-            // not cost thousands of leaves. QEMU virt's PCI ECAM is 256 MiB: 128
-            // superpages instead of 65536 pages.
+            // Largest page the window's own geometry permits: QEMU virt's PCI ECAM is
+            // 256 MiB, i.e. 128 superpages instead of 65536 pages.
             level: largest_level_for(device.base, device.size),
             flags: READ_WRITE,
         });
@@ -177,19 +157,15 @@ fn regions() -> Vec<Region> {
     push(direct("rodata", layout::rodata_start(), layout::rodata_end(), 0, READ_ONLY));
     push(direct("data", layout::data_start(), layout::data_end(), 0, READ_WRITE));
     push(direct("bss", layout::bss_start(), layout::bss_end(), 0, READ_WRITE));
-    // Every kernel stack, one region each. Individually is precisely what leaves the
-    // guard pages unmapped: a single region spanning the area would map straight over
-    // them, and the overflow protection with them.
+    // One region per stack. Individually is what leaves the guard pages unmapped: a
+    // single region spanning the area would map straight over them.
     //
-    // Boot and secondary stacks go through the same loop and the same `Region`, which
-    // is why this asks `stack::all()` rather than assembling the set here. A secondary
-    // is not direct mapped — `stack` explains why it is deliberately double mapped —
-    // but nothing at this level has to know that: each stack reports its own `va` and
-    // `pa` and the difference stops mattering.
+    // Boot and secondary stacks go through the same loop. A secondary's is not direct
+    // mapped — `stack` explains why it is deliberately double mapped — but each stack
+    // reports its own `va` and `pa`, so nothing here has to know the difference.
     //
-    // Mapped now, before any secondary starts, because a starting hart installs this
-    // table and *then* sets `sp`. There is no window in which it could fault on a
-    // stack that had not been mapped yet.
+    // Mapped now, before any secondary starts: a starting hart installs this table and
+    // *then* sets `sp`.
     for stack in stack::all() {
         push(Region {
             name: stack.name,
@@ -202,9 +178,8 @@ fn regions() -> Vec<Region> {
     }
 
     // ---- The direct map, covering exactly what the frame allocator owns ----
-    // Asking `frame` rather than re-deriving a RAM extent is the point: the
-    // allocator decides which frames it will hand out, and this maps precisely
-    // those, so the two cannot drift into disagreeing about what is reachable.
+    // Asking `frame` rather than re-deriving a RAM extent is the point: the allocator
+    // decides which frames it will hand out, and this maps precisely those.
     let (pool_start, pool_end) = frame::owned_range();
     let pool_start_va = phys_to_virt(pool_start);
     let pool_end_va = phys_to_virt(pool_end);
@@ -247,11 +222,9 @@ fn regions() -> Vec<Region> {
 /// second `install` simply wins, and the loser's rights vanish. So it is checked here,
 /// while the list is still just data.
 ///
-/// The specific hazard this exists for: the stacks sit *above* the direct map, at
+/// The specific hazard: the stacks sit *above* the direct map, at
 /// [`super::kernel_va_free_start`], and the direct map's own extent is a runtime fact.
-/// They cannot collide today, but they are computed in different modules, and "these
-/// two happen not to overlap" is exactly the kind of agreement that holds until
-/// someone rounds one of them differently.
+/// They cannot collide today, but they are computed in different modules.
 ///
 /// `O(n²)` over ~30 regions, once, at boot.
 fn audit_disjoint(regions: &[Region]) {
@@ -282,9 +255,8 @@ fn audit_disjoint(regions: &[Region]) {
 pub fn init() {
     let regions = regions();
 
-    // The root table is permanent: `satp` points at it for the kernel's lifetime.
-    // The token is deliberately dropped without freeing, which pins the frame —
-    // the same handoff `super::init` makes for the heap.
+    // The root table is permanent: `satp` points at it for the kernel's lifetime, so
+    // the token is dropped without freeing to pin the frame.
     let root_frame = frame::alloc().expect("no frame for the kernel root page table");
     let root_pa = root_frame.base();
     // SAFETY: a freshly allocated, zeroed, page-aligned frame that this module now
@@ -346,9 +318,8 @@ pub fn satp() -> Option<usize> {
 /// Point `satp` at `bits` and flush the TLB.
 ///
 /// Interrupts are masked across the pair so no trap can observe a half-switched
-/// translation. Nothing can fire here today — the trap subsystem is parked in
-/// `attic/trap/` and `sstatus.SIE` is clear — but the mask is the invariant this
-/// function needs, not a reaction to a source that happens to exist.
+/// translation. Nothing can fire here today — `sstatus.SIE` is clear — but the mask is
+/// the invariant this function needs, not a reaction to a source that happens to exist.
 ///
 /// # Safety
 ///
@@ -371,7 +342,6 @@ unsafe fn switch_to(bits: usize) {
 ///
 /// A guard page only guards if it is genuinely unmapped, and "unmapped" is the one
 /// property that is invisible in the region list — it is the *absence* of an entry.
-/// So it gets checked directly.
 ///
 /// Only deliberate gaps are checked. The `.rodata`/`.data` alignment slack happens
 /// to be unmapped too, but that is incidental geometry and would be a fragile thing

@@ -1,31 +1,26 @@
 //! Physical frame allocator.
 //!
-//! An allocation-free buddy allocator (`frame_allocator::FrameAllocator`) over
-//! the physical RAM that lies *above* the kernel image — the range
-//! `[free_start, ram_end)` handed to [`init`] by [`crate::memory::init`]. It
-//! vends page-aligned physical frames, single ([`alloc`]) or physically
-//! contiguous ([`alloc_contiguous`]), for the kernel heap, page tables, user
-//! pages, and DMA buffers.
+//! An allocation-free buddy allocator (`frame_allocator::FrameAllocator`) over the
+//! physical RAM that lies *above* the kernel image — the range `[free_start, ram_end)`
+//! handed to [`init`] by [`crate::memory::init`]. It vends page-aligned physical
+//! frames, single ([`alloc`]) or physically contiguous ([`alloc_contiguous`]), for the
+//! kernel heap, page tables, user pages, and DMA buffers.
 //!
 //! # No heap dependency — this comes up FIRST
-//! Unlike a free-list allocator, this keeps its metadata in a caller-supplied
-//! bitmap rather than on the heap, so it has **no** dependency on the heap and
-//! `memory::init` brings it up *before* the heap — then carves the heap's
-//! backing frames out of it. The bitmap itself is reserved from the front of the
-//! managed range (see [`init`]) and excluded from the frames it hands out, so
-//! the allocator's own metadata can never be allocated away.
+//! Metadata lives in a bitmap reserved from the front of the managed range (see
+//! [`init`]) and excluded from the frames handed out, not on the heap. So this comes up
+//! *before* the heap and then carves the heap's backing frames out of itself, and the
+//! allocator's own metadata can never be allocated away.
 //!
 //! # Frames come out zeroed
-//! Every frame is zeroed before it is handed out — page-table pages assume clean
-//! PTEs, and we must never leak a previous owner's bytes into a fresh mapping.
-//! The allocator core never touches frame contents; zeroing is our policy here.
+//! Page-table pages assume clean PTEs, and a previous owner's bytes must never leak
+//! into a fresh mapping. The allocator core never touches frame contents; zeroing is
+//! this module's policy.
 //!
 //! # Addressing
-//! `boot.S` maps physical memory both identity and into the kernel's direct map
-//! (see [`crate::memory::direct_map`]). Kernel-side accesses in this module (the
-//! bitmap, zeroing) go through the direct map via
-//! [`crate::memory::phys_to_virt`] — the kernel's durable home, which survives
-//! the eventual removal of the boot identity map.
+//! Kernel-side accesses here (the bitmap, zeroing) go through the direct map via
+//! [`crate::memory::phys_to_virt`] rather than the boot identity map, which the kernel
+//! will eventually drop.
 
 use core::num::NonZeroUsize;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -51,14 +46,12 @@ static OWNED_END: AtomicUsize = AtomicUsize::new(0);
 /// The physical span this module owns, `[start, end)`, **including** the metadata
 /// bitmap that [`init`] reserved from the front of it.
 ///
-/// The authoritative answer to "which physical memory belongs to the frame
-/// subsystem", and therefore to what a page table must map before the kernel can
-/// touch any of it. [`super::kernel_table`] derives its direct map from this
-/// rather than re-deriving a RAM extent of its own — the allocator decides what it
-/// will hand out, and the table maps exactly that.
+/// [`super::kernel_table`] derives its direct map from this rather than re-deriving a
+/// RAM extent of its own: the allocator decides what it will hand out, and the table
+/// maps exactly that.
 ///
-/// Note this is deliberately *not* the allocator's `range()`, which excludes the
-/// bitmap: the bitmap needs mapping too, since this module writes it.
+/// Deliberately *not* the allocator's `range()`, which excludes the bitmap — the
+/// bitmap needs mapping too, since this module writes it.
 pub fn owned_range() -> (usize, usize) {
     let start = OWNED_START.load(Ordering::Relaxed);
     let end = OWNED_END.load(Ordering::Relaxed);
@@ -68,11 +61,10 @@ pub fn owned_range() -> (usize, usize) {
 
 /// A physical frame allocation handed out by [`alloc`] / [`alloc_contiguous`].
 ///
-/// Return it to [`free`] to release. The token is deliberately move-only:
-/// freeing consumes it, so the same allocation cannot be freed twice in safe
-/// code. Dropping it *without* freeing leaks the frames (there is no `Drop` —
-/// releasing needs the allocator lock); [`crate::memory::init`] relies on that
-/// to pin the permanent kernel heap.
+/// Return it to [`free`] to release. Move-only, so freeing consumes it and the same
+/// allocation cannot be freed twice in safe code. Dropping it *without* freeing leaks
+/// the frames (there is no `Drop` — releasing needs the allocator lock);
+/// [`crate::memory::init`] relies on that to pin the permanent kernel heap.
 pub struct Frames(FrameBlock);
 
 impl Frames {
@@ -88,17 +80,12 @@ impl Frames {
 /// managed frames. RAM above the window `boot.S` maps is dropped (loudly),
 /// because its frames would not be addressable through either boot mapping.
 pub fn init(free_start: usize, ram_end: usize) {
-    // Frames past the boot mappings are unreachable and must not be handed out.
-    // The bound comes from the module that *builds* those mappings — this used to
-    // re-derive it as `ram_base + 1 GiB`, an independent re-encoding of boot.S's
-    // decision that would have kept clamping at 1 GiB if the window ever grew.
-    // No silent truncation either — say what we drop.
+    // Frames past the boot mappings are unreachable and must not be handed out. The
+    // bound comes from the module that *builds* those mappings.
     let window_end = crate::memory::direct_map::WINDOW_END;
-    // The window is absolute (from PA 0), not RAM-relative, so state the case it
-    // cannot serve rather than letting `FrameRange::new` below fail with a
-    // confusing "range empty after alignment". Unreachable on any platform that
-    // got this far — the kernel itself would be outside the mapping — but the
-    // diagnostic is what makes that obvious instead of mysterious.
+    // The window is absolute (from PA 0), not RAM-relative, so state the case it cannot
+    // serve rather than letting `FrameRange::new` below fail with a confusing "range
+    // empty after alignment".
     assert!(
         free_start < window_end,
         "kernel image top {free_start:#x} lies outside the {window_end:#x} boot mapping window; \
@@ -126,7 +113,6 @@ pub fn init(free_start: usize, ram_end: usize) {
     let managed = FrameRange::new(start_ppn + bitmap_frames, end_ppn)
         .expect("no RAM left to manage after reserving the frame bitmap");
 
-    // The bitmap occupies the reserved frames at the front, reached high-half.
     let bitmap_va = phys_to_virt(PhysicalAddr::from_ppn(start_ppn).bits());
     // SAFETY: `[start_ppn, start_ppn + bitmap_frames)` is page-aligned, sits in
     // identity+high-half-mapped RAM, is excluded from `managed`, and lives as
@@ -143,10 +129,10 @@ pub fn init(free_start: usize, ram_end: usize) {
     reserve_foreign_memory(&mut allocator, managed);
     *FRAME_ALLOCATOR.lock() = Some(allocator);
 
-    // Publish the span we took — bitmap included, so `[start_ppn, end_ppn)` rather
-    // than `managed`. This is what `kernel_table` maps; see `owned_range`.
     report_reservations();
 
+    // The span taken, bitmap included, so `[start_ppn, end_ppn)` rather than `managed`.
+    // This is what `kernel_table` maps; see `owned_range`.
     OWNED_START.store(PhysicalAddr::from_ppn(start_ppn).bits(), Ordering::Relaxed);
     OWNED_END.store(PhysicalAddr::from_ppn(end_ppn).bits(), Ordering::Relaxed);
 }
@@ -167,9 +153,9 @@ pub struct Reservation {
     pub end: usize,
     /// Frames this record was the first to withhold.
     ///
-    /// Deliberately not derivable from `start..end`: carve-outs may overlap, so the
-    /// extents summed exceed the memory actually removed from the pool. A record
-    /// whose extent exceeds this is one that overlapped an earlier one.
+    /// Not derivable from `start..end`: carve-outs may overlap, so the extents summed
+    /// exceed the memory actually removed from the pool. A record whose extent exceeds
+    /// this is one that overlapped an earlier one.
     pub newly_withheld: usize,
 }
 
@@ -187,10 +173,10 @@ impl Reservation {
 
 /// Everything withheld from the pool, in the order it was withheld.
 ///
-/// Recorded because a reserved frame and an allocated frame are indistinguishable in
-/// the bitmap — that is what makes reclaiming an initrd a plain `deallocate_at`, but
-/// it also means nothing could otherwise answer "why is this memory not free?", and a
-/// leak of 200 frames looked exactly like a firmware carve-out of 200 frames.
+/// A reserved frame and an allocated frame are indistinguishable in the bitmap — that
+/// is what makes reclaiming an initrd a plain `deallocate_at` — so without this record
+/// nothing could answer "why is this memory not free?", and a leak of 200 frames would
+/// look exactly like a firmware carve-out of 200 frames.
 static RESERVATIONS: Mutex<Vec<Reservation, MAX_RESERVATIONS>> = Mutex::new(Vec::new());
 
 /// Every range withheld from the pool, cloned out so no lock is held by the caller.
@@ -226,11 +212,11 @@ fn reserve(
     // Frame at a time, skipping what an earlier carve-out already withheld.
     //
     // `FrameAllocator::reserve` rejects an already-claimed frame, correctly: reserving
-    // memory that has been *vended* is a genuine conflict. Overlap between carve-outs
-    // is not, and this function manufactures it — the rounding above is OUTWARD, so
-    // two carve-outs a few hundred bytes apart land in the same frame. Firmware also
-    // supplies genuine duplicates, describing one reservation through both the FDT
-    // rsvmap and a /reserved-memory node.
+    // memory that has been *vended* is a genuine conflict. Overlap between carve-outs is
+    // not, and this function manufactures it — the rounding above is OUTWARD, so two
+    // carve-outs a few hundred bytes apart land in the same frame. Firmware also supplies
+    // genuine duplicates, describing one reservation through both the FDT rsvmap and a
+    // /reserved-memory node.
     //
     // Disjointness belongs here because the rounding that destroys it is here, and
     // because merging in the device tree would lose the names — which are how a later
@@ -285,8 +271,7 @@ fn reserve(
 /// otherwise vend:
 ///
 /// 1. **The blob itself.** On QEMU virt it sits at `0x87e00000`, near the top of RAM
-///    and squarely inside the pool. Reading it back after the allocator reused those
-///    pages is the kind of corruption that surfaces nowhere near its cause.
+///    and squarely inside the pool.
 /// 2. **`/reserved-memory`.** Firmware carve-outs — OpenSBI's own `mmode_resv0`/`1`
 ///    here. They happen to sit *below* the kernel image on this platform, so they
 ///    currently miss the pool and are safe by accident; firmware reserving above the
@@ -298,9 +283,9 @@ fn reserve_foreign_memory(allocator: &mut FrameAllocator<'static>, managed: Fram
         "no foreign RAM discovered, not even the device-tree blob; \
          call device_tree::init before memory::init"
     );
-    // The frame ranges withheld so far, so a later carve-out overlapping an earlier
-    // one is recognised rather than rejected. Local: it only makes the sequence of
-    // calls order-independent.
+    // The frame ranges withheld so far, so a later carve-out overlapping an earlier one
+    // is recognised rather than rejected. Local: it only makes the sequence of calls
+    // order-independent.
     let mut withheld: Vec<FrameRange, MAX_RESERVATIONS> = Vec::new();
     for range in foreign {
         reserve(allocator, managed, &mut withheld, range.name(), range.base, range.end());
@@ -389,14 +374,12 @@ pub unsafe fn free_at(frame: PhysicalAddr) {
 
 /// Supplies the frames that intermediate page tables live in.
 ///
-/// # Why the token is dropped
-///
 /// [`FrameSource::alloc_zeroed`] returns a bare [`PhysicalAddr`] and lets the
-/// [`Frames`] token go. That is not an accidental leak, it is the handoff: the
-/// moment the frame is installed as a branch PTE, the *page table* becomes its
-/// record of ownership. Reclaiming it later means walking to that entry and
-/// passing the address it holds to [`free_at`] — which is exactly what
-/// [`FrameSource::free`] does below, and why [`free_at`] has to exist at all.
+/// [`Frames`] token go. That is the handoff, not a leak: the moment the frame is
+/// installed as a branch PTE, the *page table* becomes its record of ownership.
+/// Reclaiming it means walking to that entry and passing the address it holds to
+/// [`free_at`] — which is what [`FrameSource::free`] does below, and why [`free_at`]
+/// exists at all.
 pub struct TableFrames;
 
 // SAFETY: `alloc` returns a page-aligned frame, freshly zeroed (see the module

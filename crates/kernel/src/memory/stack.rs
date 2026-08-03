@@ -7,22 +7,17 @@
 //!
 //! # A hart id is not an index
 //!
-//! This module used to be a static array of `MAX_HARTS` slots that `boot.S` indexed
-//! with the running hart id, parking anything at or above the count. That is wrong
-//! twice over, because a hart id is an opaque machine identifier and not a small
-//! dense number — the privileged spec (§3.1.5, `mhartid`) promises only that ids are
-//! unique and that *some* hart has id 0, explicitly allowing gaps, and real platforms
-//! leave them: a management core, a disabled core, a cluster number packed into the
-//! high bits. OpenSBI keeps a `hart_index2id[]` array and Linux a
+//! **Nothing indexes by hart id here, or anywhere else.** A hart id is an opaque
+//! machine identifier, not a small dense number: the privileged spec (§3.1.5,
+//! `mhartid`) promises only that ids are unique and that *some* hart has id 0, and
+//! real platforms leave gaps — a management core, a disabled core, a cluster number
+//! packed into the high bits. OpenSBI keeps a `hart_index2id[]` array and Linux a
 //! `__cpuid_to_hartid_map[]` for exactly this reason.
 //!
-//! So the old arrangement cost address space proportional to the largest id rather
-//! than to the number of harts, and — far worse — silently parked the *boot* hart on
-//! any machine whose firmware chose one with a large id, before the console existed
-//! to say so. Reproduced in QEMU at `-smp 32`, where it killed 4 boots in 10.
-//!
-//! **Nothing indexes by hart id here, or anywhere else.** Anything tempted to should
-//! read this paragraph first.
+//! An array of slots indexed by hart id costs address space proportional to the
+//! largest id rather than to the number of harts, and silently parks the *boot* hart
+//! on any machine whose firmware chose one with a large id — before the console
+//! exists to say so.
 //!
 //! # Why the two kinds of stack differ
 //!
@@ -74,9 +69,9 @@ const STRIDE: usize = GUARD_SIZE + SIZE;
 
 /// One kernel stack: [`SIZE`] usable bytes above a [`GUARD_SIZE`] hole.
 ///
-/// Only two facts are stored. Everything else — the guard address, the top, the
-/// length — is derived from them and the two constants above, so the geometry is
-/// stated exactly once and a caller cannot be handed a stack whose parts disagree.
+/// Only two facts are stored; the guard address, the top and the length are derived
+/// from them, so the geometry is stated exactly once and a caller cannot be handed a
+/// stack whose parts disagree.
 #[derive(Clone, Copy, Debug)]
 pub struct Stack {
     /// What this stack is for. Labels its region in the page table and the boot log.
@@ -106,10 +101,8 @@ impl Stack {
 
 /// A secondary hart and the stack allocated for it.
 ///
-/// The pairing is built once, here, and never recomputed. An earlier version sized
-/// the pool from one traversal of the hart list and matched harts to stacks by
-/// `zip`ping a second traversal against it — two answers to "who are the
-/// secondaries", held together by an assertion that they had better agree.
+/// The pairing is built once, in [`init`], and never recomputed — so there is only
+/// ever one answer to "who are the secondaries".
 #[derive(Clone, Copy, Debug)]
 pub struct Secondary {
     /// The hart this stack was allocated for, as the device tree reports it.
@@ -122,11 +115,8 @@ pub struct Secondary {
 /// Never accessed *through* this item — the hardware writes it via `sp`, which is
 /// why the contents sit behind an [`UnsafeCell`]. It exists so that the **size** of
 /// the reserved area is declared in exactly one place: here, as [`STRIDE`].
-/// `kernel.ld` only *places* it, taking the size from the section.
-///
-/// The alternative was a hand-computed byte count in the linker script, and that is
-/// a composite magic number: it silently encodes both [`GUARD_SIZE`] and [`SIZE`] in
-/// a form nothing can check and no reader can verify.
+/// `kernel.ld` only *places* it, taking the size from the section, rather than
+/// carrying a byte count that silently encodes both [`GUARD_SIZE`] and [`SIZE`].
 #[used]
 #[unsafe(link_section = ".boot_stack")]
 static BOOT_STACK: BootStack = BootStack(UnsafeCell::new([0; STRIDE]));
@@ -150,10 +140,9 @@ pub fn boot() -> Stack {
 
 /// Assert the linker placed the boot stack exactly where the geometry expects.
 ///
-/// Cheap, and it closes the one gap in the arrangement: Rust declares the size but
-/// the linker chooses the address, and `boot.S` loads `sp` from *its* view of the
-/// bounds. If those disagree, the kernel runs on a stack that is not where anyone
-/// thinks it is.
+/// Rust declares the size but the linker chooses the address, and `boot.S` loads `sp`
+/// from *its* view of the bounds. If those disagree, the kernel runs on a stack that
+/// is not where anyone thinks it is.
 pub fn check_layout() {
     let span = layout::boot_stack_end() - layout::boot_stack_start();
     assert_eq!(
@@ -185,9 +174,8 @@ static SECONDARIES: Once<Vec<Secondary>> = Once::new();
 /// in the table from the start.
 ///
 /// The frames are never released: `Frames` has no destructor and nothing calls
-/// `frame::free` on them, which pins them for the kernel's lifetime. That is
-/// deliberate. A hart's stack is live for as long as the hart is, and nothing stops a
-/// hart yet.
+/// `frame::free` on them, which pins them for the kernel's lifetime. A hart's stack is
+/// live for as long as the hart is, and nothing stops a hart yet.
 ///
 /// # Why the virtual addresses are not the direct-map ones
 ///
@@ -236,9 +224,8 @@ pub fn guards() -> impl Iterator<Item = usize> { all().map(|stack| stack.guard()
 
 /// Print the stack geometry.
 ///
-/// Lives here because the numbers do. `memory::report_layout` prints where the linker
-/// put the boot stack, which is an image-layout fact; the sizes, the guards and the
-/// secondaries are this module's and are reported only from here.
+/// `memory::report_layout` prints where the linker put the boot stack, an image-layout
+/// fact; the sizes, the guards and the secondaries are this module's.
 pub fn report() {
     let secondaries = secondaries();
     println!(

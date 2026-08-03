@@ -30,8 +30,7 @@ linker_symbol!(
     boot_stack_start   => _boot_stack_start,
     boot_stack_end     => _boot_stack_end,
     heap_start         => _heap_start,
-    // Not a layout bound but a linker symbol read the same way, so it uses the same
-    // macro rather than a second hand-rolled `extern "C" { static … }` elsewhere.
+    // Not a layout bound, but a linker symbol read the same way.
     // `cpu::start_secondaries` passes its *physical* address to SBI: a hart starts
     // with translation off, and this is an entry point, not a callable function.
     secondary_entry    => _secondary_start,
@@ -46,11 +45,10 @@ linker_symbol!(
 /// Assert the linker script's view of the layout matches Rust's.
 ///
 /// `kernel.ld` has its own `_page_size` because it cannot read
-/// [`paging::sv39::PAGE_SIZE`] (see the note above). The duplicate is unavoidable,
-/// so it is verified instead — not by reading the symbol, but by measuring something
-/// the linker *built* with it: the gap it left between the boot stack and the heap is
-/// exactly one page. If the two ever disagree, this catches it at boot rather than
-/// letting sections land unaligned and the guard pages drift out of position.
+/// [`paging::sv39::PAGE_SIZE`] (see the note above). The duplicate is verified rather
+/// than read: the gap the linker *built* between the boot stack and the heap is one
+/// page exactly when the two agree. A mismatch otherwise surfaces as unaligned
+/// sections and guard pages drifted out of position.
 ///
 /// Call once, before anything derives an address from these symbols.
 pub fn check() {
