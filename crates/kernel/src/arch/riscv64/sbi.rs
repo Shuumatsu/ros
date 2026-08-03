@@ -31,21 +31,35 @@ pub fn shutdown() -> ! {
 
 pub fn set_timer(stime_value: u64) { sbi_call(SBI_SET_TIMER, stime_value as usize, 0, 0); }
 
-pub fn clear_ipi() { sbi_call(SBI_CLEAR_IPI, 0, 0, 0); }
-
-pub fn send_ipi(hart_mask: usize) { sbi_call(SBI_SEND_IPI, &hart_mask as *const _ as usize, 0, 0); }
-
-pub fn remote_fence_i(hart_mask: usize) {
-    sbi_call(SBI_REMOTE_FENCE_I, &hart_mask as *const _ as usize, 0, 0);
-}
-
-pub fn remote_sfence_vma(hart_mask: usize, _start: usize, _size: usize) {
-    sbi_call(SBI_REMOTE_SFENCE_VMA, &hart_mask as *const _ as usize, 0, 0);
-}
-
-pub fn remote_sfence_vma_asid(hart_mask: usize, _start: usize, _size: usize, _asid: usize) {
-    sbi_call(SBI_REMOTE_SFENCE_VMA_ASID, &hart_mask as *const _ as usize, 0, 0);
-}
+// ---------------------------------------------------------------------------
+// REMOVED: the legacy IPI and remote-fence wrappers
+//
+// `clear_ipi`, `send_ipi`, `remote_fence_i`, `remote_sfence_vma` and
+// `remote_sfence_vma_asid` used to sit here. All five were dead — zero callers,
+// invisible to the compiler behind this file's `allow(dead_code)` — and all five
+// were wrong in ways that only a caller would have discovered:
+//
+// - Both `remote_sfence_vma*` took `start` and `size`, ignored them, and passed
+//   0/0. A signature that names a range and then flushes something else is worse
+//   than no function: the caller cannot tell from the call site.
+// - They passed `&hart_mask as *const _ as usize`, a pointer to a stack local. The
+//   v0.1 spec calls that argument a virtual address, so this is not the flat
+//   misuse an earlier note here claimed — but it *is* the underspecified corner
+//   that got the whole legacy interface deprecated, because implementations
+//   disagreed about how a pointer handed to M-mode should be translated.
+//
+// The replacements are the IPI (EID 0x735049) and RFENCE (EID 0x52464E43)
+// extensions, which take `hart_mask` and `hart_mask_base` BY VALUE — no pointer,
+// no translation question — and carry the range arguments properly. OpenSBI
+// advertises both (`ipi`, `rfnc` in its boot banner).
+//
+// They are not written here yet, on purpose. Nothing can call them until
+// `SupervisorSoft` is handled — `trap::interrupts::handler` currently sends it to
+// `unimplemented!()`, and `clint::software::init` is never called — so anything
+// added now would be verified by reading it. That is exactly how this file
+// acquired the five functions above. They land with their first caller, and get
+// tested by it.
+// ---------------------------------------------------------------------------
 
 // ===========================================================================
 // SBI v0.2+ extensions
@@ -150,12 +164,11 @@ pub fn hart_get_status(hartid: usize) -> Result<HartState, SbiError> {
     sbi_call_ext(SBI_EXT_HSM, HSM_HART_GET_STATUS, hartid, 0, 0).map(HartState::from_raw)
 }
 
+// Legacy function ids. 3..=7 (clear_ipi, send_ipi, the two remote fences and
+// remote_fence_i) are absent because their wrappers were removed; see the note
+// above. The gap in the numbering is the point — filling it back in means using
+// the deprecated interface again.
 const SBI_SET_TIMER: usize = 0;
 const SBI_CONSOLE_PUTCHAR: usize = 1;
 const SBI_CONSOLE_GETCHAR: usize = 2;
-const SBI_CLEAR_IPI: usize = 3;
-const SBI_SEND_IPI: usize = 4;
-const SBI_REMOTE_FENCE_I: usize = 5;
-const SBI_REMOTE_SFENCE_VMA: usize = 6;
-const SBI_REMOTE_SFENCE_VMA_ASID: usize = 7;
 const SBI_SHUTDOWN: usize = 8;
