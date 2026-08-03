@@ -214,6 +214,7 @@ SECTIONS {
    .boot_stack span are all checked at boot; which sections were emitted is checked
    here, at link time. A tripped assert means: name the new section explicitly and
    decide whether kernel_table should map it. */
+ASSERT(_start == _memory_start, "_start must be the first byte of the Image")
 ASSERT(_rodata_start - _text_end   < _page_size, "orphan section between .text and .rodata")
 ASSERT(_data_start   - _rodata_end < _page_size, "orphan section between .rodata and .data")
 ASSERT(_bss_start    - _data_end   < _page_size, "orphan section between .data and .bss")
