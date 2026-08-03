@@ -54,11 +54,11 @@ pub fn set_timer(stime_value: u64) { sbi_call(SBI_SET_TIMER, stime_value as usiz
 // advertises both (`ipi`, `rfnc` in its boot banner).
 //
 // They are not written here yet, on purpose. Nothing can call them until
-// `SupervisorSoft` is handled — `trap::interrupts::handler` currently sends it to
-// `unimplemented!()`, and `clint::software::init` is never called — so anything
-// added now would be verified by reading it. That is exactly how this file
-// acquired the five functions above. They land with their first caller, and get
-// tested by it.
+// `SupervisorSoft` is handled, and there is no handler at all right now: the trap
+// subsystem is parked in `crates/kernel/attic/trap/` until the boot and memory-init
+// path is finalised. So anything added now would be verified by reading it. That is
+// exactly how this file acquired the five functions above. They land with their
+// first caller, and get tested by it.
 // ---------------------------------------------------------------------------
 
 // ===========================================================================

@@ -1,6 +1,5 @@
 use crate::cpu;
 use crate::memory;
-use crate::trap;
 
 // static mut KERNEL_STARTED: bool = false;
 
@@ -45,10 +44,9 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
     // which nothing but the published kernel table describes.
     cpu::start_secondaries();
 
-    println!("initializing traps...");
-    // Per-hart: `stvec` is a CSR, so every hart sets its own.
-    unsafe { trap::init() };
-    println!("initializing traps completed");
+    // No trap init here — see the note on `secondary_start`. `stvec` still points at
+    // `boot.S`'s `.Ltrap_park`, which is the whole trap story until the boot and
+    // memory-init path is finalised.
 
     // Already in S-mode — go straight into the kernel.
     unsafe { kmain() }
@@ -65,8 +63,17 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
 unsafe extern "C" fn secondary_start(hartid: usize) -> ! {
     println!("[smp] hart {hartid} online on the kernel page table");
 
-    // Per-hart: `stvec` is a CSR, so every hart sets its own.
-    unsafe { trap::init() };
+    // No trap init on any hart, boot or secondary. The trap subsystem is parked in
+    // `crates/kernel/attic/trap/` while the boot and memory-init path is being
+    // finalised — see the README there for why, and for what has to be true before
+    // it comes back.
+    //
+    // This does NOT leave `stvec` undefined: `boot.S` points every hart at
+    // `.Ltrap_park` before Rust runs, and re-points it at the high alias after the
+    // jump. So a trap during this phase stops the faulting hart deterministically
+    // with `scause`/`sepc`/`stval` intact for a debugger. During boot and memory
+    // init that is what we want anyway — every trap here is a bug, and there is
+    // nothing a handler could usefully do about it that parking does not.
 
     unsafe { kmain_ap() }
 }
@@ -78,9 +85,11 @@ unsafe extern "C" fn kmain() -> ! {
     println!("This is my operating system!");
     println!("[kmain] higher-half kernel is live at high VAs — parking.");
 
-    // Nothing to run yet. The next milestone is user-process support (per-process
-    // page tables + U=1 user pages + a real syscall path), which will replace the
-    // old in-place ecall demo. Park until then; the timer keeps ticking.
+    // Nothing to run yet, and with the trap subsystem parked there is no timer to
+    // wake us either — `sstatus.SIE` is clear and no source is enabled, so this
+    // `wfi` loop is a true halt rather than an idle. Reaching this line is the
+    // success condition for the boot and memory-init phase: the kernel got here,
+    // on the kernel page table, at high VAs, without faulting.
     crate::arch::riscv64::wait_forever()
 }
 
@@ -92,7 +101,8 @@ unsafe extern "C" fn kmain_ap() -> ! {
     // Park. There is no scheduler to enter, and the previous placeholder here was a
     // tight `ebreak` loop — harmless only because no secondary hart had ever actually
     // reached it. The moment one did it would trap on every iteration and bury the
-    // console. `wfi` idles until an interrupt instead, which is what a hart with
-    // nothing to run should do.
+    // console. `wfi` costs nothing instead, which is what a hart with nothing to run
+    // should do. With no interrupts enabled it never wakes; that is correct for this
+    // phase, and it becomes a real idle loop on its own once traps come back.
     crate::arch::riscv64::wait_forever()
 }

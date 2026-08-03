@@ -69,17 +69,27 @@ the frame allocator physical bounds while the heap lives at high VAs).
 - Physical frame allocator: the rest of RAM `[heap_end_pa, ram_end)`, physical.
 - `ram_end` is discovered from the device tree (`/memory`), never hardcoded.
 
-## Timer
+## Traps and the timer — PARKED
+
+**There is no trap handler and no timer right now.** The whole subsystem was moved
+out of the crate to `crates/kernel/attic/trap/` while boot and memory init are being
+finalised; that directory's README says why and what has to happen before it returns.
+`stvec` stays on `boot.S`'s `.Ltrap_park` for the life of the kernel, so any trap
+parks the faulting hart with `scause`/`sepc`/`stval` intact. `sstatus.SIE` is never
+set and no interrupt source is enabled, which makes the `wfi` loops in `kmain` /
+`kmain_ap` true halts rather than idles.
+
+What was there, kept here because it is what gets rebuilt:
 
 S-mode timer via the SBI TIME (legacy `set_timer`) extension: `rdtime` for the
-current time, `sbi::set_timer(now + INTERVAL)` armed and re-armed each tick.
-`sie.STIE` + `sstatus.SIE` enabled in `interrupts::init`.
+current time, `sbi::set_timer(now + INTERVAL)` armed and re-armed each tick, with
+`sie.STIE` + `sstatus.SIE` enabled at init.
 
 Note (Phase-0 gotcha): under OpenSBI+Sstc, `stimecmp` starts at 0, so the timer
 interrupt is permanently pending until first armed. Never enable `sie.STIE`
 without a handler that arms/clears it.
 
-Also fixed here: the trap trampoline reserved 32 slots for a 33-field
+Also fixed at the time: the trap trampoline reserved 32 slots for a 33-field
 `TrapFrame`, writing `sepc` one slot past the frame. Harmless for the old U-mode
 ecall demo, fatal for kernel-context interrupts. Now 34 slots (16-byte aligned).
 

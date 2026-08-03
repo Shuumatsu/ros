@@ -57,12 +57,15 @@ _secondary_start:
     mv      tp, a0              # hart_id() reads tp
 
     # ---- A trap vector, before anything can trap ----
-    # stvec is UNDEFINED here: the firmware does not set it for us and trap::init
-    # is a long way off, so until now any exception in the boot path jumped to
-    # whatever stvec happened to hold. Point it at a parking loop instead: a fault
-    # then stops the hart deterministically with sepc/scause/stval intact for a
-    # debugger, rather than executing garbage. Linux does exactly this, first
-    # thing, in secondary_start_sbi.
+    # stvec is UNDEFINED here: the firmware does not set it for us, so until now any
+    # exception in the boot path jumped to whatever stvec happened to hold. Point it
+    # at a parking loop instead: a fault then stops the hart deterministically with
+    # sepc/scause/stval intact for a debugger, rather than executing garbage. Linux
+    # does exactly this, first thing, in secondary_start_sbi.
+    #
+    # This is currently the ONLY trap vector the kernel ever installs. The trap
+    # subsystem is parked in ../attic/trap/ until boot and memory init are finalised,
+    # so nothing overwrites stvec later — see that directory's README.
     #
     # PHYSICAL, because that is what the PC is — `lla` pre-paging yields the load
     # address. Re-pointed at the high alias after the jump below, since the kernel
@@ -203,10 +206,11 @@ _secondary_start:
     wfi
     j       .Lpark
 
-# A trap taken before trap::init installed a real handler — see the stvec write at
-# the top. A separate loop from .Lpark on purpose, even though the two do the same
-# thing: the PC alone then says which of the two happened, which matters in a boot
-# path that has no console. scause/sepc/stval describe the fault itself.
+# A trap with no real handler behind it — see the stvec write at the top. Today that
+# means *any* trap, since the trap subsystem is parked. A separate loop from .Lpark on
+# purpose, even though the two do the same thing: the PC alone then says which of the
+# two happened, which matters in a boot path that has no console. scause/sepc/stval
+# describe the fault itself.
 .balign 4
 .Ltrap_park:
     wfi
