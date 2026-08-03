@@ -71,7 +71,6 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use alloc::vec::Vec;
-use riscv::register::sstatus;
 
 use paging::sv39::{LEVELS, page_size_at};
 use paging::utils::{align_down, align_up};
@@ -359,21 +358,14 @@ pub fn satp() -> Option<usize> {
 /// this faults on the very next instruction, with no table left to diagnose it
 /// from.
 unsafe fn switch_to(bits: usize) {
-    unsafe {
-        let interrupts_were_on = sstatus::read().sie();
-        if interrupts_were_on {
-            sstatus::clear_sie();
-        }
+    crate::arch::riscv64::interrupts::without(|| unsafe {
         core::arch::asm!(
             "csrw satp, {satp}",
             "sfence.vma",
             satp = in(reg) bits,
             options(nostack)
         );
-        if interrupts_were_on {
-            sstatus::set_sie();
-        }
-    }
+    });
 }
 
 /// Require the gaps the layout leaves to really be gaps.

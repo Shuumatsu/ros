@@ -34,6 +34,7 @@ static PLIC_BASE: AtomicUsize = AtomicUsize::new(0);
 static PLIC_SIZE: AtomicUsize = AtomicUsize::new(0);
 static CLINT_BASE: AtomicUsize = AtomicUsize::new(0);
 static CLINT_SIZE: AtomicUsize = AtomicUsize::new(0);
+static TIMEBASE_HZ: AtomicUsize = AtomicUsize::new(0);
 
 // ============================================================================
 // Accessors
@@ -105,6 +106,19 @@ pub fn clint_base() -> usize {
 /// CLINT MMIO size (only meaningful alongside [`clint_base`]).
 pub fn clint_size() -> usize {
     CLINT_SIZE.load(Ordering::Relaxed)
+}
+
+/// Ticks per second of the `time` CSR, or `None` if the tree did not say.
+///
+/// Optional on purpose. It is required by the binding, but a caller that needs a
+/// bounded wait must still work on a tree that omits it — so the answer is
+/// `Option`, and the caller decides what to do without a clock rather than being
+/// handed a fabricated frequency.
+pub fn timebase_hz() -> Option<usize> {
+    match TIMEBASE_HZ.load(Ordering::Relaxed) {
+        0 => None,
+        hz => Some(hz),
+    }
 }
 
 /// Longest device-tree node name recorded. `virtio_mmio@10008000` is 20 characters.
@@ -488,6 +502,18 @@ pub unsafe fn init(dtb_ptr: usize) {
     if let Some((base, size)) = find_reg(&fdt, &["riscv,clint0", "sifive,clint0"]) {
         CLINT_BASE.store(base, Ordering::Relaxed);
         CLINT_SIZE.store(size, Ordering::Relaxed);
+    }
+
+    // `/cpus/timebase-frequency`: how fast the `time` CSR that `rdtime` reads
+    // advances. Required by the RISC-V DT binding, and the only way to turn a
+    // `rdtime` delta into a duration — without it a timeout has to be expressed as
+    // a spin count, which measures the host's speed rather than the guest's.
+    if let Some(hz) = fdt
+        .find_by_path("/cpus")
+        .and_then(|cpus| cpus.find_property("timebase-frequency"))
+        .and_then(|prop| prop.as_u32().map(u64::from).or_else(|| prop.as_u64()))
+    {
+        TIMEBASE_HZ.store(hz as usize, Ordering::Relaxed);
     }
 }
 

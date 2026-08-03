@@ -2,7 +2,7 @@ use core::fmt::{self, Write};
 use spin::Mutex;
 use uart_16550::MmioSerialPort;
 
-use crate::arch::riscv64::{hart_id, sbi};
+use crate::arch::riscv64::{hart_id, interrupts, sbi};
 use crate::device_tree;
 
 /// The primary MMIO UART, bound to the device-tree base the first time we print
@@ -66,44 +66,20 @@ impl fmt::Write for SbiConsole {
     }
 }
 
-/// Disable supervisor interrupts, returns whether they were enabled
-#[inline]
-fn disable_interrupts() -> bool {
-    use riscv::register::sstatus;
-    let was_enabled = sstatus::read().sie();
-    if was_enabled {
-        unsafe {
-            sstatus::clear_sie();
-        }
-    }
-    was_enabled
-}
-
-/// Restore supervisor interrupts if they were previously enabled
-#[inline]
-fn restore_interrupts(was_enabled: bool) {
-    if was_enabled {
-        unsafe {
-            riscv::register::sstatus::set_sie();
-        }
-    }
-}
-
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     let hart = hart_id();
 
-    // Disable interrupts to prevent deadlock while holding UART lock
-    let was_enabled = disable_interrupts();
-
-    {
+    // Masked across the whole locked section so an interrupt handler on THIS hart
+    // cannot arrive and try to take a lock this hart already holds. The mask and its
+    // restore used to be a hand-rolled pair right here, duplicating the one in
+    // `kernel_table::switch_to`; `interrupts::without` is now the only copy.
+    interrupts::without(|| {
         let mut port = UART.lock();
         let mut out = Uart(&mut port);
         let _ = write!(out, "[hart {}] ", hart);
         let _ = out.write_fmt(args);
-    }
-
-    restore_interrupts(was_enabled);
+    });
 }
 
 #[doc(hidden)]

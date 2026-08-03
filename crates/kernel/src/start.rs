@@ -23,6 +23,8 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
     // where the direct map lives; every address below depends on it.
     memory::direct_map::verify(va_offset);
 
+    // Tie the two carriers of this hart's id together before anything uses either.
+    cpu::adopt(hartid);
     cpu::record_boot_hart(hartid);
 
     // Parse the DTB the SBI handed us in a1: it populates the device table
@@ -61,6 +63,10 @@ unsafe extern "C" fn start(hartid: usize, dtb: usize, va_offset: usize) -> ! {
 /// RAM impossible here rather than merely discouraged.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn secondary_start(hartid: usize) -> ! {
+    cpu::adopt(hartid);
+    // Before the log line, not after: this is what `start_secondaries` waits on, and
+    // the console is far slower than that wait needs to be.
+    cpu::record_online();
     println!("[smp] hart {hartid} online on the kernel page table");
 
     // No trap init on any hart, boot or secondary. The trap subsystem is parked in

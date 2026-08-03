@@ -1,3 +1,4 @@
+pub mod interrupts;
 pub mod sbi;
 
 use core::arch::asm;

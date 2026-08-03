@@ -15,6 +15,49 @@ const UNCLAIMED: usize = usize::MAX;
 /// Which hart ran the one-time kernel initialisation.
 static BOOT_HART: AtomicUsize = AtomicUsize::new(UNCLAIMED);
 
+/// Secondary harts that have reached [`crate::start::secondary_start`].
+static ONLINE: AtomicUsize = AtomicUsize::new(0);
+
+/// Reconcile the two answers to "which hart am I", and adopt the id.
+///
+/// Every hart calls this once, first thing, boot or secondary.
+///
+/// # Why there are two answers to reconcile
+///
+/// The SBI boot protocol hands the id in `a0`, which arrives as the `hartid`
+/// argument to the entry points. Separately, `boot.S` does `mv tp, a0` and
+/// [`crate::arch::riscv64::hart_id`] reads `tp` back — that is where every
+/// `[hart N]` console prefix comes from. Two independent carriers of one fact, and
+/// until now nothing compared them.
+///
+/// It is visible in a single line of output: `secondary_start` logs
+/// `[smp] hart {hartid} online`, and the console prefixes it with `[hart {tp}]` —
+/// the same number, printed twice, from two sources that could disagree.
+///
+/// The disagreement is not exotic. `tp`'s natural next use is a pointer to a
+/// per-hart control block, which is what Linux keeps there and what a scheduler
+/// will want; the id then becomes a field in that block rather than the register's
+/// whole contents. On the day `boot.S`'s `mv tp, a0` is repurposed, every log line
+/// and every future `hart_id()` caller silently reports garbage while `BOOT_HART`
+/// keeps reporting the truth. Nothing would fail, and nothing would assert.
+///
+/// So `cpu` owns hart identity and the `tp` convention answers to it. Checking the
+/// two agree costs one comparison per hart per boot and turns that future silent
+/// divergence into an immediate panic.
+pub fn adopt(hartid: usize) {
+    let from_tp = crate::arch::riscv64::hart_id();
+    assert_eq!(
+        hartid, from_tp,
+        "hart id disagreement: the SBI boot protocol says {hartid}, tp says {from_tp}. \
+         boot.S must keep `mv tp, a0` in step with what it passes to the entry point"
+    );
+}
+
+/// Record that a secondary hart made it into Rust, on the kernel page table.
+pub fn record_online() {
+    ONLINE.fetch_add(1, Ordering::Release);
+}
+
 /// Record which hart ran the one-time initialisation.
 ///
 /// # This is not the election
@@ -100,6 +143,7 @@ pub fn start_secondaries() {
         "no kernel page table published; start_secondaries ran before memory::init"
     );
 
+    let mut requested = 0;
     for &stack::Secondary { hart, stack } in stack::secondaries() {
         // Ask first. "Already started" and "no such hart" are different problems, and
         // a bare error code from hart_start would not distinguish them.
@@ -115,13 +159,97 @@ pub fn start_secondaries() {
             }
         }
 
+        // The stack top is what the hart will load straight into `sp`, and the
+        // RISC-V ABI requires sp to be 16-byte aligned. `boot.S` does `mv sp, a1`
+        // with no arithmetic and no check, so this is the only place the property
+        // can be enforced; it holds today only because SIZE and GUARD_SIZE happen
+        // to be page multiples.
+        assert_eq!(
+            stack.top() % 16,
+            0,
+            "hart {hart}'s stack top {:#x} is not 16-byte aligned; boot.S loads it \
+             directly into sp",
+            stack.top()
+        );
+
         match sbi::hart_start(hart, entry, stack.top()) {
             Ok(()) => {
+                requested += 1;
                 println!("[smp] started hart {hart} at {entry:#x}, stack top {:#x}", stack.top())
             }
             Err(error) => println!("[smp] hart {hart} failed to start: {error}"),
         }
     }
+
+    await_secondaries(requested);
+}
+
+/// Wait for the harts we asked for to actually arrive, and say so if they do not.
+///
+/// `hart_start` returning `Ok` means only that the firmware *accepted* the request —
+/// the hart is `StartPending`. Nothing used to check any further, so a secondary that
+/// faulted inside `boot.S` (a bad stack mapping, say) parked in `.Ltrap_park` forever
+/// while the boot hart sailed on and `kmain` printed its "success condition" line. A
+/// boot with N-1 dead harts looked exactly like a good one.
+///
+/// # Why the bound is a duration and not a spin count
+///
+/// The first version of this counted iterations, and that was wrong in a way worth
+/// recording: a spin count measures the *host's* speed, not the guest's. 100 million
+/// iterations was picked to be generously large and turned out to exceed 90 seconds
+/// under QEMU's TCG interpreter — a "timeout" indistinguishable from the hang it
+/// exists to report. Tuning the number would have made it wrong on the next machine.
+///
+/// `rdtime` reads the `time` CSR, which is readable in S-mode because OpenSBI sets
+/// `[m|s]counteren.TM`, and `/cpus/timebase-frequency` says what its ticks are worth.
+/// That is a real second on any host. Note this needs no timer *interrupt* and so
+/// does not depend on the parked trap subsystem — reading the counter is just a CSR
+/// read.
+///
+/// If the tree omitted the frequency there is no clock to bound by, so the wait is
+/// skipped entirely and said so. Spinning on an unknown timebase would be guessing.
+fn await_secondaries(requested: usize) {
+    /// Long enough that a slow emulated hart is not slandered, short enough that a
+    /// genuinely dead one does not look like a hang.
+    const TIMEOUT_SECS: u64 = 2;
+
+    if requested == 0 {
+        return;
+    }
+
+    let Some(hz) = crate::device_tree::timebase_hz() else {
+        println!(
+            "[smp] no /cpus/timebase-frequency; not waiting for the {requested} secondaries \
+             (their arrival is still logged individually)"
+        );
+        return;
+    };
+
+    let deadline = now() + TIMEOUT_SECS * hz as u64;
+    while now() < deadline {
+        if ONLINE.load(Ordering::Acquire) >= requested {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+
+    // Not a panic. Losing a secondary is bad but not fatal to the boot hart, and a
+    // kernel that can still report the loss is more useful than one that stops.
+    let online = ONLINE.load(Ordering::Acquire);
+    println!(
+        "[smp] WARNING: {} of {requested} secondaries never reached the kernel after \
+         {TIMEOUT_SECS}s; they are parked in boot.S with sepc/scause/stval intact",
+        requested - online
+    );
+}
+
+/// The `time` CSR: a free-running counter, readable in S-mode.
+#[inline]
+fn now() -> u64 {
+    let t: u64;
+    // SAFETY: `rdtime` is a plain CSR read with no side effects.
+    unsafe { core::arch::asm!("rdtime {}", out(reg) t, options(nomem, nostack)) };
+    t
 }
 
 /// Report what this hart is, as opposed to what memory looks like.
