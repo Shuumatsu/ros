@@ -49,13 +49,18 @@ direction. In particular:
    CLINT belongs to the SBI firmware, which is why `clint/timer.rs` goes through
    `sbi::set_timer` and does not touch CLINT MMIO. `clint/` is therefore a misleading
    name for what is really "SBI TIME extension". Rename on the way back in.
-3. **`SupervisorSoft` must be handled before the SBI IPI/RFENCE wrappers get written.**
+3. **`sbi::set_timer` no longer exists — bring it back with the timer.** It was a
+   one-line `sbi_call(0, ...)` whose only caller was `interrupts/clint/timer.rs` in
+   here, so it was deleted along with the blanket `#![allow(dead_code)]` that had
+   been hiding it and two others. Restoring it means re-adding the wrapper and the
+   `SBI_SET_TIMER: usize = 0` constant to `arch/riscv64/sbi.rs`.
+4. **`SupervisorSoft` must be handled before the SBI IPI/RFENCE wrappers get written.**
    `arch/riscv64/sbi.rs` documents why those five legacy wrappers were deleted and why
    their replacements are deliberately unwritten; they land with their first caller.
-4. **Re-check `memory::kernel_table::switch_to`.** It masks interrupts across the
+5. **Re-check `memory::kernel_table::switch_to`.** It masks interrupts across the
    `satp` write and TLB flush. That mask is currently protecting against nothing,
    since no source is enabled. It must still be correct the moment a timer can fire
    during memory bring-up.
-5. **`start.rs` calls nothing.** Both `start` and `secondary_start` carry a comment
+6. **`start.rs` calls nothing.** Both `start` and `secondary_start` carry a comment
    pointing here where `trap::init()` used to be. `stvec` is a CSR, so whatever
    replaces it is per-hart and both entry points need it.

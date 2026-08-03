@@ -23,7 +23,7 @@ exec qemu-system-riscv64 \
     -machine virt \
     -cpu rv64 \
     -d guest_errors,unimp \
-    -smp 1 \
+    -smp 4 \
     -m 128M \
     -drive if=none,format=raw,file=hdd.dsk,id=foo \
     -device virtio-blk-device,drive=foo \

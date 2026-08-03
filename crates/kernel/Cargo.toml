@@ -12,18 +12,12 @@ name = "kernel"
 path = "src/main.rs"
 
 [dependencies]
-bitflags = "2.10.0"
-bitvec = { default-features = false, version = "1.0.1" }
 buddy_system_allocator = "0.12.0"
-crossbeam-utils = { version = "0.8.21", default-features = false }
 fdt-raw = "0.3.0"
 frame-allocator = { path = "../frame-allocator" }
 heapless = "0.9"
 paging = { path = "../paging", default-features = false }
 riscv = "0.16.0"
-riscv-rt = "0.17.1"
 spin = "0.10.0"
-static_assertions = "1.1.0"
 uart_16550 = "0.4"
-volatile = "0.6.1"
 

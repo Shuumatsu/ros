@@ -11,22 +11,12 @@ pub fn hart_id() -> usize {
     hart_id
 }
 
+/// Park this hart for good. The one parking primitive — `abort` and both `kmain`s
+/// call it rather than open-coding the loop, which is how they used to disagree
+/// about whether `wfi` needs `unsafe` (it does not).
 #[inline(always)]
 pub fn wait_forever() -> ! {
     loop {
-        unsafe {
-            riscv::asm::wfi();
-        }
+        riscv::asm::wfi();
     }
-}
-
-#[inline(always)]
-pub fn stack_pointer() -> usize {
-    #[allow(unused_assignments)]
-    let mut sp: usize = 0;
-
-    unsafe {
-        asm!("mv {0}, sp", out(reg) sp);
-    }
-    sp
 }

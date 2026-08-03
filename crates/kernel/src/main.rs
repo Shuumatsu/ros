@@ -1,23 +1,17 @@
 #![no_std]
 #![no_main]
-#![feature(lang_items)]
 #![feature(alloc_error_handler)]
 
 extern crate alloc;
 
 use core::arch::global_asm;
-#[macro_use]
-extern crate static_assertions;
 
 mod arch;
 mod cpu;
-mod isa;
-mod lang_items;
 #[macro_use]
 mod console;
 mod device_tree;
 mod memory;
-mod sbi;
 mod start;
 mod utils;
 
@@ -34,17 +28,20 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     abort();
 }
 
-// https://internals.rust-lang.org/t/why-rust-has-name-mangling/12503
-// turns off Rust's name mangling so the symbol is exactly eh_personality
+/// Last stop on the fatal path. `no_mangle` because the symbol must be exactly
+/// `abort` — compiler-generated code refers to it by that name.
+///
+/// There is no `eh_personality` here, and no `#![feature(lang_items)]` to declare
+/// one. Both profiles set `panic = "abort"` and the target spec for
+/// `riscv64imac-unknown-none-elf` says `"panic-strategy": "abort"`, so nothing
+/// unwinds and the personality routine was never reachable — it only cost a
+/// nightly feature gate.
 #[unsafe(no_mangle)]
 extern "C" fn abort() -> ! {
-    emergency_println!("[cpu: {}] enter extern \"C\" fn abort()", arch::riscv64::hart_id());
-    loop {
-        riscv::asm::wfi();
-    }
+    // No hart id in the message: `_emergency_print` already prefixes every line
+    // with one. This used to print its own as `[cpu: N]`, so the most important
+    // message in the kernel read `[hart 0] [cpu: 0] ...` — the same fact twice,
+    // under two names.
+    emergency_println!("enter abort()");
+    arch::riscv64::wait_forever()
 }
-
-// eh_personality language item marks a function that is used for implementing stack unwinding
-// By default, Rust uses unwinding to run the destructors of all live stack variables in case of a panic.
-#[lang = "eh_personality"]
-extern "C" fn eh_personality() {}

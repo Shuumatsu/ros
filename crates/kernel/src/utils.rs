@@ -1,5 +1,4 @@
 use core::fmt;
-use core::ops::Range;
 
 /// A byte count rendered in the largest binary unit that divides it exactly,
 /// falling back to plain bytes.
@@ -31,16 +30,5 @@ impl fmt::Display for ByteSize {
             .find(|&(scale, _)| self.0 >= scale && self.0.is_multiple_of(scale))
             .unwrap_or((1, "B"));
         write!(f, "{} {unit}", self.0 / scale)
-    }
-}
-
-pub unsafe fn zero_volatile<T>(range: Range<*mut T>)
-where
-    T: From<u8>,
-{
-    let mut ptr = range.start;
-    while ptr < range.end {
-        unsafe { core::ptr::write_volatile(ptr, T::from(0)) };
-        ptr = unsafe { ptr.offset(1) };
     }
 }

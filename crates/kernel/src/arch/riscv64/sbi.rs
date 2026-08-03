@@ -1,5 +1,10 @@
 //! Port from sbi.h
-#![allow(dead_code)]
+//!
+//! There is no `#![allow(dead_code)]` here any more. It was hiding three wrappers
+//! with no callers at all, which is the same way this file accumulated the five
+//! legacy IPI/RFENCE wrappers whose removal is recorded below — a blanket allow
+//! makes "written but never exercised" invisible, and that is exactly the state a
+//! wrapper must not be in. Functions land with their first caller.
 
 use core::arch::asm;
 
@@ -22,14 +27,12 @@ fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
 
 pub fn console_putchar(ch: usize) { sbi_call(SBI_CONSOLE_PUTCHAR, ch, 0, 0); }
 
-pub fn console_getchar() -> usize { sbi_call(SBI_CONSOLE_GETCHAR, 0, 0, 0) }
-
-pub fn shutdown() -> ! {
-    sbi_call(SBI_SHUTDOWN, 0, 0, 0);
-    unreachable!()
-}
-
-pub fn set_timer(stime_value: u64) { sbi_call(SBI_SET_TIMER, stime_value as usize, 0, 0); }
+// `console_getchar`, `shutdown` and `set_timer` used to sit here with zero callers.
+// `set_timer`'s only user was the timer in `attic/trap/`, which is not compiled; the
+// other two never had one. All three are one-line `sbi_call`s that cost nothing to
+// write when something needs them, so they go back with their caller rather than
+// waiting here unexercised. The attic README records that the timer brings
+// `set_timer` with it.
 
 // ---------------------------------------------------------------------------
 // REMOVED: the legacy IPI and remote-fence wrappers
@@ -164,11 +167,10 @@ pub fn hart_get_status(hartid: usize) -> Result<HartState, SbiError> {
     sbi_call_ext(SBI_EXT_HSM, HSM_HART_GET_STATUS, hartid, 0, 0).map(HartState::from_raw)
 }
 
-// Legacy function ids. 3..=7 (clear_ipi, send_ipi, the two remote fences and
-// remote_fence_i) are absent because their wrappers were removed; see the note
-// above. The gap in the numbering is the point — filling it back in means using
-// the deprecated interface again.
-const SBI_SET_TIMER: usize = 0;
+// Legacy function ids. Only the one with a live wrapper is named: 0 (set_timer),
+// 2 (console_getchar) and 8 (shutdown) went with the wrappers that used them, and
+// 3..=7 (clear_ipi, send_ipi, the two remote fences and remote_fence_i) went with
+// theirs; see the note above. That the numbering is now almost entirely gaps is the
+// point — a legacy id has no reason to exist here without a caller, and filling one
+// back in means using the deprecated interface again.
 const SBI_CONSOLE_PUTCHAR: usize = 1;
-const SBI_CONSOLE_GETCHAR: usize = 2;
-const SBI_SHUTDOWN: usize = 8;

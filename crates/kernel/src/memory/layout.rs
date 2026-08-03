@@ -20,7 +20,6 @@ macro_rules! linker_symbol {
 linker_symbol!(
     text_start         => _text_start,
     text_end           => _text_end,
-    global_pointer     => _global_pointer,
     rodata_start       => _rodata_start,
     rodata_end         => _rodata_end,
     data_start         => _data_start,
