@@ -114,6 +114,17 @@ SECTIONS {
         . = ALIGN(16);
         *(.rodata .rodata.*)
 
+        /* .eh_frame is named HERE, deliberately, and not left to orphan placement.
+           Unnamed, the linker put it immediately after _rodata_end — inside the
+           loaded image but outside every range kernel_table maps, so its last 248
+           bytes lived on an unmapped page. Harmless only because panic = "abort"
+           means nothing ever reads it. It is kept rather than discarded because
+           scripts/run.sh exposes a gdb stub and gdb unwinds through .eh_frame; it
+           is read-only data, so .rodata is where it belongs. */
+        . = ALIGN(8);
+        *(.eh_frame .eh_frame.*)
+        *(.eh_frame_hdr)
+
         /* in case rodata section is empty, ensure it occupys at least one page */
         . = . + _page_size;
 
@@ -145,6 +156,11 @@ SECTIONS {
         /* in case bss section is empty, ensure it occupys at least one page */
         . = . + _page_size;
 
+        /* boot.S zeroes this span with `sd`, stepping 8 bytes at a time and
+           stopping on `bltu`, so a span that is not a multiple of 8 makes the last
+           store write up to 7 bytes past _bss_end. It has always happened to be
+           8-aligned; nothing made it so. */
+        . = ALIGN(8);
         PROVIDE(_bss_end = .);
     } :bss
 
@@ -178,10 +194,35 @@ SECTIONS {
 
     /* our heap starts right after the boot stack. Its END is not a linker
     symbol: the heap runs up to the RAM top discovered from the device tree at
-    runtime (see memory::init), not to a compile-time LENGTH. */
+    runtime (see memory::init), not to a compile-time LENGTH.
+
+    Both symbols below come from the location counter, NOT from _boot_stack_end.
+    Writing `_boot_stack_end + _page_size` restated "the image ends at the boot
+    stack" as arithmetic, and .eh_frame above is proof the linker places sections
+    this script does not mention. A NOBITS orphan ranked after .boot_stack (it and
+    .bss are both NOBITS+WA, so this is plausible) would have put _heap_start
+    inside it — and memory::init hands virt_to_phys(_heap_start) to frame::init as
+    the bottom of free RAM, so the allocator would vend frames over live kernel
+    data. `.` cannot drift from where the linker actually is. */
     . = ALIGN(_page_size);
-    PROVIDE(_heap_start = _boot_stack_end + _page_size);
+    _image_end = .;
+    . = . + _page_size;              /* guard page below the heap */
+    PROVIDE(_heap_start = .);
 }
+
+/* No section may appear after .boot_stack, and none between the five named above.
+   Each named section opens with ALIGN(_page_size), so the gap between one
+   section's end and the next one's start is normally less than a page; an orphan
+   squeezed in makes it at least a page bigger. That is the whole check. It is
+   cheap and it is exact, and without it the linker's own output was the one input
+   to this kernel that nothing verified — while _va_offset, _page_size and the
+   .boot_stack span all get checked at boot. A tripped assert here means: name the
+   new section explicitly and decide whether kernel_table should map it. */
+ASSERT(_rodata_start - _text_end   < _page_size, "orphan section between .text and .rodata")
+ASSERT(_data_start   - _rodata_end < _page_size, "orphan section between .rodata and .data")
+ASSERT(_bss_start    - _data_end   < _page_size, "orphan section between .data and .bss")
+ASSERT(_boot_stack_start - _bss_end < _page_size, "orphan section between .bss and .boot_stack")
+ASSERT(_image_end == _boot_stack_end, "orphan section after .boot_stack")
 
 /* Effective image size for the RISC-V Image header: everything the loader must
    reserve for the kernel — loaded image + BSS + boot stack. Secondary hart
@@ -189,4 +230,4 @@ SECTIONS {
    the loader has already been told about. This is an absolute symbol (a constant
    difference), so `.8byte _image_size` in boot.S emits its value, not an
    address. */
-_image_size = _boot_stack_end - _memory_start;
+_image_size = _image_end - _memory_start;
