@@ -4,17 +4,13 @@
 .option norvc
 .option norelax
 
-# The boot-role claim below uses lr.w/sc.w, so this file needs the A extension —
-# state it here rather than inherit it. Without this line the RELEASE build does
-# not compile at all: `instruction requires the following: 'Zalrsc'` on the lr.w.
-# Debug builds fine, which is why it went unnoticed.
+# The boot-role claim below uses lr.w/sc.w, so this file needs the A extension.
 #
-# The target (riscv64imac) does have A; the feature string reaching the assembler
-# for a module-level `global_asm!` is simply not the one the target spec declares,
-# and what it turns out to be depends on codegen-unit partitioning — hence the
-# opt-level dependence. Declaring the requirement in the file that has it is the
-# fix, not a workaround: this is the same thing `norvc` and `norelax` above already
-# do for this file's other assembly-level needs.
+# DO NOT DELETE as redundant. The target (riscv64imac) does declare A, but the
+# feature string reaching the assembler for a module-level `global_asm!` depends on
+# codegen-unit partitioning, and at -C opt-level=3 it does not include it: without
+# this line the RELEASE build fails with `instruction requires the following:
+# 'Zalrsc'` while the debug build compiles happily.
 .option arch, +a
 
 .section .text.init
@@ -70,15 +66,14 @@ _secondary_start:
     mv      tp, a0              # hart_id() reads tp
 
     # ---- A trap vector, before anything can trap ----
-    # stvec is UNDEFINED here: the firmware does not set it for us, so until now any
-    # exception in the boot path jumped to whatever stvec happened to hold. Point it
-    # at a parking loop instead: a fault then stops the hart deterministically with
-    # sepc/scause/stval intact for a debugger, rather than executing garbage. Linux
-    # does exactly this, first thing, in secondary_start_sbi.
+    # stvec is UNDEFINED at hart entry: the firmware does not set it, so an exception
+    # before this point jumps to whatever the register happens to hold. Point it at a
+    # parking loop: a fault then stops the hart deterministically with
+    # sepc/scause/stval intact for a debugger. Linux does the same, first thing, in
+    # secondary_start_sbi.
     #
-    # This is currently the ONLY trap vector the kernel ever installs. The trap
-    # subsystem is parked in ../attic/trap/ until boot and memory init are finalised,
-    # so nothing overwrites stvec later — see that directory's README.
+    # This is currently the ONLY trap vector the kernel installs — the trap subsystem
+    # is parked in ../attic/trap/, so nothing overwrites stvec later.
     #
     # PHYSICAL, because that is what the PC is — `lla` pre-paging yields the load
     # address. Re-pointed at the high alias after the jump below, since the kernel
@@ -180,12 +175,11 @@ _secondary_start:
 
     # start(hartid = a0, dtb = a1, measured va_offset = a2)
     call    start
-    # start() is `-> !`, so this is reachable only if something has already gone
-    # very wrong. Falling through would be the worst available outcome: the next
-    # label is the SECONDARY path, which would re-write satp and then `mv sp, a1`
-    # — and on the boot hart a1 still holds the DTB POINTER. It would run
-    # secondary_start on a stack pointed into the device tree blob. One instruction
-    # buys a deterministic stop instead.
+    # start() is `-> !`, so reaching here means something is already badly wrong.
+    # Stop deterministically rather than fall through: the next label is the
+    # SECONDARY path, which re-writes satp and then does `mv sp, a1` — and on the
+    # boot hart a1 still holds the DTB POINTER, so it would run secondary_start on a
+    # stack pointed into the device tree blob.
     j       .Lpark
 
 # ---------------------------------------------------------------------------
@@ -212,9 +206,8 @@ _secondary_start:
 
     # secondary_start(hartid = a0)
     call    secondary_start
-    # Also `-> !`. The fall-through here happens to land on .Lpark anyway, but
-    # relying on label order for that is how the boot-hart case above became a
-    # real hazard. Say it.
+    # Also `-> !`. The fall-through would land on .Lpark anyway; stating it means the
+    # next label added here cannot silently become the landing site.
     j       .Lpark
 
 # A hart with nowhere to run. Only reachable by a second arrival at _boot, i.e.
@@ -230,8 +223,8 @@ _secondary_start:
     wfi
     j       .Lpark
 
-# A trap with no real handler behind it — see the stvec write at the top. Today that
-# means *any* trap, since the trap subsystem is parked. A separate loop from .Lpark on
+# A trap with no handler behind it — see the stvec write at the top. Today that means
+# *any* trap, since the trap subsystem is parked. A separate loop from .Lpark on
 # purpose, even though the two do the same thing: the PC alone then says which of the
 # two happened, which matters in a boot path that has no console. scause/sepc/stval
 # describe the fault itself.

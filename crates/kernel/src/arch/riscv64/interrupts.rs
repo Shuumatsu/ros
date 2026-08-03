@@ -1,18 +1,13 @@
 //! Supervisor interrupt masking.
 //!
-//! One implementation, because there were two. `console::_print` had a
-//! `disable_interrupts`/`restore_interrupts` pair and `memory::kernel_table::switch_to`
-//! open-coded the identical read-`sstatus.sie`, conditionally-clear, conditionally-set
-//! sequence inline. Two parts of the kernel independently deciding how interrupts get
-//! masked is exactly the split-brain the project standards forbid, and the failure
-//! mode is not hypothetical: whoever changes one has no reason to look at the other.
+//! The only place in the kernel that writes `sstatus.sie`. Anything needing a critical
+//! section against interrupts calls [`without`] rather than hand-rolling the
+//! read/clear/restore sequence, so there is one answer to how masking works.
 //!
-//! Taking a closure rather than returning a token is what makes the restore
-//! unskippable. The manual pairs could each be defeated by an early return between the
-//! two halves, leaving the hart with interrupts masked and no indication why. A guard
-//! with a `Drop` impl would read more idiomatically but buy nothing extra here: both
-//! profiles set `panic = "abort"`, so nothing unwinds and `Drop` would not run on the
-//! panic path anyway. The closure is honest about what it actually guarantees.
+//! It takes a closure instead of returning a token so the restore cannot be skipped by
+//! an early return. A `Drop` guard would read more idiomatically but guarantee no more:
+//! both profiles set `panic = "abort"`, so nothing unwinds and `Drop` would not run on
+//! the panic path either.
 
 use riscv::register::sstatus;
 

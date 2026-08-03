@@ -1,19 +1,15 @@
 //! The single traversal.
 //!
-//! # One pass, and why it is worth insisting on
+//! # One pass
 //!
-//! This module walks `all_nodes()` exactly once. The previous version claimed to
-//! ("parses the blob once… no re-parse", "Walk the tree once") and then did it seven
-//! times: `discover_regions`, `find_by_path("/chosen")`, `memory()`, and one `find_reg`
-//! or `find_irq` per well-known device — each of the last four restarting the iterator
-//! from the root.
+//! Everything the kernel needs from the tree is collected in one `all_nodes()` walk:
+//! RAM extent, well-known devices, MMIO windows, carve-outs, hart ids and the
+//! timebase.
 //!
-//! Cost was never the problem. The problem is that a second parser is a second
-//! *opinion*: `find_reg` and `find_irq` each returned the first compatible node that
-//! happened to carry the property it was after, so on a tree with two UARTs — one
-//! debug port without `interrupts`, one real one with — the base came from one node
-//! and the IRQ from the other. Reading both off the same node makes that
-//! unrepresentable rather than unlikely.
+//! The reason is correctness, not cost. A second traversal is a second *opinion* —
+//! two searches for the same device can settle on different nodes, and nothing
+//! downstream can tell. Resolving each device once, from the node the walk is
+//! already standing on, makes that unrepresentable rather than unlikely.
 
 use fdt_raw::{Fdt, Node};
 
@@ -69,15 +65,14 @@ fn classify(name: &str, path: &str) -> RegKind {
 /// Whether the OS should ignore this node.
 ///
 /// Absent `status` means enabled, per the spec. Only `okay`/`ok` are usable —
-/// `disabled`, `fail`, `fail-sss` and `reserved` all mean "not yours", so the
-/// default is to skip anything that is not explicitly fine.
+/// `disabled`, `fail`, `fail-sss` and `reserved` all mean "not yours", so anything
+/// not explicitly fine is skipped.
 ///
-/// This was not checked at all before, and the consequence was specific: device
-/// selection took the *first* compatible node, so a board listing an unpopulated
-/// UART ahead of the real one (routine on real RISC-V SoCs; QEMU virt has exactly
-/// one, which is why it never showed) resolved the console to the dead port. The
-/// console caches its `MmioSerialPort` the moment a base is available and abandons
-/// the SBI fallback, so the kernel would go permanently silent with no diagnostic.
+/// Selection takes the first compatible node, so this is what stops a board that
+/// lists an unpopulated UART ahead of the real one from binding the console to a
+/// dead port. That failure is silent: `console` caches its `MmioSerialPort` as soon
+/// as a base exists and drops the SBI fallback, so there would be no output left to
+/// report it with.
 fn is_disabled(node: &Node<'_>) -> bool {
     !matches!(node.find_property_str("status"), None | Some("okay") | Some("ok"))
 }
@@ -154,7 +149,7 @@ pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) 
         }
 
         // `/chosen` and `/cpus` carry properties rather than a `reg`, so they are
-        // read here in the same pass that used to be followed by two more.
+        // read here rather than by a targeted lookup of their own.
         if &*path == "/chosen" {
             if let Some((start, end)) = initrd_range(&node) {
                 push_foreign(&mut foreign, PhysRegion::new("initrd", start, end - start));
@@ -217,9 +212,8 @@ pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) 
 
         // A node may describe several ranges — QEMU virt's `flash` has two.
         for reg in regs {
-            // Loud, not `continue`. A reserved range dropped in silence is memory the
-            // allocator will hand out, and this module's whole doctrine is that a
-            // carve-out never disappears quietly. A missing size usually means the
+            // Loud, not a bare `continue`. A reserved range dropped in silence is
+            // memory the allocator will hand out. A missing size usually means the
             // parent declared `#size-cells = <0>`.
             let Some(size) = reg.size else {
                 println!("[dtb] WARNING: {name} has a reg with no size; skipped");

@@ -1,21 +1,15 @@
 //! What one walk of the device tree found, and the one place it is kept.
 //!
-//! # Why this is a struct and not eleven atomics
+//! # One table, not per-device statics
 //!
-//! It used to be eleven `AtomicUsize`s next to a separate `Once<Discovered>`, and
-//! every device was therefore stored **twice**: `serial@10000000` went into
-//! `UART_BASE`/`UART_SIZE` via one tree walk *and*, independently, into the MMIO
-//! window list via another. Two representations of one fact, populated by two
-//! parsers, with nothing keeping them in step.
+//! A device's address has exactly one home here. Keeping the UART's base in its own
+//! static *and* in the MMIO window list would let the two disagree: `kernel_table`
+//! maps only the window list while `console` reads only the base, so if the window
+//! list overflowed and dropped the UART, the console would hold an address nothing
+//! had mapped — a store page fault on the first `println!` after the `satp` switch.
 //!
-//! That was not merely untidy. `kernel_table` maps only the window list, while
-//! `console` reads only `uart_base()`, so a tree with more windows than the list
-//! holds would drop the UART window from the mapping while `UART_BASE` still
-//! pointed at it — a store page fault on the first `println!` after the `satp`
-//! switch. The overflow warning fires, but the failure is not the warning's shape.
-//!
-//! With one table there is one answer, and `uart()` is a lookup rather than a
-//! second parse.
+//! So the well-known devices are indices into the same walk that produced the window
+//! list, and every accessor is a lookup rather than a second parse.
 
 use heapless::Vec;
 
@@ -34,11 +28,10 @@ pub const MAX_HART_IDS: usize = 64;
 
 /// A device the kernel knows by name, resolved from a single node.
 ///
-/// `base`, `size` and `irq` all come off the **same** node. They used to be found
-/// by separate searches — one for `reg`, one for `interrupts` — each returning the
-/// first *compatible* node that happened to carry the property it wanted. A tree
-/// with a debug UART lacking `interrupts` and a real one carrying it would resolve
-/// the base from one node and the IRQ from the other, wiring the console to the
+/// `base`, `size` and `irq` must come off the **same** node. Searching for each
+/// separately finds the first *compatible* node carrying that particular property,
+/// so a tree with a debug UART lacking `interrupts` and a real one carrying it
+/// yields a base from one node and an IRQ from the other — a console wired to the
 /// wrong interrupt line.
 #[derive(Clone, Copy, Debug)]
 pub struct Device {

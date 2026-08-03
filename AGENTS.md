@@ -13,3 +13,7 @@
 - Strict Modularity: Enforce logical file splitting and absolute separation of concerns. Do not output monolithic, single-file solutions.
 
 - High Reusability: Design highly modular, decoupled components and modular implementations aimed at maximum reusability across the codebase.
+
+---
+
+- git history does not make sense. focus on current codes

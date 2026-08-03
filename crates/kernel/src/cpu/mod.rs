@@ -18,32 +18,20 @@ static BOOT_HART: AtomicUsize = AtomicUsize::new(UNCLAIMED);
 /// Secondary harts that have reached [`crate::start::secondary_start`].
 static ONLINE: AtomicUsize = AtomicUsize::new(0);
 
-/// Reconcile the two answers to "which hart am I", and adopt the id.
+/// Reconcile the two carriers of "which hart am I", and adopt the id.
 ///
 /// Every hart calls this once, first thing, boot or secondary.
 ///
-/// # Why there are two answers to reconcile
-///
 /// The SBI boot protocol hands the id in `a0`, which arrives as the `hartid`
-/// argument to the entry points. Separately, `boot.S` does `mv tp, a0` and
-/// [`crate::arch::riscv64::hart_id`] reads `tp` back — that is where every
-/// `[hart N]` console prefix comes from. Two independent carriers of one fact, and
-/// until now nothing compared them.
+/// argument. `boot.S` also copies it into `tp`, which is what
+/// [`crate::arch::riscv64::hart_id`] reads and therefore where every `[hart N]`
+/// console prefix comes from. One value, two carriers.
 ///
-/// It is visible in a single line of output: `secondary_start` logs
-/// `[smp] hart {hartid} online`, and the console prefixes it with `[hart {tp}]` —
-/// the same number, printed twice, from two sources that could disagree.
-///
-/// The disagreement is not exotic. `tp`'s natural next use is a pointer to a
-/// per-hart control block, which is what Linux keeps there and what a scheduler
-/// will want; the id then becomes a field in that block rather than the register's
-/// whole contents. On the day `boot.S`'s `mv tp, a0` is repurposed, every log line
-/// and every future `hart_id()` caller silently reports garbage while `BOOT_HART`
-/// keeps reporting the truth. Nothing would fail, and nothing would assert.
-///
-/// So `cpu` owns hart identity and the `tp` convention answers to it. Checking the
-/// two agree costs one comparison per hart per boot and turns that future silent
-/// divergence into an immediate panic.
+/// `cpu` owns hart identity and the `tp` convention answers to it. Without this
+/// check, repurposing `tp` — the obvious next step is a pointer to a per-hart
+/// control block, which is where Linux keeps it — would make every log line and
+/// every `hart_id()` caller silently report garbage while `BOOT_HART` kept
+/// reporting the truth. Nothing would fail and nothing would assert.
 pub fn adopt(hartid: usize) {
     let from_tp = crate::arch::riscv64::hart_id();
     assert_eq!(
@@ -187,27 +175,24 @@ pub fn start_secondaries() {
 /// Wait for the harts we asked for to actually arrive, and say so if they do not.
 ///
 /// `hart_start` returning `Ok` means only that the firmware *accepted* the request —
-/// the hart is `StartPending`. Nothing used to check any further, so a secondary that
-/// faulted inside `boot.S` (a bad stack mapping, say) parked in `.Ltrap_park` forever
-/// while the boot hart sailed on and `kmain` printed its "success condition" line. A
-/// boot with N-1 dead harts looked exactly like a good one.
+/// the hart is `StartPending`. Without confirming arrival, a secondary that faults
+/// inside `boot.S` (a bad stack mapping, say) parks in `.Ltrap_park` forever while
+/// the boot hart continues and `kmain` prints its success line: a boot with N-1 dead
+/// harts is indistinguishable from a good one.
 ///
-/// # Why the bound is a duration and not a spin count
+/// # The bound is a duration, not a spin count
 ///
-/// The first version of this counted iterations, and that was wrong in a way worth
-/// recording: a spin count measures the *host's* speed, not the guest's. 100 million
-/// iterations was picked to be generously large and turned out to exceed 90 seconds
-/// under QEMU's TCG interpreter — a "timeout" indistinguishable from the hang it
-/// exists to report. Tuning the number would have made it wrong on the next machine.
+/// A spin count measures the *host's* speed, not the guest's: a number generous on
+/// real hardware can exceed a minute under QEMU's TCG interpreter, making the
+/// timeout indistinguishable from the hang it exists to report.
 ///
-/// `rdtime` reads the `time` CSR, which is readable in S-mode because OpenSBI sets
-/// `[m|s]counteren.TM`, and `/cpus/timebase-frequency` says what its ticks are worth.
-/// That is a real second on any host. Note this needs no timer *interrupt* and so
-/// does not depend on the parked trap subsystem — reading the counter is just a CSR
-/// read.
+/// `rdtime` reads the `time` CSR — readable in S-mode because OpenSBI sets
+/// `[m|s]counteren.TM` — and `/cpus/timebase-frequency` says what its ticks are
+/// worth, so the bound is a real second anywhere. This needs no timer *interrupt*,
+/// only a CSR read, so it does not depend on the parked trap subsystem.
 ///
-/// If the tree omitted the frequency there is no clock to bound by, so the wait is
-/// skipped entirely and said so. Spinning on an unknown timebase would be guessing.
+/// Without the frequency there is no clock to bound by, so the wait is skipped and
+/// said so rather than guessed at.
 fn await_secondaries(requested: usize) {
     /// Long enough that a slow emulated hart is not slandered, short enough that a
     /// genuinely dead one does not look like a hang.

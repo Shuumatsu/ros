@@ -18,10 +18,9 @@
 //! | [`walk`] | the one traversal that fills it |
 //! | [`report`] | printing it, after the console exists |
 //!
-//! The split is not filing for its own sake. With parsing in one file and storage
-//! in another there is nowhere for a second parser to quietly appear, which is what
-//! this module spent its previous life doing — seven traversals and every device
-//! stored twice. [`table`] and [`walk`] each carry the specifics.
+//! With parsing in one file and storage in another there is nowhere for a second
+//! parser to quietly appear, which is the failure this shape exists to prevent.
+//! [`table`] and [`walk`] each carry the specifics.
 //!
 //! Everything the rest of the kernel needs — RAM extent, UART base, MMIO windows,
 //! foreign RAM, hart ids, timebase — comes from the accessors below, not from
@@ -82,10 +81,6 @@ pub unsafe fn init(dtb_ptr: usize) {
 
     table::TABLE.call_once(|| walk::discover(&fdt, dtb_ptr, size, kernel_pa));
 }
-
-// No `ram_base()`. It had no caller and carried an `#[allow(dead_code)]` to hide
-// that; `summary` reads `table.ram.base` directly, which is the only thing that ever
-// wanted it. It comes back when something needs it.
 
 /// Exclusive end of the RAM region backing the kernel — the authoritative RAM
 /// top. Prefer it over the linker's compile-time estimate.

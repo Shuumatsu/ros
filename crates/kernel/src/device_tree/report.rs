@@ -37,10 +37,9 @@ pub fn summary() {
         device("clint", clint);
     }
 
-    // Unconditional. A misplaced brace used to nest these inside the CLINT check, so
-    // on a platform without a `riscv,clint0` node — QEMU's own
-    // `-machine virt,aclint=on`, for one — the counts saying how much of the tree we
-    // understood vanished, gated on an unrelated device.
+    // Unconditional, and outside every device's `if`. These counts say how much of
+    // the tree we understood, which is what you want on an unfamiliar platform —
+    // exactly when some other device is likely to be missing.
     println!(
         "[dtb] mmio:  {} windows, {} foreign RAM ranges",
         table.mmio.len(),

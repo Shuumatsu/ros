@@ -71,9 +71,7 @@ pub fn _print(args: fmt::Arguments) {
     let hart = hart_id();
 
     // Masked across the whole locked section so an interrupt handler on THIS hart
-    // cannot arrive and try to take a lock this hart already holds. The mask and its
-    // restore used to be a hand-rolled pair right here, duplicating the one in
-    // `kernel_table::switch_to`; `interrupts::without` is now the only copy.
+    // cannot arrive and try to take a lock this hart already holds.
     interrupts::without(|| {
         let mut port = UART.lock();
         let mut out = Uart(&mut port);

@@ -1,10 +1,8 @@
 //! Port from sbi.h
 //!
-//! There is no `#![allow(dead_code)]` here any more. It was hiding three wrappers
-//! with no callers at all, which is the same way this file accumulated the five
-//! legacy IPI/RFENCE wrappers whose removal is recorded below — a blanket allow
-//! makes "written but never exercised" invisible, and that is exactly the state a
-//! wrapper must not be in. Functions land with their first caller.
+//! No `#![allow(dead_code)]`: a blanket allow makes "written but never exercised"
+//! invisible, which is exactly the state an SBI wrapper must not be in. Functions
+//! land with their first caller.
 
 use core::arch::asm;
 
@@ -27,41 +25,24 @@ fn sbi_call(which: usize, arg0: usize, arg1: usize, arg2: usize) -> usize {
 
 pub fn console_putchar(ch: usize) { sbi_call(SBI_CONSOLE_PUTCHAR, ch, 0, 0); }
 
-// `console_getchar`, `shutdown` and `set_timer` used to sit here with zero callers.
-// `set_timer`'s only user was the timer in `attic/trap/`, which is not compiled; the
-// other two never had one. All three are one-line `sbi_call`s that cost nothing to
-// write when something needs them, so they go back with their caller rather than
-// waiting here unexercised. The attic README records that the timer brings
-// `set_timer` with it.
+// `console_getchar`, `shutdown` and `set_timer` are absent on purpose: nothing calls
+// them. Each is a one-line `sbi_call`, so it costs nothing to add with its first
+// caller. `attic/trap/`'s README records that restoring the timer brings `set_timer`
+// back with it.
 
 // ---------------------------------------------------------------------------
-// REMOVED: the legacy IPI and remote-fence wrappers
+// IPI and remote fences: use the v0.2+ extensions, not the legacy calls.
 //
-// `clear_ipi`, `send_ipi`, `remote_fence_i`, `remote_sfence_vma` and
-// `remote_sfence_vma_asid` used to sit here. All five were dead — zero callers,
-// invisible to the compiler behind this file's `allow(dead_code)` — and all five
-// were wrong in ways that only a caller would have discovered:
+// IPI is EID 0x735049 and RFENCE is EID 0x52464E43; OpenSBI advertises both
+// (`ipi`, `rfnc` in its boot banner). They take `hart_mask` and `hart_mask_base`
+// BY VALUE and carry range arguments properly. The legacy equivalents passed a
+// POINTER to the hart mask, which the v0.1 spec describes as a virtual address —
+// the underspecified corner that got that interface deprecated, since
+// implementations disagreed on how M-mode should translate it.
 //
-// - Both `remote_sfence_vma*` took `start` and `size`, ignored them, and passed
-//   0/0. A signature that names a range and then flushes something else is worse
-//   than no function: the caller cannot tell from the call site.
-// - They passed `&hart_mask as *const _ as usize`, a pointer to a stack local. The
-//   v0.1 spec calls that argument a virtual address, so this is not the flat
-//   misuse an earlier note here claimed — but it *is* the underspecified corner
-//   that got the whole legacy interface deprecated, because implementations
-//   disagreed about how a pointer handed to M-mode should be translated.
-//
-// The replacements are the IPI (EID 0x735049) and RFENCE (EID 0x52464E43)
-// extensions, which take `hart_mask` and `hart_mask_base` BY VALUE — no pointer,
-// no translation question — and carry the range arguments properly. OpenSBI
-// advertises both (`ipi`, `rfnc` in its boot banner).
-//
-// They are not written here yet, on purpose. Nothing can call them until
-// `SupervisorSoft` is handled, and there is no handler at all right now: the trap
-// subsystem is parked in `crates/kernel/attic/trap/` until the boot and memory-init
-// path is finalised. So anything added now would be verified by reading it. That is
-// exactly how this file acquired the five functions above. They land with their
-// first caller, and get tested by it.
+// Unwritten until `SupervisorSoft` is handled, which needs the trap subsystem in
+// `crates/kernel/attic/trap/` back. A wrapper with no caller can only be verified
+// by reading it, which is not verification.
 // ---------------------------------------------------------------------------
 
 // ===========================================================================
@@ -167,10 +148,6 @@ pub fn hart_get_status(hartid: usize) -> Result<HartState, SbiError> {
     sbi_call_ext(SBI_EXT_HSM, HSM_HART_GET_STATUS, hartid, 0, 0).map(HartState::from_raw)
 }
 
-// Legacy function ids. Only the one with a live wrapper is named: 0 (set_timer),
-// 2 (console_getchar) and 8 (shutdown) went with the wrappers that used them, and
-// 3..=7 (clear_ipi, send_ipi, the two remote fences and remote_fence_i) went with
-// theirs; see the note above. That the numbering is now almost entirely gaps is the
-// point — a legacy id has no reason to exist here without a caller, and filling one
-// back in means using the deprecated interface again.
+// Legacy function ids. Only ids with a live wrapper are named, so the gaps in the
+// numbering are deliberate: filling one in means using the deprecated interface.
 const SBI_CONSOLE_PUTCHAR: usize = 1;

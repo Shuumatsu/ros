@@ -167,11 +167,9 @@ pub struct Reservation {
     pub end: usize,
     /// Frames this record was the first to withhold.
     ///
-    /// Not derivable from `start..end`, and that is the point: carve-outs may
-    /// overlap, so the extents of all records summed is larger than the memory
-    /// actually removed from the pool. The boot log needs the true total, and a
-    /// record whose extent exceeds this is exactly one that overlapped an earlier
-    /// one — worth showing rather than hiding.
+    /// Deliberately not derivable from `start..end`: carve-outs may overlap, so the
+    /// extents summed exceed the memory actually removed from the pool. A record
+    /// whose extent exceeds this is one that overlapped an earlier one.
     pub newly_withheld: usize,
 }
 
@@ -227,22 +225,16 @@ fn reserve(
 
     // Frame at a time, skipping what an earlier carve-out already withheld.
     //
-    // `FrameAllocator::reserve` rejects an already-claimed frame, and it is right to:
-    // reserving memory that has been *vended* is a genuine conflict, and a test pins
-    // that. But the overlap here is not a conflict, and it is manufactured by this
-    // very function — the rounding above is OUTWARD, so two carve-outs a few hundred
-    // bytes apart land in the same frame, and the second call used to panic the boot.
+    // `FrameAllocator::reserve` rejects an already-claimed frame, correctly: reserving
+    // memory that has been *vended* is a genuine conflict. Overlap between carve-outs
+    // is not, and this function manufactures it — the rounding above is OUTWARD, so
+    // two carve-outs a few hundred bytes apart land in the same frame. Firmware also
+    // supplies genuine duplicates, describing one reservation through both the FDT
+    // rsvmap and a /reserved-memory node.
     //
-    // It is not exotic input either. The device tree describes reservations through
-    // two spec mechanisms at once (the FDT rsvmap and /reserved-memory), and firmware
-    // that uses both — U-Boot does, and also rsvmaps the blob this kernel reserves
-    // separately — hands us the same range twice by design. QEMU+OpenSBI happens to
-    // put its carve-outs below the pool, which is the only reason this has never
-    // fired.
-    //
-    // Disjointness belongs here rather than in the device tree, because the rounding
-    // that destroys it is here, and because merging ranges there would lose the names
-    // — and the names are load-bearing: they are how a later reclaim finds the initrd.
+    // Disjointness belongs here because the rounding that destroys it is here, and
+    // because merging in the device tree would lose the names — which are how a later
+    // reclaim finds the initrd.
     let free_before = allocator.free_frames();
     let mut newly = 0;
     for frame in range.start()..range.end() {
@@ -267,8 +259,7 @@ fn reserve(
 
     // A reservation that withheld nothing new AND overlapped nothing would leave the
     // memory vendable, and that corruption surfaces nowhere near its cause. Checking
-    // against `newly` rather than `range.len()` is what makes an overlap legal without
-    // making a no-op legal.
+    // against `newly` makes an overlap legal without making a no-op legal.
     assert_eq!(
         allocator.free_frames(),
         free_before - newly,
@@ -308,8 +299,8 @@ fn reserve_foreign_memory(allocator: &mut FrameAllocator<'static>, managed: Fram
          call device_tree::init before memory::init"
     );
     // The frame ranges withheld so far, so a later carve-out overlapping an earlier
-    // one is recognised rather than rejected. Local to this loop: it exists only to
-    // make the sequence of calls order-independent, and nothing outside needs it.
+    // one is recognised rather than rejected. Local: it only makes the sequence of
+    // calls order-independent.
     let mut withheld: Vec<FrameRange, MAX_RESERVATIONS> = Vec::new();
     for range in foreign {
         reserve(allocator, managed, &mut withheld, range.name(), range.base, range.end());
@@ -319,15 +310,13 @@ fn reserve_foreign_memory(allocator: &mut FrameAllocator<'static>, managed: Fram
 /// Print what was withheld, from the record rather than from each call site.
 fn report_reservations() {
     let reserved = reservations();
-    // Summed over what each record actually removed, not over its extent: carve-outs
-    // may describe the same memory twice, and adding the extents would report more
-    // memory withheld than the pool ever lost.
+    // Summed over what each record removed, not over its extent: carve-outs may
+    // describe the same memory twice, and adding extents would overstate the loss.
     let frames: usize = reserved.iter().map(|entry| entry.newly_withheld).sum();
     println!("[memory] withheld {} frames in {} reservations:", frames, reserved.len());
     for entry in &reserved {
-        // A record that withheld less than it spans overlapped an earlier one. Say
-        // which, so the total reconciles against the lines above it instead of
-        // looking like an arithmetic error.
+        // A record that withheld less than it spans overlapped an earlier one; mark
+        // it so the total reconciles against these lines.
         let overlap = entry.frames() - entry.newly_withheld;
         let note = if overlap > 0 { " (already covered)" } else { "" };
         println!(

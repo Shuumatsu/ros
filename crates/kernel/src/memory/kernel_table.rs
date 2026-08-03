@@ -346,10 +346,9 @@ pub fn satp() -> Option<usize> {
 /// Point `satp` at `bits` and flush the TLB.
 ///
 /// Interrupts are masked across the pair so no trap can observe a half-switched
-/// translation. Nothing can currently fire here — the trap subsystem is parked (see
-/// `attic/trap/`) and `sstatus.SIE` is clear — but the mask stays: it is the
-/// invariant this function needs, not a reaction to a source that happens to exist,
-/// and re-deriving it when interrupts come back is how the window gets reopened.
+/// translation. Nothing can fire here today — the trap subsystem is parked in
+/// `attic/trap/` and `sstatus.SIE` is clear — but the mask is the invariant this
+/// function needs, not a reaction to a source that happens to exist.
 ///
 /// # Safety
 ///

@@ -159,13 +159,9 @@ pub fn init(secondary_harts: impl Iterator<Item = usize>) {
         "kernel image top {free_start_pa:#x} meets/exceeds RAM top {ram_end:#x}; give the VM more RAM"
     );
     frame::init(free_start_pa, ram_end);
-    // Reported from what `frame` ended up owning, not from what it was asked for.
-    // These differ: `frame::init` aligns both ends and clamps the top to
-    // `direct_map::WINDOW_END`, so on a machine with more RAM than the boot window
-    // covers it warns that the excess is unmanaged — and this line, printed three
-    // lines later from the un-clamped inputs, used to contradict that warning and
-    // overstate the pool by the whole excess. `owned_range` exists to be the one
-    // answer; ask it.
+    // From what `frame` owns, not from what it was asked for. `frame::init` aligns
+    // both ends and clamps the top to `direct_map::WINDOW_END`, so on a machine with
+    // more RAM than the boot window covers the two differ by the whole excess.
     let (pool_start, pool_end) = frame::owned_range();
     println!(
         "[memory] frames: {:#x}..{:#x} ({}, physical)",

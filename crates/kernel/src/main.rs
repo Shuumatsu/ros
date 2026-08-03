@@ -31,17 +31,13 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// Last stop on the fatal path. `no_mangle` because the symbol must be exactly
 /// `abort` — compiler-generated code refers to it by that name.
 ///
-/// There is no `eh_personality` here, and no `#![feature(lang_items)]` to declare
-/// one. Both profiles set `panic = "abort"` and the target spec for
+/// No `eh_personality` is defined anywhere in this crate, and none is needed: both
+/// profiles set `panic = "abort"` and the target spec for
 /// `riscv64imac-unknown-none-elf` says `"panic-strategy": "abort"`, so nothing
-/// unwinds and the personality routine was never reachable — it only cost a
-/// nightly feature gate.
+/// unwinds.
 #[unsafe(no_mangle)]
 extern "C" fn abort() -> ! {
-    // No hart id in the message: `_emergency_print` already prefixes every line
-    // with one. This used to print its own as `[cpu: N]`, so the most important
-    // message in the kernel read `[hart 0] [cpu: 0] ...` — the same fact twice,
-    // under two names.
+    // No hart id in the message: `_emergency_print` already prefixes every line.
     emergency_println!("enter abort()");
     arch::riscv64::wait_forever()
 }

@@ -12,9 +12,8 @@ pub fn hart_id() -> usize {
     hart_id
 }
 
-/// Park this hart for good. The one parking primitive — `abort` and both `kmain`s
-/// call it rather than open-coding the loop, which is how they used to disagree
-/// about whether `wfi` needs `unsafe` (it does not).
+/// Park this hart for good. The one parking primitive: `abort` and both `kmain`s
+/// call it rather than open-coding the loop.
 #[inline(always)]
 pub fn wait_forever() -> ! {
     loop {
