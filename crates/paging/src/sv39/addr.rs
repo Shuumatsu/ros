@@ -93,6 +93,17 @@ impl fmt::Debug for VirtualAddr {
     }
 }
 
+/// Formats as the bare address, so `{:#x}` works and width flags are honoured.
+///
+/// Not a nicety. Without it the only way to print an address is `{:?}`, which
+/// spells out the VPN decomposition, or `.bits()` — and a caller that reaches for
+/// `.bits()` to print has just dropped the type for the rest of the expression.
+impl fmt::LowerHex for VirtualAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
 impl MemoryAddr for VirtualAddr {
     fn from_usize(addr: usize) -> Self { Self(addr) }
     fn as_usize(self) -> usize { self.0 }
@@ -144,6 +155,13 @@ pub struct PhysicalAddr(usize);
 impl fmt::Debug for PhysicalAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "PhysicalAddr({:#x}, ppn={:#x}, offset={:#x})", self.0, self.ppn(), self.offset())
+    }
+}
+
+/// See [`VirtualAddr`]'s impl: `{:#x}` without stripping the type.
+impl fmt::LowerHex for PhysicalAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerHex::fmt(&self.0, f)
     }
 }
 

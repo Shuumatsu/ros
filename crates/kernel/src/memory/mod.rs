@@ -2,7 +2,7 @@ use buddy_system_allocator::LockedHeap;
 use core::alloc::Layout;
 
 use paging::sv39::{PAGE_SIZE, page_size_at};
-use paging::utils::align_up;
+use paging::{MemoryAddr, PhysicalAddr, VirtualAddr};
 
 pub mod direct_map;
 pub mod frame;
@@ -27,9 +27,9 @@ pub const SUPERPAGE: usize = page_size_at(1);
 ///
 /// Only meaningful once [`frame::init`] has run: the allocator decides how much
 /// physical memory the kernel owns, and therefore how far the direct map reaches.
-pub fn kernel_va_free_start() -> usize {
+pub fn kernel_va_free_start() -> VirtualAddr {
     let (_, pool_end) = frame::owned_range();
-    align_up(phys_to_virt(pool_end), SUPERPAGE)
+    phys_to_virt(pool_end).align_up(SUPERPAGE)
 }
 
 /// Buddy order: allocations up to 2^(ORDER-1) bytes, i.e. 2 GiB.
@@ -49,16 +49,25 @@ const KERNEL_HEAP_SIZE: usize = 8 * 1024 * 1024;
 ///
 /// A compile-time add, and valid for *every* physical address — RAM and MMIO alike —
 /// because the kernel's map is linear. See [`direct_map`].
+///
+/// The types are the whole point of the signature. This is the one place the kernel
+/// crosses between the two address spaces, so it is also the only place where mixing
+/// them up is possible; taking and returning a bare `usize` made
+/// `phys_to_virt(phys_to_virt(pa))` a legal expression.
 #[inline]
-pub const fn phys_to_virt(pa: usize) -> usize {
-    pa.wrapping_add(direct_map::VA_OFFSET)
+pub const fn phys_to_virt(pa: PhysicalAddr) -> VirtualAddr {
+    VirtualAddr::new(pa.bits().wrapping_add(direct_map::VA_OFFSET))
 }
 
 /// Translate a kernel direct-map virtual address back to physical
 /// (`PA = VA - OFFSET`).
+///
+/// Only meaningful for an address *in* the direct map. A kernel stack VA is not —
+/// [`stack`] deliberately maps those above it — and the arithmetic here cannot tell,
+/// so a caller holding a virtual address from anywhere else must not use this.
 #[inline]
-pub const fn virt_to_phys(va: usize) -> usize {
-    va.wrapping_sub(direct_map::VA_OFFSET)
+pub const fn virt_to_phys(va: VirtualAddr) -> PhysicalAddr {
+    PhysicalAddr::new(va.bits().wrapping_sub(direct_map::VA_OFFSET))
 }
 
 #[alloc_error_handler]
@@ -114,15 +123,18 @@ pub fn init(secondary_harts: impl Iterator<Item = usize>) {
         "[memory] boot window: PA 0x0..{:#x} -> VA {:#x}.. ({})",
         direct_map::WINDOW_END,
         direct_map::VA_OFFSET,
-        crate::utils::ByteSize(direct_map::WINDOW_END)
+        crate::utils::ByteSize(direct_map::WINDOW_END.bits())
     );
 
     // 1. Physical frames FIRST: [free_start, ram_end). `free_start` is the top of the
     //    kernel image (a high VA); the allocator vends *physical* addresses, so convert
     //    it back. `ram_end` is already physical, validated by `device_tree::init`.
     let free_start_pa = virt_to_phys(layout::heap_start());
-    let ram_end = crate::device_tree::ram_end()
-        .expect("device tree RAM region not discovered; call device_tree::init before memory::init");
+    let ram_end = PhysicalAddr::new(
+        crate::device_tree::ram_end().expect(
+            "device tree RAM region not discovered; call device_tree::init before memory::init",
+        ),
+    );
     assert!(
         free_start_pa < ram_end,
         "kernel image top {free_start_pa:#x} meets/exceeds RAM top {ram_end:#x}; give the VM more RAM"
@@ -135,7 +147,7 @@ pub fn init(secondary_harts: impl Iterator<Item = usize>) {
         "[memory] frames: {:#x}..{:#x} ({}, physical)",
         pool_start,
         pool_end,
-        crate::utils::ByteSize(pool_end - pool_start)
+        crate::utils::ByteSize(pool_end.sub_addr(pool_start))
     );
     frame::self_test();
 
@@ -145,10 +157,11 @@ pub fn init(secondary_harts: impl Iterator<Item = usize>) {
     let heap_pages = KERNEL_HEAP_SIZE / PAGE_SIZE;
     let heap_frames =
         frame::alloc_contiguous(heap_pages).expect("no contiguous RAM for the kernel heap");
-    let heap_start = phys_to_virt(heap_frames.base().bits());
-    let heap_end = heap_start + KERNEL_HEAP_SIZE;
+    let heap_start = phys_to_virt(heap_frames.base());
+    let heap_end = heap_start.add(KERNEL_HEAP_SIZE);
     unsafe {
-        HEAP.lock().add_to_heap(heap_start, heap_end);
+        // `buddy_system_allocator` speaks bare addresses; this is a genuine exit.
+        HEAP.lock().add_to_heap(heap_start.bits(), heap_end.bits());
     }
     println!(
         "[memory] heap:   {:#x}..{:#x} ({}, virtual)",

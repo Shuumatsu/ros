@@ -40,6 +40,9 @@ use crate::utils::ByteSize;
 static FRAME_ALLOCATOR: Mutex<Option<FrameAllocator<'static>>> = Mutex::new(None);
 
 /// Physical span this module took at [`init`], bitmap included. Zero until then.
+///
+/// Bare words because there is no atomic address type; [`owned_range`] is the only
+/// reader and it puts the type back on.
 static OWNED_START: AtomicUsize = AtomicUsize::new(0);
 static OWNED_END: AtomicUsize = AtomicUsize::new(0);
 
@@ -52,9 +55,9 @@ static OWNED_END: AtomicUsize = AtomicUsize::new(0);
 ///
 /// Deliberately *not* the allocator's `range()`, which excludes the bitmap — the
 /// bitmap needs mapping too, since this module writes it.
-pub fn owned_range() -> (usize, usize) {
-    let start = OWNED_START.load(Ordering::Relaxed);
-    let end = OWNED_END.load(Ordering::Relaxed);
+pub fn owned_range() -> (PhysicalAddr, PhysicalAddr) {
+    let start = PhysicalAddr::new(OWNED_START.load(Ordering::Relaxed));
+    let end = PhysicalAddr::new(OWNED_END.load(Ordering::Relaxed));
     assert!(start < end, "frame::owned_range queried before frame::init");
     (start, end)
 }
@@ -79,7 +82,7 @@ impl Frames {
 /// The bitmap is reserved from the front of the range and excluded from the
 /// managed frames. RAM above the window `boot.S` maps is dropped (loudly),
 /// because its frames would not be addressable through either boot mapping.
-pub fn init(free_start: usize, ram_end: usize) {
+pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr) {
     // Frames past the boot mappings are unreachable and must not be handed out. The
     // bound comes from the module that *builds* those mappings.
     let window_end = crate::memory::direct_map::WINDOW_END;
@@ -95,13 +98,13 @@ pub fn init(free_start: usize, ram_end: usize) {
     if ram_end > window_end {
         println!(
             "[memory] WARNING: {} of RAM above the {:#x} boot window is unmanaged",
-            crate::utils::ByteSize(ram_end - window_end),
+            crate::utils::ByteSize(ram_end.sub_addr(window_end)),
             window_end
         );
     }
 
-    let start_ppn = PhysicalAddr::new(free_start).align_up(PAGE_SIZE).ppn();
-    let end_ppn = PhysicalAddr::new(usable_end).align_down(PAGE_SIZE).ppn();
+    let start_ppn = free_start.align_up(PAGE_SIZE).ppn();
+    let end_ppn = usable_end.align_down(PAGE_SIZE).ppn();
     let full = FrameRange::new(start_ppn, end_ppn).expect("free RAM range empty after alignment");
 
     // Size the bitmap for the whole range, then reserve whole frames for it at
@@ -113,13 +116,13 @@ pub fn init(free_start: usize, ram_end: usize) {
     let managed = FrameRange::new(start_ppn + bitmap_frames, end_ppn)
         .expect("no RAM left to manage after reserving the frame bitmap");
 
-    let bitmap_va = phys_to_virt(PhysicalAddr::from_ppn(start_ppn).bits());
+    let bitmap_va = phys_to_virt(PhysicalAddr::from_ppn(start_ppn));
     // SAFETY: `[start_ppn, start_ppn + bitmap_frames)` is page-aligned, sits in
     // identity+high-half-mapped RAM, is excluded from `managed`, and lives as
     // long as the kernel (physical RAM), so the `'static mut` borrow is sound
     // and exclusive.
     let bitmap: &'static mut [usize] =
-        unsafe { core::slice::from_raw_parts_mut(bitmap_va as *mut usize, bitmap_words) };
+        unsafe { core::slice::from_raw_parts_mut(bitmap_va.as_mut_ptr(), bitmap_words) };
 
     // SAFETY: `managed` covers RAM strictly above the kernel image and the
     // bitmap — memory nothing else owns — and boot.S maps every frame in it.
@@ -148,9 +151,9 @@ const MAX_RESERVATIONS: usize = 24;
 pub struct Reservation {
     name: String<RESERVATION_NAME_LEN>,
     /// First withheld physical address.
-    pub start: usize,
+    pub start: PhysicalAddr,
     /// Exclusive end.
-    pub end: usize,
+    pub end: PhysicalAddr,
     /// Frames this record was the first to withhold.
     ///
     /// Not derivable from `start..end`: carve-outs may overlap, so the extents summed
@@ -167,7 +170,7 @@ impl Reservation {
 
     /// Frames this range spans, overlap included.
     pub fn frames(&self) -> usize {
-        (self.end - self.start) / PAGE_SIZE
+        self.end.sub_addr(self.start) / PAGE_SIZE
     }
 }
 
@@ -198,11 +201,11 @@ fn reserve(
     managed: FrameRange,
     withheld: &mut Vec<FrameRange, MAX_RESERVATIONS>,
     name: &str,
-    start: usize,
-    end: usize,
+    start: PhysicalAddr,
+    end: PhysicalAddr,
 ) {
-    let first = PhysicalAddr::new(start).align_down(PAGE_SIZE).ppn().max(managed.start());
-    let last = PhysicalAddr::new(end).align_up(PAGE_SIZE).ppn().min(managed.end());
+    let first = start.align_down(PAGE_SIZE).ppn().max(managed.start());
+    let last = end.align_up(PAGE_SIZE).ppn().min(managed.end());
 
     let Ok(range) = FrameRange::new(first, last) else {
         println!("[memory] reserve: {name} at {start:#x}..{end:#x} is outside the pool, skipped");
@@ -254,8 +257,8 @@ fn reserve(
 
     let record = Reservation {
         name: crate::utils::truncated(name),
-        start: PhysicalAddr::from_ppn(range.start()).bits(),
-        end: PhysicalAddr::from_ppn(range.end()).bits(),
+        start: PhysicalAddr::from_ppn(range.start()),
+        end: PhysicalAddr::from_ppn(range.end()),
         newly_withheld: newly,
     };
     if RESERVATIONS.lock().push(record).is_err() {
@@ -288,7 +291,15 @@ fn reserve_foreign_memory(allocator: &mut FrameAllocator<'static>, managed: Fram
     // order-independent.
     let mut withheld: Vec<FrameRange, MAX_RESERVATIONS> = Vec::new();
     for range in foreign {
-        reserve(allocator, managed, &mut withheld, range.name(), range.base, range.end());
+        // The device tree reports raw integers; this is where they become addresses.
+        reserve(
+            allocator,
+            managed,
+            &mut withheld,
+            range.name(),
+            PhysicalAddr::new(range.base),
+            PhysicalAddr::new(range.end()),
+        );
     }
 }
 
@@ -309,7 +320,7 @@ fn report_reservations() {
             entry.name(),
             entry.start,
             entry.end,
-            ByteSize(entry.end - entry.start),
+            ByteSize(entry.end.sub_addr(entry.start)),
             note
         );
     }
@@ -326,10 +337,12 @@ pub fn alloc() -> Option<Frames> {
 pub fn alloc_contiguous(count: usize) -> Option<Frames> {
     let count = NonZeroUsize::new(count)?;
     let block = FRAME_ALLOCATOR.lock().as_mut()?.allocate(count)?;
-    let base_va = phys_to_virt(PhysicalAddr::from_ppn(block.start_frame()).bits());
+    let base_va = phys_to_virt(PhysicalAddr::from_ppn(block.start_frame()));
     // SAFETY: the allocator just gave us exclusive ownership of these frames,
     // which are mapped writable through the high half.
-    unsafe { core::ptr::write_bytes(base_va as *mut u8, 0, block.frame_count() * PAGE_SIZE) };
+    unsafe {
+        core::ptr::write_bytes(base_va.as_mut_ptr::<u8>(), 0, block.frame_count() * PAGE_SIZE)
+    };
     Some(Frames(block))
 }
 
@@ -408,8 +421,8 @@ pub fn self_test() {
     let a = alloc().expect("frame self-test: pool empty on first alloc");
     let a_base = a.base();
     assert!(a_base.is_aligned(PAGE_SIZE), "frame {a_base:?} is not page aligned");
-    let a_va = phys_to_virt(a_base.bits());
-    let first_byte = unsafe { core::ptr::read_volatile(a_va as *const u8) };
+    let a_va = phys_to_virt(a_base);
+    let first_byte = unsafe { core::ptr::read_volatile(a_va.as_ptr::<u8>()) };
     assert_eq!(first_byte, 0u8, "frame {a_base:?} was not zeroed on alloc");
 
     // (2) A second frame is distinct.
@@ -418,12 +431,12 @@ pub fn self_test() {
 
     // (3) Dirty then free `a`; if that frame comes back, it must be re-zeroed —
     //     proving alloc zeroes recycled frames, not just pristine RAM.
-    unsafe { core::ptr::write_bytes(a_va as *mut u8, 0xAB, PAGE_SIZE) };
+    unsafe { core::ptr::write_bytes(a_va.as_mut_ptr::<u8>(), 0xAB, PAGE_SIZE) };
     // SAFETY: `a` has no users in this host-free test.
     unsafe { free(a) };
     let c = alloc().expect("frame self-test: pool empty on realloc");
     if c.base() == a_base {
-        let byte = unsafe { core::ptr::read_volatile(phys_to_virt(c.base().bits()) as *const u8) };
+        let byte = unsafe { core::ptr::read_volatile(phys_to_virt(c.base()).as_ptr::<u8>()) };
         assert_eq!(byte, 0u8, "recycled frame {:?} was not re-zeroed (found {byte:#x})", c.base());
     }
 

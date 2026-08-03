@@ -13,7 +13,7 @@
 //! can forget: there is exactly one way to turn a `Region` into mappings.
 
 use paging::sv39::{FrameSource, PhysAccess, page_size_at};
-use paging::{MapError, Mapper, PhysicalAddr, PteFlags, VirtualAddr};
+use paging::{MapError, MemoryAddr, Mapper, PhysicalAddr, PteFlags, VirtualAddr};
 
 use crate::utils::ByteSize;
 
@@ -29,9 +29,9 @@ pub struct Region {
     /// What this region is, for diagnostics and the boot log.
     pub name: &'static str,
     /// First virtual address.
-    pub va: usize,
+    pub va: VirtualAddr,
     /// Physical address `va` maps to.
-    pub pa: usize,
+    pub pa: PhysicalAddr,
     /// Length in bytes. Zero means "nothing to do"; see [`is_empty`](Self::is_empty).
     pub len: usize,
     /// Page-table level to build the region from: 0 = 4 KiB, 1 = 2 MiB, 2 = 1 GiB.
@@ -59,8 +59,8 @@ impl Region {
     }
 
     /// Exclusive end of the virtual range, before page rounding.
-    fn end_va(&self) -> usize {
-        self.va + self.len
+    fn end_va(&self) -> VirtualAddr {
+        self.va.add(self.len)
     }
 
     /// Reject a region the kernel must never install.
@@ -78,16 +78,14 @@ impl Region {
         );
 
         let page = self.page_size();
-        assert_eq!(
-            self.va % page,
-            0,
+        assert!(
+            self.va.is_aligned(page),
             "region '{}' virtual base {:#x} is not aligned to its {page:#x}-byte page",
             self.name,
             self.va
         );
-        assert_eq!(
-            self.pa % page,
-            0,
+        assert!(
+            self.pa.is_aligned(page),
             "region '{}' physical base {:#x} is not aligned to its {page:#x}-byte page",
             self.name,
             self.pa
@@ -106,7 +104,11 @@ impl Region {
 
         // The whole region shares one VA→PA difference, so the walk needs no
         // per-page bookkeeping. Wrapping because a direct-map VA exceeds its PA.
-        let delta = self.pa.wrapping_sub(self.va);
+        //
+        // The one place here that computes across the two address spaces, so the one
+        // place the types have to come off: a VA minus a PA is not an address of
+        // either kind. It goes straight back on in the closure below.
+        let delta = self.pa.bits().wrapping_sub(self.va.bits());
         mapper.map_range_at_level(
             self.va,
             self.end_va(),
@@ -128,29 +130,27 @@ impl Region {
         let page = self.page_size();
         for index in 0..self.pages() {
             let offset = index * page;
-            let vaddr = VirtualAddr::new(self.va + offset);
-            let (entry, level) = mapper.entry_of(vaddr).unwrap_or_else(|| {
-                panic!("region '{}' left {:#x} unmapped", self.name, vaddr.bits())
-            });
+            let vaddr = self.va.add(offset);
+            let (entry, level) = mapper
+                .entry_of(vaddr)
+                .unwrap_or_else(|| panic!("region '{}' left {vaddr:#x} unmapped", self.name));
 
             assert_eq!(
                 level, self.level,
-                "region '{}' mapped {:#x} at level {level}, expected level {}",
-                self.name, vaddr.bits(), self.level
+                "region '{}' mapped {vaddr:#x} at level {level}, expected level {}",
+                self.name, self.level
             );
             assert_eq!(
                 entry.flags(),
                 self.flags | PteFlags::VALID,
-                "region '{}' has the wrong rights at {:#x}",
-                self.name,
-                vaddr.bits()
+                "region '{}' has the wrong rights at {vaddr:#x}",
+                self.name
             );
             assert_eq!(
                 mapper.translate(vaddr),
-                Some(PhysicalAddr::new(self.pa + offset)),
-                "region '{}' translates {:#x} to the wrong frame",
-                self.name,
-                vaddr.bits()
+                Some(self.pa.add(offset)),
+                "region '{}' translates {vaddr:#x} to the wrong frame",
+                self.name
             );
         }
     }
@@ -191,8 +191,8 @@ pub fn report(regions: &[Region]) {
                 || next.level != region.level
                 || next.flags != region.flags
                 || next.is_empty()
-                || next.va != region.va + span
-                || next.pa != region.pa + span
+                || next.va != region.va.add(span)
+                || next.pa != region.pa.add(span)
             {
                 break;
             }

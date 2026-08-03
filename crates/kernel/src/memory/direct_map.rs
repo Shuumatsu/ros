@@ -41,6 +41,10 @@ use paging::{PhysicalAddr, Satp, Table, VirtualAddr};
 ///
 /// Duplicated in `kernel.ld` as `_va_offset` out of necessity — the linker cannot read
 /// a Rust `const`. [`verify`] is what keeps the duplicate honest.
+///
+/// A bare `usize` while its neighbours are typed, because it is a *difference* between
+/// the two address spaces rather than an address in either. [`super::phys_to_virt`] is
+/// where it becomes one.
 pub const VA_OFFSET: usize = 0xffff_ffc0_0000_0000;
 
 /// Bytes mapped by one root-level leaf.
@@ -57,7 +61,7 @@ const WINDOW_GIGAPAGES: usize = 4;
 ///
 /// Frames above this are addressable through neither boot mapping, so the frame
 /// allocator must not hand them out.
-pub const WINDOW_END: usize = WINDOW_GIGAPAGES * GIGAPAGE;
+pub const WINDOW_END: PhysicalAddr = PhysicalAddr::new(WINDOW_GIGAPAGES * GIGAPAGE);
 
 /// Permissions for a boot mapping: full access, with `A`/`D` pre-set so the
 /// hardware walker never needs to write back into the table.

@@ -1,17 +1,22 @@
 //! Kernel memory layout symbols from the linker script.
 
 use paging::sv39::PAGE_SIZE;
+use paging::{MemoryAddr, VirtualAddr};
 
 /// Declares an extern linker symbol and creates an accessor function.
+///
+/// The kernel is linked high, so every one of these is a *virtual* address and is
+/// typed as one at the source. That is what stops one being handed to something
+/// expecting a physical address without a visible [`super::virt_to_phys`] in between.
 macro_rules! linker_symbol {
     ($($fn_name:ident => $sym_name:ident),* $(,)?) => {
         $(
             #[inline]
-            pub fn $fn_name() -> usize {
+            pub fn $fn_name() -> VirtualAddr {
                 unsafe extern "C" {
                     static $sym_name: u8;
                 }
-                unsafe { &$sym_name as *const _ as usize }
+                VirtualAddr::new(unsafe { &$sym_name as *const _ as usize })
             }
         )*
     };
@@ -52,7 +57,7 @@ linker_symbol!(
 ///
 /// Call once, before anything derives an address from these symbols.
 pub fn check() {
-    let guard = heap_start() - boot_stack_end();
+    let guard = heap_start().sub_addr(boot_stack_end());
     assert_eq!(
         guard, PAGE_SIZE,
         "kernel.ld padded {guard:#x} bytes between the boot stack and the heap, but Rust's \
@@ -69,6 +74,6 @@ pub fn check() {
         ("_boot_stack_start", boot_stack_start()),
         ("_heap_start", heap_start()),
     ] {
-        assert_eq!(addr % PAGE_SIZE, 0, "{name} = {addr:#x} is not page aligned");
+        assert!(addr.is_aligned(PAGE_SIZE), "{name} = {addr:#x} is not page aligned");
     }
 }

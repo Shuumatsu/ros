@@ -63,8 +63,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use alloc::vec::Vec;
 
 use paging::sv39::{LEVELS, page_size_at};
-use paging::utils::{align_down, align_up};
-use paging::{LinearOffset, Mapper, PhysicalAddr, PteFlags, Satp, Table, VirtualAddr};
+use paging::{
+    LinearOffset, MemoryAddr, Mapper, PhysicalAddr, PteFlags, Satp, Table, VirtualAddr,
+};
 
 use crate::memory::frame::{self, TableFrames};
 use crate::memory::region::{self, Region};
@@ -93,12 +94,12 @@ const READ_WRITE: PteFlags =
 /// "Exactly" is the requirement, not "approximately": a superpage rounds outward, so
 /// using one that does not divide the window would map whatever sits next to the
 /// device. Both the base and the length must be multiples of the page size.
-fn largest_level_for(base: usize, len: usize) -> usize {
+fn largest_level_for(base: PhysicalAddr, len: usize) -> usize {
     (0..LEVELS)
         .rev()
         .find(|&level| {
             let page = page_size_at(level);
-            base % page == 0 && len % page == 0
+            base.is_aligned(page) && len % page == 0
         })
         // Level 0 always fits: every MMIO window is page-aligned and page-sized once
         // `Region::install` has rounded it, and `validate` rejects it otherwise.
@@ -109,8 +110,8 @@ fn largest_level_for(base: usize, len: usize) -> usize {
 /// side is *derived* rather than restated and given a chance to disagree.
 fn direct(
     name: &'static str,
-    start: usize,
-    end: usize,
+    start: VirtualAddr,
+    end: VirtualAddr,
     level: usize,
     flags: PteFlags,
 ) -> Region {
@@ -118,7 +119,7 @@ fn direct(
         name,
         va: start,
         pa: virt_to_phys(start),
-        len: end.saturating_sub(start),
+        len: end.checked_sub_addr(start).unwrap_or(0),
         level,
         flags,
     }
@@ -140,14 +141,18 @@ fn regions() -> Vec<Region> {
     // that is what makes a new driver work through `phys_to_virt` instead of needing its
     // own base constant.
     for device in crate::device_tree::mmio_regions() {
+        // The device tree reports raw integers; this is where they become addresses.
+        // Named once and derived from, so the virtual and physical sides cannot be
+        // filled in the wrong way round.
+        let base = PhysicalAddr::new(device.base);
         push(Region {
             name: "mmio",
-            va: phys_to_virt(device.base),
-            pa: device.base,
+            va: phys_to_virt(base),
+            pa: base,
             len: device.size,
             // Largest page the window's own geometry permits: QEMU virt's PCI ECAM is
             // 256 MiB, i.e. 128 superpages instead of 65536 pages.
-            level: largest_level_for(device.base, device.size),
+            level: largest_level_for(base, device.size),
             flags: READ_WRITE,
         });
     }
@@ -193,15 +198,14 @@ fn regions() -> Vec<Region> {
     // that slot is mapped at 4 KiB so the sections above can carry different
     // rights; everything past it is bulk direct map and gets superpages. The two
     // must not overlap, or the finer mappings would hit `SuperpageInPath`.
-    assert_eq!(
-        layout::text_start() % SUPERPAGE,
-        0,
+    assert!(
+        layout::text_start().is_aligned(SUPERPAGE),
         "the kernel image must start superpage-aligned, or its slot would overlap the bulk direct map"
     );
-    let slot_end = align_up(pool_start_va, SUPERPAGE);
+    let slot_end = pool_start_va.align_up(SUPERPAGE);
     // Superpages only reach the last superpage boundary below the end; any
     // remainder is mapped at 4 KiB rather than rounded up past owned memory.
-    let bulk_end = align_down(pool_end_va, SUPERPAGE).max(slot_end);
+    let bulk_end = pool_end_va.align_down(SUPERPAGE).max(slot_end);
 
     // Rest of the image's slot: the frame allocator's bitmap and the first of the
     // frames it vends. 4 KiB, because the slot is.
@@ -233,17 +237,17 @@ fn audit_disjoint(regions: &[Region]) {
             continue;
         }
         for b in regions[index + 1..].iter().filter(|b| !b.is_empty()) {
-            let disjoint = a.va + a.len <= b.va || b.va + b.len <= a.va;
+            let disjoint = a.va.add(a.len) <= b.va || b.va.add(b.len) <= a.va;
             assert!(
                 disjoint,
                 "regions '{}' ({:#x}..{:#x}) and '{}' ({:#x}..{:#x}) overlap; one would \
                  silently replace the other's rights",
                 a.name,
                 a.va,
-                a.va + a.len,
+                a.va.add(a.len),
                 b.name,
                 b.va,
-                b.va + b.len
+                b.va.add(b.len)
             );
         }
     }
@@ -262,8 +266,7 @@ pub fn init() {
     // SAFETY: a freshly allocated, zeroed, page-aligned frame that this module now
     // owns exclusively and never releases, reachable through the direct map. That
     // makes a unique `'static` borrow of it sound.
-    let root: &'static mut Table =
-        unsafe { &mut *(phys_to_virt(root_pa.bits()) as *mut Table) };
+    let root: &'static mut Table = unsafe { &mut *phys_to_virt(root_pa).as_mut_ptr::<Table>() };
 
     let mut mapper = Mapper::new(root, TableFrames, LinearOffset(direct_map::VA_OFFSET));
 
@@ -279,7 +282,7 @@ pub fn init() {
     audit_holes(&mapper);
     audit_live_context(&mapper);
 
-    println!("[memory] kernel page table root at {:#x}:", root_pa.bits());
+    println!("[memory] kernel page table root at {root_pa:#x}:");
     region::report(&regions);
 
     let satp = Satp::sv39(root_pa, 0);
@@ -347,7 +350,7 @@ unsafe fn switch_to(bits: usize) {
 /// to be unmapped too, but that is incidental geometry and would be a fragile thing
 /// to pin.
 fn audit_holes(mapper: &KernelMapper<'_>) {
-    let unmapped = |va: usize| mapper.entry_of(VirtualAddr::new(va)).is_none();
+    let unmapped = |va: VirtualAddr| mapper.entry_of(va).is_none();
 
     // One guard page below every stack. `stack` says which; this only checks them.
     for guard in stack::guards() {
@@ -378,23 +381,24 @@ fn audit_live_context(mapper: &KernelMapper<'_>) {
         core::arch::asm!("auipc {}, 0", out(reg) pc, options(nomem, nostack));
         core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack));
     }
-    check_live(mapper, "instruction stream", pc, PteFlags::EXECUTE);
-    check_live(mapper, "stack pointer", sp, PteFlags::WRITE);
+    // Both are bare registers coming out of assembly — the one place in this module
+    // where an address genuinely enters untyped.
+    check_live(mapper, "instruction stream", VirtualAddr::new(pc), PteFlags::EXECUTE);
+    check_live(mapper, "stack pointer", VirtualAddr::new(sp), PteFlags::WRITE);
 }
 
 /// Require a currently-live address to survive the switch with `needed` rights.
-fn check_live(mapper: &KernelMapper<'_>, what: &str, va: usize, needed: PteFlags) {
-    let vaddr = VirtualAddr::new(va);
+fn check_live(mapper: &KernelMapper<'_>, what: &str, va: VirtualAddr, needed: PteFlags) {
     let (entry, _) = mapper
-        .entry_of(vaddr)
+        .entry_of(va)
         .unwrap_or_else(|| panic!("the running {what} at {va:#x} would be unmapped"));
     assert!(
         entry.flags().contains(needed),
         "the running {what} at {va:#x} would lack {needed:?}"
     );
     assert_eq!(
-        mapper.translate(vaddr),
-        Some(PhysicalAddr::new(virt_to_phys(va))),
+        mapper.translate(va),
+        Some(virt_to_phys(va)),
         "the running {what} at {va:#x} would move to a different frame"
     );
 }

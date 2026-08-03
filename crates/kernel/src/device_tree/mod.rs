@@ -46,6 +46,7 @@ pub use region::PhysRegion;
 pub use report::summary;
 
 use fdt_raw::Fdt;
+use paging::PhysicalAddr;
 
 /// Parse the device tree at `dtb_ptr` and record the hardware the kernel needs.
 /// Populating the UART base here is what backs the console, so this must run
@@ -69,7 +70,7 @@ pub unsafe fn init(dtb_ptr: usize) {
     // than treating it as a pointer. Both the boot table and the kernel table map it
     // there, whereas the raw address is only dereferenceable while a boot identity
     // mapping exists — and it no longer does.
-    let blob = crate::memory::phys_to_virt(dtb_ptr) as *mut u8;
+    let blob = crate::memory::phys_to_virt(PhysicalAddr::new(dtb_ptr)).as_mut_ptr::<u8>();
     // SAFETY: forwarded from this function's contract — `dtb_ptr` addresses a valid
     // FDT that stays mapped and unmodified, and `blob` is its direct-map alias.
     let fdt = unsafe { Fdt::from_ptr(blob) }
@@ -79,7 +80,7 @@ pub unsafe fn init(dtb_ptr: usize) {
     let kernel_pa = crate::memory::virt_to_phys(crate::memory::layout::text_start());
     let size = fdt.header().totalsize as usize;
 
-    table::TABLE.call_once(|| walk::discover(&fdt, dtb_ptr, size, kernel_pa));
+    table::TABLE.call_once(|| walk::discover(&fdt, dtb_ptr, size, kernel_pa.bits()));
 }
 
 /// Exclusive end of the RAM region backing the kernel — the authoritative RAM

@@ -1,5 +1,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use paging::MemoryAddr;
+
 use crate::arch::riscv64::sbi;
 use crate::memory::{kernel_table, layout, stack, virt_to_phys};
 use crate::println;
@@ -233,9 +235,8 @@ pub fn start_secondaries() {
         // with no arithmetic and no check, so this is the only place the property
         // can be enforced; it holds today only because SIZE and GUARD_SIZE happen
         // to be page multiples.
-        assert_eq!(
-            stack.top() % 16,
-            0,
+        assert!(
+            stack.top().is_aligned(16),
             "hart {hart}'s stack top {:#x} is not 16-byte aligned; boot.S loads it \
              directly into sp",
             stack.top()
@@ -244,12 +245,12 @@ pub fn start_secondaries() {
         // Fill the block before the hart can reach it. `boot.S` loads `sp` from
         // `stack_top` as its first act, so this store has to be visible first;
         // `hart_start` is an `ecall` through the firmware, which orders it.
-        block.stack_top.store(stack.top(), Ordering::Relaxed);
+        block.stack_top.store(stack.top().bits(), Ordering::Relaxed);
         block.index.store(slot, Ordering::Relaxed);
         block.hartid.store(hart, Ordering::Release);
 
         let opaque = block as *const Cpu as usize;
-        match sbi::hart_start(hart, entry, opaque) {
+        match sbi::hart_start(hart, entry.bits(), opaque) {
             Ok(()) => {
                 requested += 1;
                 println!(

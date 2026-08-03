@@ -1,4 +1,5 @@
 use core::fmt::{self, Write};
+use paging::PhysicalAddr;
 use spin::Mutex;
 use uart_16550::MmioSerialPort;
 
@@ -24,11 +25,11 @@ fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
             // linear, so `phys_to_virt` of a device address is a canonical Sv39
             // address that `boot.S` and `kernel_table` both map. Under the old
             // RAM-base-skewed offset it would not even have been canonical.
-            let uart = crate::memory::phys_to_virt(base);
+            let uart = crate::memory::phys_to_virt(PhysicalAddr::new(base));
             // SAFETY: `uart` is the direct-map alias of the DTB-reported UART
             // window, mapped R+W, and this is the only `MmioSerialPort` built for
             // it — the `UART` mutex keeps that exclusive.
-            let mut serial = unsafe { MmioSerialPort::new(uart) };
+            let mut serial = unsafe { MmioSerialPort::new(uart.bits()) };
             serial.init();
             *port = Some(serial);
         }

@@ -14,7 +14,7 @@ use super::frames::FrameSource;
 use super::table::Table;
 use super::{ENTRIES_PER_PAGE, LEVELS, PAGE_OFFSET_BITS, ROOT_LEVEL, VPN_BITS};
 use super::page_size_at;
-use crate::utils::{align_down, align_up, mask};
+use crate::utils::mask;
 
 /// Why a mapping could not be installed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -29,7 +29,7 @@ pub enum MapError {
     #[error("virtual address {vaddr:#x} is not aligned to its {page_size:#x}-byte page")]
     UnalignedVirtual {
         /// The rejected virtual address.
-        vaddr: usize,
+        vaddr: VirtualAddr,
         /// Page size implied by the requested level.
         page_size: usize,
     },
@@ -37,7 +37,7 @@ pub enum MapError {
     #[error("physical address {paddr:#x} is not aligned to its {page_size:#x}-byte page")]
     UnalignedPhysical {
         /// The rejected physical address.
-        paddr: usize,
+        paddr: PhysicalAddr,
         /// Page size implied by the requested level.
         page_size: usize,
     },
@@ -89,10 +89,10 @@ fn validate(
     }
     let page_size = page_size_at(level);
     if !vaddr.is_aligned(page_size) {
-        return Err(MapError::UnalignedVirtual { vaddr: vaddr.bits(), page_size });
+        return Err(MapError::UnalignedVirtual { vaddr, page_size });
     }
     if !paddr.is_aligned(page_size) {
-        return Err(MapError::UnalignedPhysical { paddr: paddr.bits(), page_size });
+        return Err(MapError::UnalignedPhysical { paddr, page_size });
     }
     Ok(())
 }
@@ -220,8 +220,8 @@ impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
     /// range and assert it rather than rely on the rounding.
     pub fn map_range_at_level<T>(
         &mut self,
-        start: usize,
-        end: usize,
+        start: VirtualAddr,
+        end: VirtualAddr,
         level: usize,
         translate: T,
         flags: PteFlags,
@@ -234,12 +234,11 @@ impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
             return Err(MapError::InvalidLevel { level });
         }
         let page = page_size_at(level);
-        let mut va = align_down(start, page);
-        let end = align_up(end, page);
+        let mut va = start.align_down(page);
+        let end = end.align_up(page);
         while va < end {
-            let vaddr = VirtualAddr::new(va);
-            self.map_at_level(vaddr, translate(vaddr), level, flags)?;
-            va += page;
+            self.map_at_level(va, translate(va), level, flags)?;
+            va = va.add(page);
         }
         Ok(())
     }
@@ -249,8 +248,8 @@ impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
     /// still fully mapped.
     pub fn map_range<T>(
         &mut self,
-        start: usize,
-        end: usize,
+        start: VirtualAddr,
+        end: VirtualAddr,
         translate: T,
         flags: PteFlags,
     ) -> Result<(), MapError>
@@ -261,7 +260,12 @@ impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
     }
 
     /// Identity-map `[start, end)` (each virtual page to the equal physical page).
-    pub fn id_map_range(&mut self, start: usize, end: usize, flags: PteFlags) -> Result<(), MapError> {
+    pub fn id_map_range(
+        &mut self,
+        start: VirtualAddr,
+        end: VirtualAddr,
+        flags: PteFlags,
+    ) -> Result<(), MapError> {
         self.map_range(start, end, |v| PhysicalAddr::new(v.bits()), flags)
     }
 
@@ -362,25 +366,25 @@ mod tests {
     /// agree exactly — otherwise collapsing them changed behaviour.
     #[test]
     fn map_range_is_the_level_zero_case_of_map_range_at_level() {
-        let base = 7 << 21;
+        let base = VirtualAddr::new(7 << 21);
         let span = 3 * PAGE_SIZE + 0x40; // deliberately not a whole number of pages
-        let phys = |v: VirtualAddr| PhysicalAddr::new(v.bits() - base + 0x8000_0000);
+        let phys = |v: VirtualAddr| PhysicalAddr::new(v.bits() - base.bits() + 0x8000_0000);
 
         let mut lhs = Table::new();
         let mut generic = Mapper::new(&mut lhs, Arena::default(), Identity);
         generic
-            .map_range_at_level(base, base + span, 0, phys, PteFlags::READ_WRITE)
+            .map_range_at_level(base, base.add(span), 0, phys, PteFlags::READ_WRITE)
             .expect("explicit level-0 range must map");
 
         let mut rhs = Table::new();
         let mut shorthand = Mapper::new(&mut rhs, Arena::default(), Identity);
         shorthand
-            .map_range(base, base + span, phys, PteFlags::READ_WRITE)
+            .map_range(base, base.add(span), phys, PteFlags::READ_WRITE)
             .expect("shorthand range must map");
 
         // Four pages: the partial tail is rounded outward and fully mapped.
         for index in 0..4 {
-            let va = VirtualAddr::new(base + index * PAGE_SIZE);
+            let va = base.add(index * PAGE_SIZE);
             assert_eq!(
                 generic.translate(va),
                 Some(phys(va)),
@@ -392,7 +396,7 @@ mod tests {
                 "page {index} differs between map_range and map_range_at_level"
             );
         }
-        let past = VirtualAddr::new(base + 4 * PAGE_SIZE);
+        let past = base.add(4 * PAGE_SIZE);
         assert_eq!(generic.translate(past), None, "rounding must not overshoot a whole page");
         assert_eq!(shorthand.translate(past), None, "shorthand must not overshoot either");
     }
@@ -401,27 +405,33 @@ mod tests {
     fn map_range_at_level_builds_superpages_and_rejects_a_bad_level() {
         let mut root = Table::new();
         let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
-        let base = 4 << 30;
+        let base = VirtualAddr::new(4 << 30);
         let superpage = page_size_at(1);
 
         mapper
             .map_range_at_level(
                 base,
-                base + 2 * superpage,
+                base.add(2 * superpage),
                 1,
-                |v| PhysicalAddr::new(v.bits() - base),
+                |v| PhysicalAddr::new(v.bits() - base.bits()),
                 PteFlags::READ_WRITE,
             )
             .expect("2 MiB range must map");
 
         for index in 0..2 {
-            let va = VirtualAddr::new(base + index * superpage);
+            let va = base.add(index * superpage);
             let (_, level) = mapper.entry_of(va).expect("superpage must be mapped");
             assert_eq!(level, 1, "range must be built from level-1 leaves, not 4 KiB ones");
         }
 
         assert_eq!(
-            mapper.map_range_at_level(base, base + PAGE_SIZE, LEVELS, |_| PhysicalAddr::new(0), RWX),
+            mapper.map_range_at_level(
+                base,
+                base.add(PAGE_SIZE),
+                LEVELS,
+                |_| PhysicalAddr::new(0),
+                RWX
+            ),
             Err(MapError::InvalidLevel { level: LEVELS }),
             "an out-of-range level must be rejected, not used to index a page size"
         );
@@ -563,12 +573,15 @@ mod tests {
 
         assert_eq!(
             mapper.map_at_level(VirtualAddr::new(0x1000), PhysicalAddr::new(0), 1, RWX),
-            Err(MapError::UnalignedVirtual { vaddr: 0x1000, page_size: two_mib }),
+            Err(MapError::UnalignedVirtual { vaddr: VirtualAddr::new(0x1000), page_size: two_mib }),
             "a 2 MiB mapping needs a 2 MiB-aligned VA",
         );
         assert_eq!(
             mapper.map_at_level(VirtualAddr::new(0), PhysicalAddr::new(0x1000), 1, RWX),
-            Err(MapError::UnalignedPhysical { paddr: 0x1000, page_size: two_mib }),
+            Err(MapError::UnalignedPhysical {
+                paddr: PhysicalAddr::new(0x1000),
+                page_size: two_mib
+            }),
             "a 2 MiB mapping needs a 2 MiB-aligned PA",
         );
         assert_eq!(
@@ -605,7 +618,9 @@ mod tests {
         let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
         // 0x3001 lands in the page based at 0x3000, so three pages must be
         // mapped; rounding the end down would have dropped it.
-        mapper.id_map_range(0x1000, 0x3001, PteFlags::READ_WRITE).expect("range must map");
+        mapper
+            .id_map_range(VirtualAddr::new(0x1000), VirtualAddr::new(0x3001), PteFlags::READ_WRITE)
+            .expect("range must map");
 
         for page in [0x1000usize, 0x2000, 0x3000] {
             assert_eq!(

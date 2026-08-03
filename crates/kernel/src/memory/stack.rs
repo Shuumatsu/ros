@@ -51,6 +51,7 @@ use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
 use paging::sv39::PAGE_SIZE;
+use paging::{MemoryAddr, PhysicalAddr, VirtualAddr};
 use spin::Once;
 
 use crate::memory::{frame, kernel_va_free_start, layout, virt_to_phys};
@@ -77,23 +78,27 @@ pub struct Stack {
     /// What this stack is for. Labels its region in the page table and the boot log.
     pub name: &'static str,
     /// Physical base of the usable stack — the frame `bottom` maps to.
-    pa: usize,
+    pa: PhysicalAddr,
     /// Lowest usable address. `sp` walks down towards it and faults past it.
-    bottom: usize,
+    ///
+    /// Not a direct-map address for a secondary — see the module docs — so it is
+    /// emphatically not `phys_to_virt(pa)`, and the types are what keep the two apart
+    /// where [`super::kernel_table`] consumes both.
+    bottom: VirtualAddr,
 }
 
 impl Stack {
     /// First address of the guard page, which must never be mapped.
-    pub fn guard(&self) -> usize { self.bottom - GUARD_SIZE }
+    pub fn guard(&self) -> VirtualAddr { self.bottom.sub(GUARD_SIZE) }
 
     /// Lowest usable stack address.
-    pub fn bottom(&self) -> usize { self.bottom }
+    pub fn bottom(&self) -> VirtualAddr { self.bottom }
 
     /// One past the highest — the value a starting hart loads into `sp`.
-    pub fn top(&self) -> usize { self.bottom + SIZE }
+    pub fn top(&self) -> VirtualAddr { self.bottom.add(SIZE) }
 
     /// Physical base of the usable stack.
-    pub fn pa(&self) -> usize { self.pa }
+    pub fn pa(&self) -> PhysicalAddr { self.pa }
 
     /// Usable bytes, i.e. what [`super::kernel_table`] must map.
     pub fn len(&self) -> usize { SIZE }
@@ -134,7 +139,7 @@ unsafe impl Sync for BootStack {}
 /// Part of the kernel image, so unlike a secondary's it is direct mapped and its
 /// physical address is simply derived.
 pub fn boot() -> Stack {
-    let bottom = layout::boot_stack_start() + GUARD_SIZE;
+    let bottom = layout::boot_stack_start().add(GUARD_SIZE);
     Stack { name: "boot stack", pa: virt_to_phys(bottom), bottom }
 }
 
@@ -144,15 +149,14 @@ pub fn boot() -> Stack {
 /// from *its* view of the bounds. If those disagree, the kernel runs on a stack that
 /// is not where anyone thinks it is.
 pub fn check_layout() {
-    let span = layout::boot_stack_end() - layout::boot_stack_start();
+    let span = layout::boot_stack_end().sub_addr(layout::boot_stack_start());
     assert_eq!(
         span, STRIDE,
         "the .boot_stack section spans {span:#x} bytes but the geometry needs {STRIDE:#x}; \
          kernel.ld is not placing it as a whole"
     );
-    assert_eq!(
-        layout::boot_stack_start() % PAGE_SIZE,
-        0,
+    assert!(
+        layout::boot_stack_start().is_aligned(PAGE_SIZE),
         "the boot stack must be page aligned or its guard page will not line up"
     );
     // `boot.S` uses `_boot_stack_end` as `sp` directly, so it must be the top this
@@ -198,8 +202,8 @@ pub fn init(harts: impl Iterator<Item = usize>) {
                     hart,
                     stack: Stack {
                         name: "secondary stack",
-                        pa: frames.base().bits(),
-                        bottom: base + STRIDE * slot + GUARD_SIZE,
+                        pa: frames.base(),
+                        bottom: base.add(STRIDE * slot + GUARD_SIZE),
                     },
                 }
             })
@@ -220,7 +224,7 @@ pub fn all() -> impl Iterator<Item = Stack> {
 }
 
 /// Every guard page, which must all be holes. See [`all`].
-pub fn guards() -> impl Iterator<Item = usize> { all().map(|stack| stack.guard()) }
+pub fn guards() -> impl Iterator<Item = VirtualAddr> { all().map(|stack| stack.guard()) }
 
 /// Print the stack geometry.
 ///
