@@ -165,6 +165,14 @@ pub struct Reservation {
     pub start: usize,
     /// Exclusive end.
     pub end: usize,
+    /// Frames this record was the first to withhold.
+    ///
+    /// Not derivable from `start..end`, and that is the point: carve-outs may
+    /// overlap, so the extents of all records summed is larger than the memory
+    /// actually removed from the pool. The boot log needs the true total, and a
+    /// record whose extent exceeds this is exactly one that overlapped an earlier
+    /// one — worth showing rather than hiding.
+    pub newly_withheld: usize,
 }
 
 impl Reservation {
@@ -173,7 +181,7 @@ impl Reservation {
         &self.name
     }
 
-    /// Frames withheld.
+    /// Frames this range spans, overlap included.
     pub fn frames(&self) -> usize {
         (self.end - self.start) / PAGE_SIZE
     }
@@ -204,6 +212,7 @@ pub fn reservations() -> Vec<Reservation, MAX_RESERVATIONS> {
 fn reserve(
     allocator: &mut FrameAllocator<'static>,
     managed: FrameRange,
+    withheld: &mut Vec<FrameRange, MAX_RESERVATIONS>,
     name: &str,
     start: usize,
     end: usize,
@@ -216,23 +225,61 @@ fn reserve(
         return;
     };
 
+    // Frame at a time, skipping what an earlier carve-out already withheld.
+    //
+    // `FrameAllocator::reserve` rejects an already-claimed frame, and it is right to:
+    // reserving memory that has been *vended* is a genuine conflict, and a test pins
+    // that. But the overlap here is not a conflict, and it is manufactured by this
+    // very function — the rounding above is OUTWARD, so two carve-outs a few hundred
+    // bytes apart land in the same frame, and the second call used to panic the boot.
+    //
+    // It is not exotic input either. The device tree describes reservations through
+    // two spec mechanisms at once (the FDT rsvmap and /reserved-memory), and firmware
+    // that uses both — U-Boot does, and also rsvmaps the blob this kernel reserves
+    // separately — hands us the same range twice by design. QEMU+OpenSBI happens to
+    // put its carve-outs below the pool, which is the only reason this has never
+    // fired.
+    //
+    // Disjointness belongs here rather than in the device tree, because the rounding
+    // that destroys it is here, and because merging ranges there would lose the names
+    // — and the names are load-bearing: they are how a later reclaim finds the initrd.
     let free_before = allocator.free_frames();
-    allocator
-        .reserve(range)
-        .unwrap_or_else(|error| panic!("reserving {name} at {start:#x}..{end:#x} failed: {error}"));
-    // A reservation that withheld nothing would leave the memory vendable and the
-    // corruption would surface much later, so check the accounting actually moved.
+    let mut newly = 0;
+    for frame in range.start()..range.end() {
+        if withheld.iter().any(|held| held.start() <= frame && frame < held.end()) {
+            continue;
+        }
+        let single = FrameRange::new(frame, frame + 1).expect("frame + 1 always exceeds frame");
+        allocator.reserve(single).unwrap_or_else(|error| {
+            panic!("reserving {name} at {start:#x}..{end:#x} failed at frame {frame}: {error}")
+        });
+        newly += 1;
+    }
+    if withheld.push(range).is_err() {
+        // Only the overlap bookkeeping is lost, not the reservation itself. A later
+        // range overlapping this one would then hit the allocator's rejection and
+        // panic, so this has to be loud.
+        println!(
+            "[memory] WARNING: more than {MAX_RESERVATIONS} reservations; overlap detection \
+             is now incomplete"
+        );
+    }
+
+    // A reservation that withheld nothing new AND overlapped nothing would leave the
+    // memory vendable, and that corruption surfaces nowhere near its cause. Checking
+    // against `newly` rather than `range.len()` is what makes an overlap legal without
+    // making a no-op legal.
     assert_eq!(
         allocator.free_frames(),
-        free_before - range.len(),
-        "reserving {} frames for {name} did not remove them from the pool",
-        range.len()
+        free_before - newly,
+        "reserving {newly} new frames for {name} did not remove them from the pool"
     );
 
     let record = Reservation {
         name: crate::utils::truncated(name),
         start: PhysicalAddr::from_ppn(range.start()).bits(),
         end: PhysicalAddr::from_ppn(range.end()).bits(),
+        newly_withheld: newly,
     };
     if RESERVATIONS.lock().push(record).is_err() {
         // The frames are withheld either way; only the record is lost. Say so, since
@@ -260,23 +307,36 @@ fn reserve_foreign_memory(allocator: &mut FrameAllocator<'static>, managed: Fram
         "no foreign RAM discovered, not even the device-tree blob; \
          call device_tree::init before memory::init"
     );
+    // The frame ranges withheld so far, so a later carve-out overlapping an earlier
+    // one is recognised rather than rejected. Local to this loop: it exists only to
+    // make the sequence of calls order-independent, and nothing outside needs it.
+    let mut withheld: Vec<FrameRange, MAX_RESERVATIONS> = Vec::new();
     for range in foreign {
-        reserve(allocator, managed, range.name(), range.base, range.end());
+        reserve(allocator, managed, &mut withheld, range.name(), range.base, range.end());
     }
 }
 
 /// Print what was withheld, from the record rather than from each call site.
 fn report_reservations() {
     let reserved = reservations();
-    let frames: usize = reserved.iter().map(Reservation::frames).sum();
+    // Summed over what each record actually removed, not over its extent: carve-outs
+    // may describe the same memory twice, and adding the extents would report more
+    // memory withheld than the pool ever lost.
+    let frames: usize = reserved.iter().map(|entry| entry.newly_withheld).sum();
     println!("[memory] withheld {} frames in {} reservations:", frames, reserved.len());
     for entry in &reserved {
+        // A record that withheld less than it spans overlapped an earlier one. Say
+        // which, so the total reconciles against the lines above it instead of
+        // looking like an arithmetic error.
+        let overlap = entry.frames() - entry.newly_withheld;
+        let note = if overlap > 0 { " (already covered)" } else { "" };
         println!(
-            "[memory]   {:<24} {:#x}..{:#x} ({})",
+            "[memory]   {:<24} {:#x}..{:#x} ({}){}",
             entry.name(),
             entry.start,
             entry.end,
-            ByteSize(entry.end - entry.start)
+            ByteSize(entry.end - entry.start),
+            note
         );
     }
 }
