@@ -3,7 +3,7 @@ use paging::PhysicalAddr;
 use spin::Mutex;
 use uart_16550::MmioSerialPort;
 
-use crate::arch::riscv64::{interrupts, sbi};
+use crate::arch::riscv64::interrupts;
 use crate::cpu::hart_id;
 use crate::device_tree;
 
@@ -44,9 +44,13 @@ fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
 
 /// Lock-free write via the SBI console — needs no address, so it works when the
 /// UART's own mapping is the thing that broke.
+///
+/// A byte at a time: the batched `console_write` takes a *physical* address, and
+/// this path runs when producing one is exactly what is broken. Errors go
+/// nowhere because there is nowhere left to report them.
 fn sbi_write(s: &str) {
     for b in s.bytes() {
-        sbi::console_putchar(b as usize);
+        let _ = sbi_rt::console_write_byte(b);
     }
 }
 

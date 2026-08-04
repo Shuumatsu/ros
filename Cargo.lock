@@ -16,9 +16,9 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
-version = "2.10.0"
+version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
+checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "blockdev"
@@ -130,6 +130,8 @@ dependencies = [
  "heapless",
  "paging",
  "riscv",
+ "sbi-rt",
+ "sbi-spec",
  "spin",
  "uart_16550",
 ]
@@ -161,7 +163,7 @@ dependencies = [
 name = "paging"
 version = "0.1.0"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.1",
  "static_assertions",
  "thiserror",
 ]
@@ -257,6 +259,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "sbi-rt"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48f7bf85822c8b453d7e3fca7de39684032f5c06c1ed338ad8d47f4a79c1d49a"
+dependencies = [
+ "sbi-spec",
+]
+
+[[package]]
+name = "sbi-spec"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "785b91fcc41c7426fc07510be49ed1db44f002b45d45c175ec7f155c3cd447a9"
+dependencies = [
+ "bitflags 2.13.1",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -331,7 +351,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94d293f51425981fdb1b766beae254dbb711a17e8c4b549dc69b9b7ee0d478d5"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.13.1",
  "rustversion",
  "x86",
 ]

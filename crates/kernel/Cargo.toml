@@ -18,6 +18,8 @@ frame-allocator = { path = "../frame-allocator" }
 heapless = "0.9"
 paging = { path = "../paging", default-features = false }
 riscv = "0.16.0"
+sbi-rt = "0.0.4"
+sbi-spec = "0.0.9"
 spin = "0.10.0"
 uart_16550 = "0.4"
 

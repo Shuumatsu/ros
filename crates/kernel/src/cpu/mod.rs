@@ -132,12 +132,10 @@ pub fn secondary_hart_ids() -> impl Iterator<Item = usize> {
 ///
 /// # What the hart is told
 ///
-/// Two things, and it derives nothing:
-///
-/// - `start_addr` is the physical address of the architecture's stackless secondary
-///   entry.
-/// - `opaque`, which lands in `a1`, points at one release-published handoff containing
-///   the final page table, stack top, and prepared [`Cpu`].
+/// Two things, and it derives nothing: the architecture's stackless secondary
+/// entry to start at, and `opaque`, which lands in `a1` and points at one
+/// release-published handoff carrying the final page table, stack top, and
+/// prepared [`Cpu`].
 pub fn start_secondaries() {
     let entry = virt_to_phys(boot::secondary_entry_address());
     let satp = kernel_table::satp()
@@ -157,7 +155,7 @@ pub fn start_secondaries() {
                 continue;
             }
             Err(error) => {
-                println!("[smp] hart {hart} status unavailable: {error}");
+                println!("[smp] hart {hart} status unavailable: {error:?}");
                 continue;
             }
         }
@@ -173,7 +171,7 @@ pub fn start_secondaries() {
         slot.handoff.publish(satp, stack.top().bits(), &slot.cpu as *const Cpu as usize);
 
         let opaque = &slot.handoff as *const boot::SecondaryHandoff as usize;
-        match sbi::hart_start(hart, entry.bits(), opaque) {
+        match sbi::hart_start(hart, entry, opaque) {
             Ok(()) => {
                 requested += 1;
                 println!(
@@ -181,7 +179,7 @@ pub fn start_secondaries() {
                     stack.top()
                 )
             }
-            Err(error) => println!("[smp] hart {hart} failed to start: {error}"),
+            Err(error) => println!("[smp] hart {hart} failed to start: {error:?}"),
         }
     }
 
