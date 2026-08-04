@@ -12,23 +12,23 @@ ENTRY( _start )
 at physical 0x8020_0000 (RAM base + text_offset; the SBI firmware occupies the
 first 2 MiB). So VMA (where symbols resolve) and LMA (where bytes are loaded)
 differ by a fixed offset: VA = PA + _va_offset. Each section sets its LMA with
-AT(ADDR(.x) - _va_offset) below; boot.S installs the page table and jumps high
-before Rust runs.
+AT(ADDR(.x) - _va_offset) below; the architecture boot entry installs the page
+table and jumps high before ordinary Rust runs.
 
 Still NO MEMORY region / LENGTH: the RAM top is a runtime fact from the device
 tree, not a compile-time constant (see device_tree.rs). */
 /* SINGLE SOURCE OF TRUTH for the kernel's memory layout. Four genuine inputs —
    one architectural (`_page_size`) and three platform facts; everything else is
    derived, so there are no composite magic numbers to keep in sync.
-   `_text_offset` is consumed by the Image header in boot.S.
+   `_text_offset` is consumed by the Image header.
 
    `_va_offset` is the base of the kernel's DIRECT MAP: VA = PA + _va_offset holds
    for all of physical memory, not just for the kernel image, so it is a pure
    constant and NOT skewed by _dram_base. That is what lets Rust express the same
    value as a `const` (memory::direct_map::VA_OFFSET) and translate at compile
-   time. It is the one value the linker and Rust cannot share directly; boot.S
-   measures the real VMA-PMA skew at boot and direct_map::verify() asserts the two
-   agree, so the duplicate cannot ship diverged.
+   time. It is the one value the linker and Rust cannot share directly; the boot
+   entry measures the real VMA-PMA skew and direct_map::verify() asserts the two
+   agree.
 
    `_page_size` is named rather than repeated: the eight places below that align or
    pad by a page then say *why*. Rust cannot read it (a small absolute linker symbol
@@ -47,7 +47,7 @@ _memory_start = _phys_base + _va_offset;        /* 0xffffffc080200000: virtual b
 PHDRS is short for "program headers", which we specify three here:
     text - CPU instructions (executable sections)
     data - Global, initialized variables
-    bss  - Global, uninitialized variables (all will be set to 0 by boot.S)
+    bss  - Global, uninitialized variables (cleared by the naked boot entry)
 
 The command PT_LOAD tells the linker that these sections will be loaded
 from the file into memory.
@@ -96,14 +96,19 @@ SECTIONS {
         .text.init, this would've matched here. The assembler and linker can place
         things in "special" text sections, so we match any we might come across here.
         */
-        *(.text.init) *(.text .text.*)
+        KEEP(*(.text.init.header))
+        . = ALIGN(4);
+        KEEP(*(.text.init.entry))
+        . = ALIGN(4);
+        KEEP(*(.text.init.trap))
+        *(.text.init)
+        *(.text .text.*)
 
         PROVIDE(_text_end = .);
     } :text
 
     .rodata : AT(ADDR(.rodata) - _va_offset) {
         . = ALIGN(_page_size);
-        PROVIDE(_global_pointer = .);
         PROVIDE(_rodata_start = .);
 
         /*
@@ -133,6 +138,7 @@ SECTIONS {
         . = ALIGN(_page_size);
         PROVIDE(_data_start = .);
 
+        PROVIDE(__global_pointer$ = . + 0x800);
         *(.sdata .sdata.*) 
         . = ALIGN(16);
         *(.data .data.*)
@@ -154,7 +160,7 @@ SECTIONS {
         /* in case bss section is empty, ensure it occupys at least one page */
         . = . + _page_size;
 
-        /* boot.S zeroes this span with `sd`, stepping 8 bytes and stopping on
+        /* The naked boot entry zeroes this span with `sd`, stepping 8 bytes and stopping on
            `bltu`, so a span that is not a multiple of 8 makes the last store write
            up to 7 bytes past _bss_end. */
         . = ALIGN(8);
@@ -215,16 +221,19 @@ SECTIONS {
    here, at link time. A tripped assert means: name the new section explicitly and
    decide whether kernel_table should map it. */
 ASSERT(_start == _memory_start, "_start must be the first byte of the Image")
+ASSERT(_image_header_end - _start == 64, "RISC-V Image header must be 64 bytes")
 ASSERT(_rodata_start - _text_end   < _page_size, "orphan section between .text and .rodata")
 ASSERT(_data_start   - _rodata_end < _page_size, "orphan section between .rodata and .data")
 ASSERT(_bss_start    - _data_end   < _page_size, "orphan section between .data and .bss")
 ASSERT(_boot_stack_start - _bss_end < _page_size, "orphan section between .bss and .boot_stack")
 ASSERT(_image_end == _boot_stack_end, "orphan section after .boot_stack")
+ASSERT((_boot_stack_end & 15) == 0, "boot stack top must be 16-byte aligned")
 
 /* Effective image size for the RISC-V Image header: everything the loader must
-   reserve for the kernel — loaded image + BSS + boot stack. Secondary hart
+   reserve for the kernel — loaded image, BSS, boot stack and its trailing guard.
+   Secondary hart
    stacks are absent on purpose: they come from the frame allocator, out of RAM
    the loader has already been told about. This is an absolute symbol (a constant
-   difference), so `.8byte _image_size` in boot.S emits its value, not an
+   difference), so the Image header emits its value, not an
    address. */
-_image_size = _image_end - _memory_start;
+_image_size = _heap_start - _memory_start;

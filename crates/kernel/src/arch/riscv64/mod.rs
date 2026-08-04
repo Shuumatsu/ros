@@ -1,3 +1,4 @@
+pub(crate) mod boot;
 pub mod interrupts;
 pub mod sbi;
 

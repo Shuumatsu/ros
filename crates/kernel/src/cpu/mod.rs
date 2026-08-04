@@ -1,9 +1,9 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use paging::MemoryAddr;
 
-use crate::arch::riscv64::sbi;
-use crate::memory::{kernel_table, layout, stack, virt_to_phys};
+use crate::arch::riscv64::{boot, sbi};
+use crate::memory::{kernel_table, stack, virt_to_phys};
 use crate::println;
 
 /// Per-hart control block. `tp` points at this hart's.
@@ -13,151 +13,97 @@ use crate::println;
 /// already handed in `a0` means every future piece of per-hart state needs a new
 /// home and a new lookup.
 ///
-/// # Layout is load-bearing
-///
-/// `boot.S` reads and writes this in assembly before there is a stack to run Rust
-/// on, by fixed offset. The `offset_of!` assertions below are what keep the two in
-/// step; reorder a field and the build fails rather than the boot.
-///
-/// Fields are atomics because `boot.S` writes `hartid` from assembly while Rust
-/// holds a shared reference to the same block.
 #[repr(C)]
 pub struct Cpu {
-    /// Top of this hart's stack. **Offset 0**: `boot.S` loads `sp` from here, which
-    /// is why the whole block can travel in SBI's single `opaque` word.
-    stack_top: AtomicUsize,
     /// Physical hart id from the SBI boot protocol. Sparse — never an array index.
     hartid: AtomicUsize,
     /// Dense logical index, `0..cpus`. This is the array subscript; `hartid` is not.
     index: AtomicUsize,
 }
 
-const _: () = assert!(core::mem::offset_of!(Cpu, stack_top) == 0, "boot.S loads sp from 0(tp)");
-const _: () = assert!(core::mem::offset_of!(Cpu, hartid) == 8, "boot.S stores a0 to 8(tp)");
-
 impl Cpu {
-    const fn new() -> Self {
-        Self {
-            stack_top: AtomicUsize::new(0),
-            hartid: AtomicUsize::new(0),
-            index: AtomicUsize::new(0),
-        }
-    }
+    const fn new() -> Self { Self { hartid: AtomicUsize::new(0), index: AtomicUsize::new(0) } }
 
     /// Physical hart id, for SBI calls and diagnostics.
-    pub fn hartid(&self) -> usize {
-        self.hartid.load(Ordering::Relaxed)
-    }
+    pub fn hartid(&self) -> usize { self.hartid.load(Ordering::Relaxed) }
 
     /// Dense logical index, for anything array-shaped.
-    pub fn index(&self) -> usize {
-        self.index.load(Ordering::Relaxed)
-    }
+    pub fn index(&self) -> usize { self.index.load(Ordering::Relaxed) }
 }
 
-/// Upper bound on harts this kernel will run. Matches what the device tree module
-/// will report; the blocks are `.bss`, so the whole array costs 1.5 KiB.
+struct CpuSlot {
+    cpu: Cpu,
+    handoff: boot::SecondaryHandoff,
+}
+
+impl CpuSlot {
+    const fn new() -> Self { Self { cpu: Cpu::new(), handoff: boot::SecondaryHandoff::new() } }
+}
+
+/// Upper bound on harts this kernel will run.
 const MAX_CPUS: usize = 64;
 
-/// Every hart's control block. Slot 0 is the boot hart's — `boot.S` points its `tp`
-/// straight at this symbol, so slot 0 must stay first.
-#[unsafe(no_mangle)]
-static KERNEL_CPUS: [Cpu; MAX_CPUS] = [const { Cpu::new() }; MAX_CPUS];
+/// Slot 0 belongs to the firmware-selected boot hart.
+static CPU_SLOTS: [CpuSlot; MAX_CPUS] = [const { CpuSlot::new() }; MAX_CPUS];
+static BOOT_READY: AtomicBool = AtomicBool::new(false);
 
 /// This hart's control block.
 ///
 /// # Panics
-/// If `tp` is null, which means `boot.S` did not point it at a block before
-/// entering Rust.
+/// If `tp` is null, which means the Rust entry did not adopt a CPU first.
 pub fn current() -> &'static Cpu {
     let tp: usize;
     // SAFETY: reading a register.
     unsafe { core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack)) };
-    assert!(tp != 0, "tp is null: boot.S must point it at a Cpu block before calling Rust");
-    // SAFETY: `boot.S` sets `tp` from `KERNEL_CPUS`, either slot 0 directly or a slot
-    // address the boot hart passed through SBI's `opaque`. Both are `'static`.
+    assert!(tp != 0, "tp is null: the boot entry did not adopt a Cpu");
+    // SAFETY: `install_current` only accepts pointers into the static CPU slot array.
     unsafe { &*(tp as *const Cpu) }
 }
 
 /// This hart's physical id. Every `[hart N]` console prefix comes from here.
-pub fn hart_id() -> usize {
-    current().hartid()
-}
+pub fn hart_id() -> usize { current().hartid() }
 
-/// Sentinel for "no hart has recorded the boot role yet".
-///
-/// A boot hart whose id really were `usize::MAX` would be reported as unrecorded.
-/// That costs one wrong word in one log line and nothing else — [`boot_hart`] is
-/// diagnostic, and no hart id is used as an index anywhere. It is a sentinel, not a
-/// claim about the id space.
-const UNCLAIMED: usize = usize::MAX;
-
-/// Which hart ran the one-time kernel initialisation.
-static BOOT_HART: AtomicUsize = AtomicUsize::new(UNCLAIMED);
-
-/// Secondary harts that have reached [`crate::start::secondary_start`].
+/// Secondary harts that have reached [`crate::start::secondary`].
 static ONLINE: AtomicUsize = AtomicUsize::new(0);
 
-/// Reconcile the two carriers of "which hart am I".
+fn install_current(cpu: &'static Cpu) {
+    let pointer = cpu as *const Cpu as usize;
+    // SAFETY: `tp` is reserved for the kernel's per-hart pointer.
+    unsafe { core::arch::asm!("mv tp, {}", in(reg) pointer, options(nomem, nostack)) };
+}
+
+/// Initialize slot 0 and make it current before diagnostics can panic.
+pub fn init_boot(hartid: usize) {
+    let cpu = &CPU_SLOTS[0].cpu;
+    cpu.hartid.store(hartid, Ordering::Relaxed);
+    cpu.index.store(0, Ordering::Relaxed);
+    install_current(cpu);
+
+    assert!(!BOOT_READY.swap(true, Ordering::AcqRel), "boot Cpu initialized twice");
+}
+
+/// Adopt the CPU selected by the boot hart for this secondary.
 ///
-/// Every hart calls this once, first thing, boot or secondary.
+/// # Safety
 ///
-/// The SBI boot protocol hands the id in `a0`, which arrives as the `hartid`
-/// argument. `boot.S` also stores it into this hart's [`Cpu`] block, which is what
-/// [`hart_id`] reads and therefore where every `[hart N]` console prefix comes from.
-/// One value, two carriers; this is what stops them drifting apart silently.
-pub fn adopt(hartid: usize) {
-    let from_block = current().hartid();
+/// `cpu_pointer` must point at a `Cpu` in [`CPU_SLOTS`].
+pub unsafe fn init_secondary(hartid: usize, cpu_pointer: usize) {
+    let cpu = unsafe { &*(cpu_pointer as *const Cpu) };
+    install_current(cpu);
     assert_eq!(
-        hartid, from_block,
-        "hart id disagreement: the SBI boot protocol says {hartid}, this hart's Cpu \
-         block says {from_block}. boot.S must store a0 into 8(tp) on both entry paths"
+        hartid,
+        cpu.hartid(),
+        "hart id disagreement: SBI entered hart {hartid}, handoff selected hart {}",
+        cpu.hartid()
     );
 }
 
 /// Record that a secondary hart made it into Rust, on the kernel page table.
-pub fn record_online() {
-    ONLINE.fetch_add(1, Ordering::Release);
-}
+pub fn record_online() { ONLINE.fetch_add(1, Ordering::Release); }
 
-/// Record which hart ran the one-time initialisation.
-///
-/// # This is not the election
-///
-/// `boot.S` elects the boot hart, with an `lr`/`sc` claim taken before anything
-/// else runs: there is exactly one boot stack, so exactly one hart may proceed and
-/// the rest park. Electing again here would be a second answer to the same
-/// question. This records the winner — and asserts the property, so a second
-/// arrival is a loud panic rather than two harts quietly sharing a stack.
-///
-/// # Why the winner is not hart 0
-///
-/// **The owner of this fact; elsewhere just points here.** The previous boot stage
-/// picks which hart enters the kernel and is *not required to pick 0* — OpenSBI's
-/// boot hart is configurable, and on QEMU virt it is a lottery that genuinely varies
-/// from boot to boot: at `-smp 32` it has been observed as 0, 5, 8, 13, 21, 24, 25
-/// and 31 across consecutive runs of the same image.
-///
-/// So nothing may assume a value here, and nothing may assume a *range* either —
-/// which is the same mistake one step removed, and the one that used to park the boot
-/// hart outright. See [`crate::memory::stack`].
-pub fn record_boot_hart(hartid: usize) {
-    BOOT_HART
-        .compare_exchange(UNCLAIMED, hartid, Ordering::AcqRel, Ordering::Acquire)
-        .unwrap_or_else(|winner| {
-            panic!(
-                "hart {hartid} reached the boot path, but hart {winner} already holds the \
-                 boot stack; boot.S's claim did not hold"
-            )
-        });
-}
-
-/// The hart that ran the one-time initialisation, once one has recorded it.
+/// The firmware-selected boot hart.
 pub fn boot_hart() -> Option<usize> {
-    match BOOT_HART.load(Ordering::Acquire) {
-        UNCLAIMED => None,
-        hart => Some(hart),
-    }
+    BOOT_READY.load(Ordering::Acquire).then(|| CPU_SLOTS[0].cpu.hartid())
 }
 
 /// Every hart the machine reports except the boot hart.
@@ -172,7 +118,7 @@ pub fn boot_hart() -> Option<usize> {
 /// disagree with the first.
 ///
 /// # Panics
-/// Before [`record_boot_hart`], since "every hart except the boot hart" has no
+/// Before [`init_boot`], since "every hart except the boot hart" has no
 /// meaning yet.
 pub fn secondary_hart_ids() -> impl Iterator<Item = usize> {
     let boot = boot_hart().expect("secondary_hart_ids called before the boot hart was recorded");
@@ -188,34 +134,20 @@ pub fn secondary_hart_ids() -> impl Iterator<Item = usize> {
 ///
 /// Two things, and it derives nothing:
 ///
-/// - `start_addr` is the *physical* address of `_secondary_start`. SBI starts a hart
-///   with `satp = 0` — translation off — so this cannot be a Rust function at a high
-///   virtual address, and it is not `_start` either: that entry is the boot hart's,
-///   with the image header and the one-time BSS zeroing behind it.
-/// - `opaque`, which lands in the hart's `a1`, is the address of its [`Cpu`] block,
-///   already filled in with the stack top and logical index. One word carries both
-///   because `stack_top` is the block's first field, so `boot.S` can load `sp` from
-///   `0(tp)`. The hart computes no address of its own.
+/// - `start_addr` is the physical address of the architecture's stackless secondary
+///   entry.
+/// - `opaque`, which lands in `a1`, points at one release-published handoff containing
+///   the final page table, stack top, and prepared [`Cpu`].
 pub fn start_secondaries() {
-    let entry = virt_to_phys(layout::secondary_entry());
-    // Not a wait: the value only exists because the table is live, and it is what
-    // `boot.S` reads to get onto it. Checking it here turns a would-be silent hang
-    // on the far side into a panic on this one.
-    assert!(
-        kernel_table::satp().is_some(),
-        "no kernel page table published; start_secondaries ran before memory::init"
-    );
+    let entry = virt_to_phys(boot::secondary_entry_address());
+    let satp = kernel_table::satp()
+        .expect("no kernel page table published; start_secondaries ran before memory::init");
 
     // Slot 0 belongs to the boot hart, so secondaries start at 1.
     let mut requested = 0;
-    for (slot, &stack::Secondary { hart, stack }) in
-        (1..).zip(stack::secondaries())
-    {
-        assert!(
-            slot < MAX_CPUS,
-            "machine reports more than {MAX_CPUS} harts; raise MAX_CPUS"
-        );
-        let block = &KERNEL_CPUS[slot];
+    for (index, &stack::Secondary { hart, stack }) in (1..).zip(stack::secondaries()) {
+        assert!(index < MAX_CPUS, "machine reports more than {MAX_CPUS} harts; raise MAX_CPUS");
+        let slot = &CPU_SLOTS[index];
         // Ask first. "Already started" and "no such hart" are different problems, and
         // a bare error code from hart_start would not distinguish them.
         match sbi::hart_get_status(hart) {
@@ -230,31 +162,22 @@ pub fn start_secondaries() {
             }
         }
 
-        // The stack top is what the hart will load straight into `sp`, and the
-        // RISC-V ABI requires sp to be 16-byte aligned. `boot.S` does `mv sp, a1`
-        // with no arithmetic and no check, so this is the only place the property
-        // can be enforced; it holds today only because SIZE and GUARD_SIZE happen
-        // to be page multiples.
         assert!(
             stack.top().is_aligned(16),
-            "hart {hart}'s stack top {:#x} is not 16-byte aligned; boot.S loads it \
-             directly into sp",
+            "hart {hart}'s stack top {:#x} is not 16-byte aligned",
             stack.top()
         );
 
-        // Fill the block before the hart can reach it. `boot.S` loads `sp` from
-        // `stack_top` as its first act, so this store has to be visible first;
-        // `hart_start` is an `ecall` through the firmware, which orders it.
-        block.stack_top.store(stack.top().bits(), Ordering::Relaxed);
-        block.index.store(slot, Ordering::Relaxed);
-        block.hartid.store(hart, Ordering::Release);
+        slot.cpu.index.store(index, Ordering::Relaxed);
+        slot.cpu.hartid.store(hart, Ordering::Relaxed);
+        slot.handoff.publish(satp, stack.top().bits(), &slot.cpu as *const Cpu as usize);
 
-        let opaque = block as *const Cpu as usize;
+        let opaque = &slot.handoff as *const boot::SecondaryHandoff as usize;
         match sbi::hart_start(hart, entry.bits(), opaque) {
             Ok(()) => {
                 requested += 1;
                 println!(
-                    "[smp] started hart {hart} (cpu {slot}) at {entry:#x}, stack top {:#x}",
+                    "[smp] started hart {hart} (cpu {index}) at {entry:#x}, stack top {:#x}",
                     stack.top()
                 )
             }
@@ -269,7 +192,7 @@ pub fn start_secondaries() {
 ///
 /// `hart_start` returning `Ok` means only that the firmware *accepted* the request —
 /// the hart is `StartPending`. Without confirming arrival, a secondary that faults
-/// inside `boot.S` (a bad stack mapping, say) parks in `_trap_park` forever while
+/// inside the stackless entry (a bad stack mapping, say) parks forever while
 /// the boot hart continues and `kmain` prints its success line: a boot with N-1 dead
 /// harts is indistinguishable from a good one.
 ///
@@ -316,7 +239,7 @@ fn await_secondaries(requested: usize) {
     let online = ONLINE.load(Ordering::Acquire);
     println!(
         "[smp] WARNING: {} of {requested} secondaries never reached the kernel after \
-         {TIMEOUT_SECS}s; they are parked in boot.S with sepc/scause/stval intact",
+         {TIMEOUT_SECS}s; inspect sepc/scause/stval",
         requested - online
     );
 }
@@ -336,9 +259,6 @@ fn now() -> u64 {
 /// imports nothing but `memory::layout` and `memory::stack` in the CPU module. It
 /// lives in [`crate::memory::report_layout`] now; this reports CPU facts only.
 pub fn print_info() {
-    // Logged because it varies from boot to boot (see `record_boot_hart`). Having it
-    // in every log is what makes a hart-dependent failure obvious instead of
-    // mysterious — and it is how the parked-boot-hart bug was finally pinned down.
     match boot_hart() {
         Some(hart) => println!("boot hart: {hart} (chosen by the firmware, not assumed)"),
         None => println!("boot hart: unrecorded"),

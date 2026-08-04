@@ -1,9 +1,8 @@
 //! Kernel stacks: one static stack for the boot hart, one allocated stack per
 //! secondary.
 //!
-//! This module is the single owner of stack geometry. `boot.S`, `kernel.ld` and
-//! [`super::kernel_table`] all consume what is decided here; none of them restates
-//! it.
+//! This module is the single owner of stack geometry. The architecture boot entry,
+//! `kernel.ld` and [`super::kernel_table`] consume what is decided here.
 //!
 //! # A hart id is not an index
 //!
@@ -40,8 +39,7 @@
 //! guard page. An overflow walks off the bottom into the guard and faults, instead of
 //! silently eating whatever lies below it — `.bss` for the boot hart, the previous
 //! hart's stack for everyone else. Putting the guard *below* is also what makes the
-//! stack top the end of the reserved area, so `boot.S` needs one linker symbol and no
-//! arithmetic.
+//! stack top the end of the reserved area, so the boot entry needs one linker symbol.
 //!
 //! The guards are holes because [`super::kernel_table`] maps each stack as its own
 //! region and never the guards; its `audit_holes` pins that they really are unmapped,
@@ -67,6 +65,7 @@ pub const SIZE: usize = 64 * 1024;
 /// Private: it is the size of a *slot*, which is this module's business. Callers want
 /// [`Stack`], which hands out the individual addresses.
 const STRIDE: usize = GUARD_SIZE + SIZE;
+const _: () = assert!(STRIDE % 16 == 0, "kernel stack top must be 16-byte aligned");
 
 /// One kernel stack: [`SIZE`] usable bytes above a [`GUARD_SIZE`] hole.
 ///
@@ -129,12 +128,12 @@ static BOOT_STACK: BootStack = BootStack(UnsafeCell::new([0; STRIDE]));
 #[repr(C, align(4096))]
 struct BootStack(UnsafeCell<[u8; STRIDE]>);
 
-// SAFETY: the bytes are never read or written through this item — `boot.S` loads
+// SAFETY: the bytes are never read or written through this item — the boot entry loads
 // `sp` from the section bounds and the hardware does the rest. It is `Sync` only so
 // it can be a `static`.
 unsafe impl Sync for BootStack {}
 
-/// The boot hart's stack, the one `boot.S` takes whole with `la sp, _boot_stack_end`.
+/// The boot hart's stack, taken whole by the architecture entry.
 ///
 /// Part of the kernel image, so unlike a secondary's it is direct mapped and its
 /// physical address is simply derived.
@@ -145,9 +144,8 @@ pub fn boot() -> Stack {
 
 /// Assert the linker placed the boot stack exactly where the geometry expects.
 ///
-/// Rust declares the size but the linker chooses the address, and `boot.S` loads `sp`
-/// from *its* view of the bounds. If those disagree, the kernel runs on a stack that
-/// is not where anyone thinks it is.
+/// Rust declares the size but the linker chooses the address. If those disagree, the
+/// kernel runs on a stack that is not where anyone thinks it is.
 pub fn check_layout() {
     let span = layout::boot_stack_end().sub_addr(layout::boot_stack_start());
     assert_eq!(
@@ -159,12 +157,11 @@ pub fn check_layout() {
         layout::boot_stack_start().is_aligned(PAGE_SIZE),
         "the boot stack must be page aligned or its guard page will not line up"
     );
-    // `boot.S` uses `_boot_stack_end` as `sp` directly, so it must be the top this
-    // module computes. Two ways of naming one address, pinned rather than assumed.
+    // The architecture entry uses `_boot_stack_end` as `sp` directly.
     assert_eq!(
         boot().top(),
         layout::boot_stack_end(),
-        "the boot stack top and `_boot_stack_end` disagree; boot.S would run below its stack"
+        "the boot stack top and `_boot_stack_end` disagree"
     );
 }
 

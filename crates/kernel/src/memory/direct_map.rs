@@ -1,15 +1,4 @@
-//! The kernel's direct map — `VA = PA + `[`VA_OFFSET`] across the full physical
-//! range that fits in Sv39's high canonical half.
-//!
-//! The single source for the mapping `boot.S` installs:
-//!
-//! 1. [`VA_OFFSET`] — the direct-map base. Mirrored by `kernel.ld`'s `_va_offset`,
-//!    and checked against reality at boot by [`verify`].
-//! 2. [`EARLY_PGTABLE`] / [`EARLY_SATP_TEMPLATE`] — the boot page table and the
-//!    `satp` value that installs it, both built by `paging` at **compile time**, so
-//!    no PTE format and no translation mode appears in `boot.S`.
-//! 3. [`DIRECT_MAP_END`] — how much physical memory those mappings actually reach,
-//!    which is what bounds the frame allocator (see [`super::frame::init`]).
+//! The kernel's direct-map geometry.
 //!
 //! # Why a *linear* map
 //!
@@ -24,20 +13,8 @@
 //!   non-canonical Sv39 address. That is what makes eventually dropping the
 //!   identity map possible.
 //!
-//! # Why it is `const`
-//!
-//! A root-level leaf has no intermediate tables beneath it, so
-//! [`Table::map_gigapage`] allocates nothing and is `const`. The whole table is
-//! therefore a `static` materialized by the loader: there is no early allocator
-//! to bootstrap, and no Rust needs to run before paging is on — which sidesteps
-//! the pre-paging codegen hazards (`gp`-relative relaxation, absolute
-//! relocations) entirely. The table is *data*, not code.
-//!
-//! Because every leaf pre-sets `A`/`D`, the hardware walker never writes to the
-//! table, so it is genuinely immutable and lives in `.rodata`.
-
-use paging::sv39::{ENTRIES_PER_PAGE, PteFlags, ROOT_LEVEL, page_size_at};
-use paging::{PhysicalAddr, Satp, Table, VirtualAddr};
+use paging::PhysicalAddr;
+use paging::sv39::{ENTRIES_PER_PAGE, ROOT_LEVEL, page_size_at};
 
 /// Bottom of the Sv39 high half, and the base of the kernel's direct map.
 ///
@@ -57,72 +34,24 @@ const GIGAPAGE: usize = page_size_at(ROOT_LEVEL);
 /// The low half is the identity map and the high half is the direct map, so every
 /// root entry has one fixed role. Filling all of them costs no more memory than a
 /// partial table: an Sv39 root is always one 4 KiB page.
-const CANONICAL_HALF_ENTRIES: usize = ENTRIES_PER_PAGE / 2;
+pub(crate) const ROOT_ENTRIES: usize = ENTRIES_PER_PAGE / 2;
 
 /// Exclusive end of the physical range representable by the Sv39 direct map.
 ///
 /// Frames at or above this address have no high-half alias, so the frame allocator
 /// must not hand them out.
-pub const DIRECT_MAP_END: PhysicalAddr =
-    PhysicalAddr::new(CANONICAL_HALF_ENTRIES * GIGAPAGE);
-
-/// Permissions for a boot mapping: full access, with `A`/`D` pre-set so the
-/// hardware walker never needs to write back into the table.
-const BOOT: PteFlags = PteFlags::READ_WRITE_EXECUTE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
-
-/// Build the early page table at compile time.
-///
-/// Each physical gigapage that fits in one canonical half is mapped
-/// **twice**:
-///
-/// - *identity*, so the instruction stream survives the `csrw satp` that turns
-///   translation on while the PC is still a physical address, and so MMIO stays
-///   reachable at its raw address (the console does exactly that);
-/// - at `VA_OFFSET + PA`, the direct map — the kernel's durable home, which is
-///   where it runs from the moment `boot.S` jumps high.
-///
-/// Note what is *absent*: the RAM base. The window starts at physical 0 and RAM
-/// lands wherever the platform puts it inside that window, so nothing here — and
-/// therefore nothing in `boot.S` — needs to know where DRAM begins.
-const fn early_table() -> Table {
-    let mut table = Table::new();
-    let mut i = 0;
-    while i < CANONICAL_HALF_ENTRIES {
-        let pa = PhysicalAddr::new(i * GIGAPAGE);
-        table.map_gigapage(VirtualAddr::new(i * GIGAPAGE), pa, BOOT);
-        table.map_gigapage(VirtualAddr::new(VA_OFFSET + i * GIGAPAGE), pa, BOOT);
-        i += 1;
-    }
-    table
-}
-
-/// The root page table `boot.S` installs. Named by `boot.S`, hence `no_mangle`.
-#[used]
-#[unsafe(no_mangle)]
-static EARLY_PGTABLE: Table = early_table();
-
-/// The `satp` value `boot.S` writes, with `PPN` left zero for it to fill in.
-///
-/// The root table's physical address is a link-time fact only a PC-relative
-/// `lla` can recover, so it cannot appear in a `const`. Everything else — the
-/// Sv39 mode encoding above all — comes from `paging`, and `boot.S` just `or`s
-/// the page number in. See [`Satp::with_root`], which is the same operation.
-#[used]
-#[unsafe(no_mangle)]
-static EARLY_SATP_TEMPLATE: usize = Satp::sv39(PhysicalAddr::new(0), 0).bits();
+pub const DIRECT_MAP_END: PhysicalAddr = PhysicalAddr::new(ROOT_ENTRIES * GIGAPAGE);
 
 /// Assert the direct map Rust believes in is the one we are actually running on.
 ///
-/// `boot.S` measures `VA - PA` as the *linked* address of its high-half
-/// continuation minus the physical address it actually reached that code at —
-/// a fact about reality, not about intent, so this catches a mismatched linker
-/// script and a loader that put us somewhere unexpected alike.
+/// The naked boot entry measures the linked-to-physical skew at its high-half jump.
+/// This catches disagreement between the linker script and the Rust constant.
 ///
-/// Call once, before anything translates.
+/// Call once before using the address conversion helpers.
 pub fn verify(measured: usize) {
     assert_eq!(
         measured, VA_OFFSET,
-        "boot.S measured a VA offset of {measured:#x}, but the direct map is built for \
+        "boot entry measured a VA offset of {measured:#x}, but the direct map is built for \
          {VA_OFFSET:#x}; kernel.ld's _va_offset and memory::direct_map::VA_OFFSET have diverged"
     );
 }

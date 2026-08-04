@@ -4,6 +4,7 @@ use core::alloc::Layout;
 use paging::sv39::{PAGE_SIZE, page_size_at};
 use paging::{MemoryAddr, PhysicalAddr, VirtualAddr};
 
+pub(crate) mod boot_table;
 pub mod direct_map;
 pub mod frame;
 pub mod kernel_table;
@@ -110,8 +111,8 @@ pub fn report_layout() {
 /// this module, so asking it would make the dependency circular. `start` knows both
 /// and supplies it.
 ///
-/// A secondary hart runs none of this — `boot.S` hands it a finished page table and a
-/// finished stack before it reaches Rust at all.
+/// A secondary hart runs none of this. Its architecture entry installs the finished
+/// page table and stack before entering ordinary Rust.
 pub fn init(secondary_harts: impl Iterator<Item = usize>) {
     report_layout();
 
@@ -130,11 +131,9 @@ pub fn init(secondary_harts: impl Iterator<Item = usize>) {
     //    kernel image (a high VA); the allocator vends *physical* addresses, so convert
     //    it back. `ram_end` is already physical, validated by `device_tree::init`.
     let free_start_pa = virt_to_phys(layout::heap_start());
-    let ram_end = PhysicalAddr::new(
-        crate::device_tree::ram_end().expect(
-            "device tree RAM region not discovered; call device_tree::init before memory::init",
-        ),
-    );
+    let ram_end = PhysicalAddr::new(crate::device_tree::ram_end().expect(
+        "device tree RAM region not discovered; call device_tree::init before memory::init",
+    ));
     assert!(
         free_start_pa < ram_end,
         "kernel image top {free_start_pa:#x} meets/exceeds RAM top {ram_end:#x}; give the VM more RAM"
@@ -176,7 +175,7 @@ pub fn init(secondary_harts: impl Iterator<Item = usize>) {
     stack::report();
 
     // 4. The real kernel page table LAST: it needs frames for its tree, and it derives
-    //    its direct map from what the allocator ended up owning. Replaces boot.S's
+    //    its direct map from what the allocator ended up owning. Replaces the boot
     //    blanket-RWX gigapages with per-section rights and W^X.
     kernel_table::init();
 }

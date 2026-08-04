@@ -1,10 +1,9 @@
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
+#![feature(abi_custom)]
 
 extern crate alloc;
-
-use core::arch::global_asm;
 
 mod arch;
 mod cpu;
@@ -14,8 +13,6 @@ mod device_tree;
 mod memory;
 mod start;
 mod utils;
-
-global_asm!(include_str!("boot.S"));
 
 // the -> ! means that this function won't return
 #[panic_handler]

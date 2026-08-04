@@ -33,9 +33,7 @@ const_assert_eq!(PAGE_SIZE, 4096);
 
 impl Table {
     /// An empty table: every entry invalid.
-    pub const fn new() -> Self {
-        Self { entries: [Entry::empty(); ENTRIES_PER_PAGE] }
-    }
+    pub const fn new() -> Self { Self { entries: [Entry::empty(); ENTRIES_PER_PAGE] } }
 
     /// Install a 1 GiB gigapage leaf directly in this root table.
     ///
@@ -51,12 +49,7 @@ impl Table {
     ///
     /// If `vaddr` or `paddr` is not 1 GiB aligned, or `flags` is not a legal
     /// leaf. In a `const` context these are compile-time errors.
-    pub const fn map_gigapage(
-        &mut self,
-        vaddr: VirtualAddr,
-        paddr: PhysicalAddr,
-        flags: PteFlags,
-    ) {
+    pub const fn map_gigapage(&mut self, vaddr: VirtualAddr, paddr: PhysicalAddr, flags: PteFlags) {
         const GIGAPAGE: usize = page_size_at(ROOT_LEVEL);
         assert!(flags.is_leaf(), "a gigapage mapping needs at least one of R/W/X");
         assert!(flags.is_legal_leaf(), "write-without-read is a reserved PTE encoding");

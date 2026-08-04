@@ -1,6 +1,6 @@
 //! The kernel's own page table — the one that replaces the boot table.
 //!
-//! `boot.S` installs a table of 1 GiB `RWX` gigapages (see [`super::direct_map`]).
+//! The architecture boot entry installs a table of 1 GiB `RWX` gigapages.
 //! It is exactly enough to get Rust running at high virtual addresses and not one
 //! bit more: with a single blanket permission covering all of memory, `.text` is
 //! writable and `.rodata` is executable. Paging is on but buying no protection.
@@ -20,7 +20,7 @@
 //!
 //! # No identity mapping
 //!
-//! Unlike `boot.S`'s table, this one maps nothing at `VA == PA`. Every physical
+//! Unlike the boot table, this one maps nothing at `VA == PA`. Every physical
 //! address the kernel dereferences goes through [`super::phys_to_virt`] first —
 //! device registers included, which is what the linear direct map bought. The
 //! low half of the address space is now entirely unmapped and available to user
@@ -47,11 +47,8 @@
 //! mapping the same kernel would work, but they would double the page-table memory
 //! and, worse, drift the moment anything mapped something at run time.
 //!
-//! They adopt it in `boot.S`, reading [`KERNEL_SATP`] directly, because a secondary
-//! has to be on this table *before* it can touch its stack — the stack lives above
-//! the direct map, in address space no other table describes. There is no handshake:
-//! the boot hart cannot start a hart before publishing, since the stack address it
-//! passes is only meaningful under the published table.
+//! They adopt it in the stackless architecture entry because a secondary has to be
+//! on this table before it can touch its guarded stack.
 //!
 //! # Not yet
 //!
@@ -293,7 +290,7 @@ pub fn init() {
 
     // Published last, so a non-zero value means frames, heap, stacks and table are
     // all up. Release, so the tree itself is visible to any hart that reads it —
-    // `boot.S` pairs this with an acquire fence on the far side.
+    // A secondary handoff copies this value and publishes the complete launch state.
     KERNEL_SATP.store(satp.bits(), Ordering::Release);
 
     println!("[memory] kernel page table live (satp {:#x}); boot table retired", satp.bits());
@@ -301,13 +298,7 @@ pub fn init() {
 
 /// The `satp` the boot hart installed. Zero until [`init`] has finished.
 ///
-/// `no_mangle` because `boot.S` loads it: a starting hart has to be on this table
-/// before it can touch the stack it was given, so the switch happens in assembly,
-/// before there is a stack to run Rust on. Reading the same word both places is what
-/// keeps assembly and Rust from having separate ideas of which table is live.
-///
-/// No `#[used]`: [`satp`] reads it from Rust, so it cannot be dropped.
-#[unsafe(no_mangle)]
+/// Read through [`satp`] and copied into each secondary handoff.
 static KERNEL_SATP: AtomicUsize = AtomicUsize::new(0);
 
 /// The live kernel page table, or `None` before [`init`] has published one.

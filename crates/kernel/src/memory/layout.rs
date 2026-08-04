@@ -35,10 +35,6 @@ linker_symbol!(
     boot_stack_start   => _boot_stack_start,
     boot_stack_end     => _boot_stack_end,
     heap_start         => _heap_start,
-    // Not a layout bound, but a linker symbol read the same way.
-    // `cpu::start_secondaries` passes its *physical* address to SBI: a hart starts
-    // with translation off, and this is an entry point, not a callable function.
-    secondary_entry    => _secondary_start,
 );
 
 // NOTE: only *address* symbols belong here. A small absolute linker symbol (a size

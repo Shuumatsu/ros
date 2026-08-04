@@ -72,9 +72,7 @@ pub struct Frames(FrameBlock);
 
 impl Frames {
     /// Base physical address of the run.
-    pub fn base(&self) -> PhysicalAddr {
-        PhysicalAddr::from_ppn(self.0.start_frame())
-    }
+    pub fn base(&self) -> PhysicalAddr { PhysicalAddr::from_ppn(self.0.start_frame()) }
 }
 
 /// Bring the allocator up over free physical RAM `[free_start, ram_end)`.
@@ -120,7 +118,7 @@ pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr) {
         unsafe { core::slice::from_raw_parts_mut(bitmap_va.as_mut_ptr(), bitmap_words) };
 
     // SAFETY: `managed` covers RAM strictly above the kernel image and the
-    // bitmap — memory nothing else owns — and boot.S maps every frame in it.
+    // bitmap — memory nothing else owns — and the boot table maps every frame in it.
     let mut allocator = unsafe {
         FrameAllocator::new(managed, bitmap).expect("frame allocator initialization failed")
     };
@@ -159,14 +157,10 @@ pub struct Reservation {
 
 impl Reservation {
     /// Why this range is withheld.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
+    pub fn name(&self) -> &str { &self.name }
 
     /// Frames this range spans, overlap included.
-    pub fn frames(&self) -> usize {
-        self.end.sub_addr(self.start) / PAGE_SIZE
-    }
+    pub fn frames(&self) -> usize { self.end.sub_addr(self.start) / PAGE_SIZE }
 }
 
 /// Everything withheld from the pool, in the order it was withheld.
@@ -178,9 +172,7 @@ impl Reservation {
 static RESERVATIONS: Mutex<Vec<Reservation, MAX_RESERVATIONS>> = Mutex::new(Vec::new());
 
 /// Every range withheld from the pool, cloned out so no lock is held by the caller.
-pub fn reservations() -> Vec<Reservation, MAX_RESERVATIONS> {
-    RESERVATIONS.lock().clone()
-}
+pub fn reservations() -> Vec<Reservation, MAX_RESERVATIONS> { RESERVATIONS.lock().clone() }
 
 /// Withhold `[start, end)` from the pool, recording it as `name`.
 ///
@@ -322,9 +314,7 @@ fn report_reservations() {
 }
 
 /// Allocate one zeroed physical frame, or `None` if the pool is exhausted.
-pub fn alloc() -> Option<Frames> {
-    alloc_contiguous(1)
-}
+pub fn alloc() -> Option<Frames> { alloc_contiguous(1) }
 
 /// Allocate `count` physically contiguous zeroed frames, returning the run
 /// (`count` is rounded up to a power of two internally, a buddy property, so the
@@ -395,9 +385,7 @@ pub struct TableFrames;
 // table read as "all entries invalid"), owned exclusively by the caller until it
 // comes back through `free_at`.
 unsafe impl FrameSource for TableFrames {
-    fn alloc_zeroed(&mut self) -> Option<PhysicalAddr> {
-        alloc().map(|frames| frames.base())
-    }
+    fn alloc_zeroed(&mut self) -> Option<PhysicalAddr> { alloc().map(|frames| frames.base()) }
 
     unsafe fn free(&mut self, frame: PhysicalAddr) {
         // SAFETY: forwarded from the trait's contract, which requires the frame
