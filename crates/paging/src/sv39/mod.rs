@@ -47,6 +47,14 @@ pub const ENTRY_SIZE: usize = core::mem::size_of::<u64>();
 /// Number of entries in a single page table (fills exactly one page).
 pub const ENTRIES_PER_PAGE: usize = 1 << VPN_BITS;
 
+/// Root-table slots in one canonical half of the address space.
+///
+/// Sv39 splits the root evenly — slots `0..256` are the low half, `256..512` the
+/// high half, and every address between the two is non-canonical. A kernel that
+/// puts itself in the high half and users in the low one is dividing the root
+/// along exactly this line.
+pub const ROOT_ENTRIES_PER_HALF: usize = ENTRIES_PER_PAGE / 2;
+
 /// Total width of a physical page number (PPN[2:0]).
 pub const PPN_BITS: usize = 44;
 /// Width of each `PPN[i]` field. `PPN[2]` is wider to reach the 56-bit

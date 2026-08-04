@@ -8,15 +8,23 @@ use paging::{MemoryAddr, VirtualAddr};
 /// The kernel is linked high, so every one of these is a *virtual* address and is
 /// typed as one at the source. That is what stops one being handed to something
 /// expecting a physical address without a visible [`super::virt_to_phys`] in between.
+///
+/// The raw symbols are declared once, here, and re-exported: the boot entry needs
+/// some of them as `sym` operands, where a typed accessor is no use, and a second
+/// `extern` block naming the same symbols would be a second place for the linker
+/// script's spelling to be wrong.
 macro_rules! linker_symbol {
     ($($fn_name:ident => $sym_name:ident),* $(,)?) => {
+        unsafe extern "C" {
+            $(
+                #[doc = concat!("Raw `", stringify!($sym_name), "`. Prefer [`", stringify!($fn_name), "`].")]
+                pub(crate) static $sym_name: u8;
+            )*
+        }
         $(
             #[inline]
             pub fn $fn_name() -> VirtualAddr {
-                unsafe extern "C" {
-                    static $sym_name: u8;
-                }
-                VirtualAddr::new(unsafe { &$sym_name as *const _ as usize })
+                VirtualAddr::new(&raw const $sym_name as usize)
             }
         )*
     };
@@ -42,6 +50,33 @@ linker_symbol!(
 // is nowhere near the code, so it fails to link with `R_RISCV_PCREL_HI20 out of
 // range`. Sizes therefore live in Rust and are derived from the addresses above;
 // see `memory::stack`.
+
+/// Zero `.bss`, putting the statics into the state Rust compiled against.
+///
+/// The loader copies only the sections that have bytes in the image; `.bss` has
+/// none, so until this runs every static holds whatever the previous occupant of
+/// that RAM left. First thing on the boot hart, and nowhere else — a secondary
+/// arrives long after, into statics the boot hart is already using.
+///
+/// # Safety
+///
+/// Call exactly once, before anything reads or writes a static.
+pub unsafe fn clear_bss() {
+    let start = bss_start().bits();
+    let end = bss_end().bits();
+
+    // Volatile, and not `write_bytes`. To the compiler `_bss_start` is a lone
+    // one-byte object and the statics being zeroed here are unrelated globals it
+    // can see are never read beforehand, which makes a plain store one it is free
+    // to narrow, sink past the first reader, or drop entirely.
+    //
+    // `kernel.ld` aligns both ends to a `usize`, so the last store lands inside.
+    let mut addr = start;
+    while addr < end {
+        unsafe { (addr as *mut usize).write_volatile(0) };
+        addr += size_of::<usize>();
+    }
+}
 
 /// Assert the linker script's view of the layout matches Rust's.
 ///

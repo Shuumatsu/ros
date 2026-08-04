@@ -47,21 +47,38 @@ const MAX_CPUS: usize = 64;
 static CPU_SLOTS: [CpuSlot; MAX_CPUS] = [const { CpuSlot::new() }; MAX_CPUS];
 static BOOT_READY: AtomicBool = AtomicBool::new(false);
 
+/// This hart's control block, or `None` before one was adopted.
+///
+/// The architecture entry zeroes `tp` precisely so that this question has an
+/// answer: the firmware leaves garbage there, and garbage is indistinguishable
+/// from a live control block.
+///
+/// Only the console has any business asking — it prints from inside the window
+/// between the entry and [`init_boot`], and a console that panics for want of a
+/// hart id loses exactly the message worth having. Everything else runs after that
+/// window and uses [`current`].
+pub fn try_current() -> Option<&'static Cpu> {
+    let tp: usize;
+    // SAFETY: reading a register.
+    unsafe { core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack)) };
+    // SAFETY: `tp` is either zero, or a pointer `install_current` took from the
+    // static CPU slot array.
+    (tp != 0).then(|| unsafe { &*(tp as *const Cpu) })
+}
+
 /// This hart's control block.
 ///
 /// # Panics
 /// If `tp` is null, which means the Rust entry did not adopt a CPU first.
 pub fn current() -> &'static Cpu {
-    let tp: usize;
-    // SAFETY: reading a register.
-    unsafe { core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack)) };
-    assert!(tp != 0, "tp is null: the boot entry did not adopt a Cpu");
-    // SAFETY: `install_current` only accepts pointers into the static CPU slot array.
-    unsafe { &*(tp as *const Cpu) }
+    try_current().expect("tp is null: the boot entry did not adopt a Cpu")
 }
 
-/// This hart's physical id. Every `[hart N]` console prefix comes from here.
-pub fn hart_id() -> usize { current().hartid() }
+/// This hart's physical id, or `None` before one was adopted. See [`try_current`].
+///
+/// Every `[hart N]` console prefix comes from here. Anything that already knows a
+/// control block exists should say so by using [`current`].
+pub fn try_hart_id() -> Option<usize> { try_current().map(Cpu::hartid) }
 
 /// Secondary harts that have reached [`crate::start::secondary`].
 static ONLINE: AtomicUsize = AtomicUsize::new(0);

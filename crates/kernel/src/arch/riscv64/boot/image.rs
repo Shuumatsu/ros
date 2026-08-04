@@ -27,5 +27,5 @@ _image_header_end:
 
     .option pop
     "#,
-    boot = sym super::entry::boot_entry,
+    boot = sym super::entry::primary_entry,
 );

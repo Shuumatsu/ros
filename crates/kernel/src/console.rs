@@ -4,7 +4,7 @@ use spin::Mutex;
 use uart_16550::MmioSerialPort;
 
 use crate::arch::riscv64::interrupts;
-use crate::cpu::hart_id;
+use crate::cpu;
 use crate::device_tree;
 
 /// The primary MMIO UART, bound to the device-tree base the first time we print
@@ -72,24 +72,38 @@ impl fmt::Write for SbiConsole {
     }
 }
 
+/// The `[hart N] ` every line opens with.
+///
+/// `?` in the window between the architecture entry and `cpu::init_boot`, which is
+/// where `clear_bss` and the layout checks run. Asking for a hart id that does not
+/// exist yet would panic, and panicking prints — so the console would take down the
+/// one thing able to report what went wrong.
+fn write_prefix(out: &mut impl Write) {
+    match cpu::try_hart_id() {
+        Some(hart) => {
+            let _ = write!(out, "[hart {hart}] ");
+        }
+        None => {
+            let _ = out.write_str("[hart ?] ");
+        }
+    }
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    let hart = hart_id();
-
     // Masked across the whole locked section so an interrupt handler on THIS hart
     // cannot arrive and try to take a lock this hart already holds.
     interrupts::without(|| {
         let mut port = UART.lock();
         let mut out = Uart(&mut port);
-        let _ = write!(out, "[hart {}] ", hart);
+        write_prefix(&mut out);
         let _ = out.write_fmt(args);
     });
 }
 
 #[doc(hidden)]
 pub fn _emergency_print(args: fmt::Arguments) {
-    let hart = hart_id();
-    let _ = write!(SbiConsole, "[hart {}] ", hart);
+    write_prefix(&mut SbiConsole);
     let _ = SbiConsole.write_fmt(args);
 }
 

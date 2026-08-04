@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn mode_encodings_match_the_privileged_spec() {
         assert_eq!(Mode::Bare.bits(), 0, "Bare is MODE 0");
-        assert_eq!(Mode::Sv39.bits(), 8, "Sv39 is MODE 8 — the value boot.S used to hardcode");
+        assert_eq!(Mode::Sv39.bits(), 8, "Sv39 is MODE 8");
         assert_eq!(Mode::Sv48.bits(), 9);
         assert_eq!(Mode::Sv57.bits(), 10);
 
@@ -202,11 +202,10 @@ mod tests {
     }
 
     #[test]
-    fn sv39_value_is_the_bit_pattern_boot_asm_built_by_hand() {
-        // The old boot.S did: `srli t1, table, 12` then `li t2,8; slli t2,t2,60; or`.
+    fn sv39_value_matches_the_privileged_spec_layout() {
         let root = PhysicalAddr::new(0x8020_1000);
         let satp = Satp::sv39(root, 0);
-        assert_eq!(satp.bits(), (8 << 60) | (0x8020_1000 >> 12), "must match the hand-rolled value");
+        assert_eq!(satp.bits(), (8 << 60) | (0x8020_1000 >> 12), "MODE at bit 60, PPN at bit 0");
         assert_eq!(satp.mode(), Some(Mode::Sv39), "mode decodes back");
         assert_eq!(satp.root(), root, "root decodes back");
         assert_eq!(satp.asid(), 0, "no ASID requested");
@@ -225,6 +224,10 @@ mod tests {
 
     /// The pattern early boot uses: a `const` template carrying only the mode,
     /// with the root folded in once its physical address is known.
+    ///
+    /// That the *assembly* folding it in agrees with this is not checked here — the
+    /// kernel's `memory::boot_table` owns that recipe and asserts it against these
+    /// constructors at compile time, next to the code that uses it.
     #[test]
     fn root_can_be_grafted_onto_a_const_template() {
         const TEMPLATE: Satp = Satp::sv39(PhysicalAddr::new(0), 0);
@@ -233,9 +236,6 @@ mod tests {
         let root = PhysicalAddr::new(0x8100_0000);
         let filled = TEMPLATE.with_root(root);
         assert_eq!(filled, Satp::sv39(root, 0), "grafting == composing directly");
-
-        // Which is exactly what `or`-ing the PPN into the template does in asm.
-        assert_eq!(filled.bits(), TEMPLATE.bits() | (root.bits() >> 12), "matches an asm `or`");
     }
 
     #[test]

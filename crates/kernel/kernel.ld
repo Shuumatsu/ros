@@ -47,7 +47,7 @@ _memory_start = _phys_base + _va_offset;        /* 0xffffffc080200000: virtual b
 PHDRS is short for "program headers", which we specify three here:
     text - CPU instructions (executable sections)
     data - Global, initialized variables
-    bss  - Global, uninitialized variables (cleared by the naked boot entry)
+    bss  - Global, uninitialized variables (cleared by memory::layout::clear_bss)
 
 The command PT_LOAD tells the linker that these sections will be loaded
 from the file into memory.
@@ -160,9 +160,9 @@ SECTIONS {
         /* in case bss section is empty, ensure it occupys at least one page */
         . = . + _page_size;
 
-        /* The naked boot entry zeroes this span with `sd`, stepping 8 bytes and stopping on
-           `bltu`, so a span that is not a multiple of 8 makes the last store write
-           up to 7 bytes past _bss_end. */
+        /* memory::layout::clear_bss zeroes this span one `usize` at a time, stopping
+           when the cursor reaches _bss_end, so a span that is not a multiple of 8
+           makes the last store write up to 7 bytes past it. */
         . = ALIGN(8);
         PROVIDE(_bss_end = .);
     } :bss

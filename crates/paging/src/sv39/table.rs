@@ -13,7 +13,7 @@ use core::mem::{align_of, size_of};
 use super::addr::{PhysicalAddr, VirtualAddr};
 use super::entry::{Entry, PteFlags};
 use super::page_size_at;
-use super::{ENTRIES_PER_PAGE, PAGE_SIZE, ROOT_LEVEL};
+use super::{ENTRIES_PER_PAGE, PAGE_SIZE, ROOT_ENTRIES_PER_HALF, ROOT_LEVEL};
 
 /// A single Sv39 page table: 512 entries filling exactly one 4 KiB frame.
 ///
@@ -63,6 +63,44 @@ impl Table {
         );
         self.entries[vaddr.vpn(ROOT_LEVEL)] = Entry::leaf(paddr, flags);
     }
+
+    /// The table a higher-half kernel enters paging on: every root slot of both
+    /// canonical halves filled with a gigapage, the low half identity mapped
+    /// (`VA == PA`) and the high half offset (`VA == PA + va_offset`).
+    ///
+    /// Both halves are needed, and for different instructions. The low one keeps
+    /// the fetch after the `satp` write working, because the program counter is
+    /// still a physical address at that point; the high one is where the very next
+    /// jump goes. Filling every slot rather than just the kernel's own costs
+    /// nothing — a root table is one page either way — and it means the device
+    /// tree, wherever the loader put it, is reachable through both.
+    ///
+    /// `flags` applies verbatim to all of it, so this grants one blanket
+    /// permission over all of memory and is meant to be replaced by a table with
+    /// per-section rights as soon as there is an allocator to build one.
+    ///
+    /// # Panics
+    ///
+    /// If `va_offset` is not the base of the high canonical half. In a `const`
+    /// context that is a compile-time error.
+    pub const fn identity_and_offset(va_offset: usize, flags: PteFlags) -> Self {
+        const GIGAPAGE: usize = page_size_at(ROOT_LEVEL);
+        assert!(va_offset % GIGAPAGE == 0, "the high half must begin on a gigapage boundary");
+        assert!(
+            VirtualAddr::new(va_offset).vpn(ROOT_LEVEL) == ROOT_ENTRIES_PER_HALF,
+            "va_offset must be the base of the high canonical half"
+        );
+
+        let mut table = Self::new();
+        let mut index = 0;
+        while index < ROOT_ENTRIES_PER_HALF {
+            let pa = PhysicalAddr::new(index * GIGAPAGE);
+            table.map_gigapage(VirtualAddr::new(index * GIGAPAGE), pa, flags);
+            table.map_gigapage(VirtualAddr::new(va_offset + index * GIGAPAGE), pa, flags);
+            index += 1;
+        }
+        table
+    }
 }
 
 impl Default for Table {
@@ -82,24 +120,10 @@ mod tests {
     const BOOT: PteFlags =
         PteFlags::READ_WRITE_EXECUTE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
 
-    /// Build a boot-style table **at compile time**: the full low canonical half
-    /// identity mapped, and mirrored into the high half. Evaluating it here proves
-    /// it costs nothing at run time and requires no allocator.
-    const fn early_table() -> Table {
-        let mut table = Table::new();
-        let mut i = 0;
-        while i < ENTRIES_PER_PAGE / 2 {
-            let pa = PhysicalAddr::new(i * GIGAPAGE);
-            table.map_gigapage(VirtualAddr::new(i * GIGAPAGE), pa, BOOT);
-            table.map_gigapage(VirtualAddr::new(HIGH_BASE + i * GIGAPAGE), pa, BOOT);
-            i += 1;
-        }
-        table
-    }
-
-    /// Forced through const evaluation: if `map_gigapage` were not truly
-    /// const-usable, this would not compile.
-    static EARLY: Table = early_table();
+    /// The kernel's boot table, forced through const evaluation: if
+    /// [`Table::identity_and_offset`] were not truly const-usable, this would not
+    /// compile, and the kernel could not hold it as a `static`.
+    static EARLY: Table = Table::identity_and_offset(HIGH_BASE, BOOT);
 
     #[test]
     fn layout_is_a_page() {
@@ -118,9 +142,9 @@ mod tests {
     fn const_built_boot_table_has_the_expected_entries() {
         // The high half starts at root index 256 — derived, not assumed.
         let high_index = VirtualAddr::new(HIGH_BASE).vpn(ROOT_LEVEL);
-        assert_eq!(high_index, 256, "high half begins at root entry 256");
+        assert_eq!(high_index, ROOT_ENTRIES_PER_HALF, "high half begins at root entry 256");
 
-        for i in 0..ENTRIES_PER_PAGE / 2 {
+        for i in 0..ROOT_ENTRIES_PER_HALF {
             let expected = PhysicalAddr::new(i * GIGAPAGE);
 
             let identity = EARLY.entries[i];
@@ -156,5 +180,20 @@ mod tests {
     fn rejects_a_misaligned_gigapage() {
         let mut table = Table::new();
         table.map_gigapage(VirtualAddr::new(0x1000), PhysicalAddr::new(0), BOOT);
+    }
+
+    /// An offset that is not the base of the high half would put the kernel's own
+    /// mappings at root slots the low half already owns, silently overwriting the
+    /// identity map the `satp` write depends on.
+    #[test]
+    #[should_panic(expected = "high canonical half")]
+    fn rejects_an_offset_outside_the_high_half() {
+        let _ = Table::identity_and_offset(GIGAPAGE, BOOT);
+    }
+
+    #[test]
+    #[should_panic(expected = "gigapage boundary")]
+    fn rejects_an_unaligned_offset() {
+        let _ = Table::identity_and_offset(HIGH_BASE + PAGE_SIZE, BOOT);
     }
 }

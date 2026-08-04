@@ -14,7 +14,7 @@
 //!   identity map possible.
 //!
 use paging::PhysicalAddr;
-use paging::sv39::{ENTRIES_PER_PAGE, ROOT_LEVEL, page_size_at};
+use paging::sv39::{ROOT_ENTRIES_PER_HALF, ROOT_LEVEL, page_size_at};
 
 /// Bottom of the Sv39 high half, and the base of the kernel's direct map.
 ///
@@ -29,22 +29,16 @@ pub const VA_OFFSET: usize = 0xffff_ffc0_0000_0000;
 /// Bytes mapped by one root-level leaf.
 const GIGAPAGE: usize = page_size_at(ROOT_LEVEL);
 
-/// Root-level leaves in either canonical half of the Sv39 address space.
-///
-/// The low half is the identity map and the high half is the direct map, so every
-/// root entry has one fixed role. Filling all of them costs no more memory than a
-/// partial table: an Sv39 root is always one 4 KiB page.
-pub(crate) const ROOT_ENTRIES: usize = ENTRIES_PER_PAGE / 2;
-
 /// Exclusive end of the physical range representable by the Sv39 direct map.
 ///
-/// Frames at or above this address have no high-half alias, so the frame allocator
-/// must not hand them out.
-pub const DIRECT_MAP_END: PhysicalAddr = PhysicalAddr::new(ROOT_ENTRIES * GIGAPAGE);
+/// The high half is one root slot per gigapage and no more, so this is how far
+/// `VA = PA + VA_OFFSET` can reach. Frames at or above it have no high-half alias,
+/// and the frame allocator must not hand them out.
+pub const DIRECT_MAP_END: PhysicalAddr = PhysicalAddr::new(ROOT_ENTRIES_PER_HALF * GIGAPAGE);
 
 /// Assert the direct map Rust believes in is the one we are actually running on.
 ///
-/// The naked boot entry measures the linked-to-physical skew at its high-half jump.
+/// The architecture entry measures the linked-to-physical skew at its high-half jump.
 /// This catches disagreement between the linker script and the Rust constant.
 ///
 /// Call once before using the address conversion helpers.

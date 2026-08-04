@@ -3,6 +3,11 @@ use crate::memory;
 
 /// First ordinary Rust code on the boot hart.
 pub(crate) unsafe extern "C" fn boot(hartid: usize, dtb: usize, va_offset: usize) -> ! {
+    // NOTHING may go above this line. `.bss` has no bytes in the image, so until
+    // this returns every static holds whatever was in that RAM beforehand, and
+    // `init_boot` on the next line writes to one.
+    unsafe { memory::layout::clear_bss() };
+
     cpu::init_boot(hartid);
     memory::direct_map::verify(va_offset);
 
