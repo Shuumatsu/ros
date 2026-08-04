@@ -1,113 +1,99 @@
-# Boot & kernel-initialization architecture
+# Boot and kernel initialization
 
-How the kernel comes up, and *why* it's built this way. Read this before touching
-`boot.S`, `kernel.ld`, `memory/`, or the trap code.
+## Contract
 
-## Boot chain
+The kernel is an S-mode payload for an SBI firmware. It uses ordered SMP boot:
 
+1. Firmware enters one boot hart with `satp = 0`, `a0 = hartid`, and `a1 = DTB`.
+2. The boot hart initializes the kernel and starts secondaries through SBI HSM.
+3. HSM enters the physical secondary entry with `satp = 0`, `a0 = hartid`, and
+   `a1 = opaque`.
+
+The older spin-wait protocol, where firmware releases every hart at the Image
+entry, is intentionally unsupported.
+
+## Image and address space
+
+The build produces a flat RISC-V Linux `Image`. The 64-byte header and `_start`
+live in `arch/riscv64/boot/image.rs`; the linker asserts that the header is exact
+and starts at `_memory_start`.
+
+The image is linked at `0xffffffc080200000` and loaded at physical
+`0x80200000`. `kernel.ld` defines the fixed skew:
+
+```text
+VA = PA + 0xffffffc000000000
 ```
-QEMU reset (M-mode)
-  -> OpenSBI            (M-mode firmware, QEMU `-bios default`)
-       PMP, trap delegation, timer; mret to S-mode
-  -> our kernel         S-mode, a0 = hartid, a1 = dtb, entered at PHYS 0x80200000
-```
 
-We are a **pure S-mode payload under OpenSBI**, not an M-mode self-boot (`-bios
-none`). Rationale: the Linux RISC-V boot protocol enters the kernel in S-mode
-with the SBI owning M-mode. Following it means the kernel has *no* M-mode code
-(no PMP/`mret`/`mhartid`/M-timer) — simpler and standard. OpenSBI sets `medeleg`/
-`mideleg`, so we don't.
+`memory::boot_table` constructs an Sv39 root at compile time. It maps the full
+256 GiB representable by either canonical half twice:
 
-## Image format
+- low virtual addresses are an identity map used during the first `satp` write;
+- high virtual addresses are the kernel direct map.
 
-The kernel is booted as a **flat RISC-V `Image`** (not the ELF): `boot.S` starts
-with the 64-byte Linux image header (`code0 = j _boot`, `text_offset = 0x200000`,
-`magic2 = "RSC\x05"`). `scripts/run.sh` `objcopy`s the ELF to a flat binary and
-runs QEMU; the cargo runner points at it. We boot the Image (not the ELF) because
-the ELF's entry is a high VA that isn't mapped at reset — the flat Image is
-loaded at its physical `text_offset` and entered at `code0`.
+The architecture entry measures its linked-to-physical skew before jumping high.
+The first ordinary Rust entry checks that measurement against
+`memory::direct_map::VA_OFFSET`.
 
-## Higher-half layout
+## Rust boundary
 
-- Linked to **run** at high VAs: base `0xffffffc000200000` (bottom of the Sv39
-  high canonical half + the 2 MiB `text_offset`).
-- **Loaded** at physical `0x80200000` (RAM base `0x80000000` + 2 MiB; OpenSBI
-  owns the first 2 MiB). `kernel.ld` sets each section's LMA with
-  `AT(ADDR(.x) - _va_offset)`.
-- `boot.S` runs at the physical address (PC-relative only, pre-paging), builds a
-  minimal **3-gigapage** early table, enables Sv39, and jumps to the high alias:
-  - `root[0]`   VA `[0,1G)`     -> PA `[0,1G)`   identity (MMIO devices)
-  - `root[2]`   VA `[2G,3G)`    -> PA `[2G,3G)`  identity (RAM: kernel, heap, dtb)
-  - `root[256]` VA `[high,+1G)` -> PA `[2G,3G)`  the kernel's high-half home
+`arch/riscv64/boot/entry.rs` contains `extern "custom"` naked functions. They are
+not callable Rust functions and may run without a stack. This layer only:
 
-## Addressing convention
+- installs physical and high trap parking vectors;
+- activates the compile-time boot table;
+- transfers execution to the linked high alias;
+- initializes `gp` and the first stack;
+- clears BSS before Rust assumes statics are initialized;
+- switches secondaries to the final table and their guarded stacks.
 
-`VA = PA + offset`, where `offset = 0xffffffbf80000000` (Sv39 high-half base
-`0xffffffc000000000` − RAM base `0x80000000`).
+Normal Rust begins in `start::boot` or `start::secondary`. CPU identity, `tp`,
+device discovery, allocators, page-table policy, and hart startup all live in
+Rust.
 
-**Single source, derived — not duplicated.** The layout is declared once in
-`kernel.ld` (`_phys_base`, `_va_offset`, `_memory_start`); `_va_offset` is used
-there *only* for the sections' LMA math (`AT(ADDR(.x) - _va_offset)`). The
-*runtime* offset is never hardcoded in Rust or asm: `boot.S` measures it as
-`(linked VMA of a label) - (its real PMA)` and passes it to `start()`, which
-records it in `memory::VA_OFFSET`; `phys_to_virt`/`virt_to_phys` read that. So
-the offset is derived from the actual load vs. the linked layout — change the
-layout in `kernel.ld` alone and everything follows. (An earlier version hardcoded
-the constant in three files; that split-brain has been removed.)
+## Memory initialization
 
-We keep RAM **identity-mapped** as well as high-mapped, so a `PhysicalAddr` is
-still a usable pointer. That's why the `paging` crate and `frame.rs` need **no**
-changes for higher-half — `pa.as_ptr()` works via the identity map. `memory.rs`
-provides `virt_to_phys`/`phys_to_virt` for the one spot that crosses over (giving
-the frame allocator physical bounds while the heap lives at high VAs).
+The boot hart initializes memory in dependency order:
 
-## Memory
+1. validate linker and stack geometry;
+2. initialize the physical frame allocator from the DTB RAM range;
+3. carve the bounded kernel heap from owned frames;
+4. allocate one guarded stack per secondary;
+5. build and audit the final kernel page table;
+6. switch the boot hart to that table.
 
-- Kernel heap: bounded 8 MiB (`KERNEL_HEAP_SIZE`) at high VAs, right after the
-  kernel image + stack. Holds kernel bookkeeping (incl. the frame allocator's
-  free lists), so it must come up *before* the frame allocator.
-- Physical frame allocator: the rest of RAM `[heap_end_pa, ram_end)`, physical.
-- `ram_end` is discovered from the device tree (`/memory`), never hardcoded.
+The final table removes the identity map, applies per-section W^X permissions,
+maps discovered MMIO, maps allocator-owned RAM through the direct map, and maps
+each stack separately so its lower guard page remains unmapped.
 
-## Traps and the timer — PARKED
+## Secondary handoff
 
-**There is no trap handler and no timer right now.** The whole subsystem was moved
-out of the crate to `crates/kernel/attic/trap/` while boot and memory init are being
-finalised; that directory's README says why and what has to happen before it returns.
-`stvec` stays on `boot.S`'s `_trap_park` for the life of the kernel, so any trap
-parks the faulting hart with `scause`/`sepc`/`stval` intact. `sstatus.SIE` is never
-set and no interrupt source is enabled, which makes the `wfi` loops in `kmain` /
-`kmain_ap` true halts rather than idles.
+Each secondary has a dedicated handoff containing the final `satp`, stack top,
+and prepared `Cpu` pointer. The boot hart fills the record and release-publishes
+its readiness before `sbi_hart_start`.
 
-What was there, kept here because it is what gets rebuilt:
+The stackless secondary entry waits for readiness, performs an acquire fence,
+loads the coherent handoff, switches to the final table, installs `sp`, and
+tail-transfers to Rust. Rust then installs `tp` and validates the SBI hart ID
+against the selected `Cpu`.
 
-S-mode timer via the SBI TIME (legacy `set_timer`) extension: `rdtime` for the
-current time, `sbi::set_timer(now + INTERVAL)` armed and re-armed each tick, with
-`sie.STIE` + `sstatus.SIE` enabled at init.
+Hart IDs are opaque machine identifiers, never array indices. Slot 0 belongs to
+the firmware-selected boot hart; secondaries use dense logical slots assigned by
+the boot hart.
 
-Note (Phase-0 gotcha): under OpenSBI+Sstc, `stimecmp` starts at 0, so the timer
-interrupt is permanently pending until first armed. Never enable `sie.STIE`
-without a handler that arms/clears it.
+## Traps
 
-Also fixed at the time: the trap trampoline reserved 32 slots for a 33-field
-`TrapFrame`, writing `sepc` one slot past the frame. Harmless for the old U-mode
-ecall demo, fatal for kernel-context interrupts. Now 34 slots (16-byte aligned).
+The trap subsystem remains parked. Every hart's `stvec` points at a stackless
+`wfi` loop before ordinary Rust runs. Interrupts remain disabled, so reaching the
+vector means an early-boot defect and preserves `sepc`, `scause`, and `stval` for
+debugging.
 
-## Deliberately deferred / skipped
+## Binary invariants
 
-- **W^X + direct-map + drop-identity** -> the **user-process phase**. Real W^X
-  needs no writable alias of `.text`, which means dropping the blanket identity
-  map for a proper direct map — and the payoff (freeing the low half for `U=1`
-  user pages) only matters once we have per-process address spaces. Do it there,
-  once, with the fine-grained per-process table.
-- **PIE / KASLR** -> **skipped.** The higher-half trampoline is already
-  physically relocatable via the MMU (fixed high VA -> wherever loaded), so PIE
-  at a fixed virtual base is a no-op. `.rela.dyn` self-relocation only buys a
-  *randomized* virtual base (KASLR), which is security hardening we don't need.
+Debug and release ELFs must retain:
 
-## Known limits
-
-- The 3-gigapage early table maps only 1 GiB of RAM (`[0x80000000, 0xc0000000)`).
-  Fine for the QEMU sizes we run (<=512 MiB); add entries for more.
-- Single hart (`-smp 1`). Secondary harts are parked in the SBI (HSM); bring them
-  up with `sbi_hart_start` when we do SMP.
+- `_start == _memory_start` and an exact 64-byte Image header;
+- no dynamic relocations;
+- only PC-relative symbol discovery before the first `satp` write;
+- no ordinary ABI entry before `gp`, an aligned stack, and cleared BSS;
+- a final-table switch before a secondary adopts its guarded stack.

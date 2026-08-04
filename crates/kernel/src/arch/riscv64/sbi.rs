@@ -131,10 +131,9 @@ impl HartState {
 /// # `start_addr` must be PHYSICAL
 ///
 /// The spec starts the target hart with `satp = 0` — translation off. So this cannot
-/// point at a Rust function: those are linked at high virtual addresses, and fetching
-/// the first instruction would fault before any page table exists. It has to be the
-/// physical address of `_start`, and the hart then walks the same `boot.S` path the
-/// boot hart did: install the early table, jump high, then enter Rust.
+/// point at ordinary Rust code linked at a high virtual address. It must be the
+/// physical address of the stackless secondary entry, which installs the required
+/// mappings and stack before entering Rust.
 pub fn hart_start(hartid: usize, start_addr: usize, opaque: usize) -> Result<(), SbiError> {
     sbi_call_ext(SBI_EXT_HSM, HSM_HART_START, hartid, start_addr, opaque).map(|_| ())
 }

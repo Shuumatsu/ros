@@ -23,7 +23,7 @@ fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
             //
             // Valid under both tables, which is the point — the direct map is
             // linear, so `phys_to_virt` of a device address is a canonical Sv39
-            // address that `boot.S` and `kernel_table` both map. Under the old
+            // address that the boot table and `kernel_table` both map. Under the old
             // RAM-base-skewed offset it would not even have been canonical.
             let uart = crate::memory::phys_to_virt(PhysicalAddr::new(base));
             // SAFETY: `uart` is the direct-map alias of the DTB-reported UART

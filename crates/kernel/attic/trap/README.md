@@ -13,8 +13,8 @@ moving, and would have implied a level of correctness it does not have — see t
 defects below. Commenting out the bodies would have been worse: that is what version
 control is for.
 
-Nothing was lost in the move. `boot.S` points every hart's `stvec` at `_trap_park`
-before any Rust runs, and re-points it at the high alias after the jump to high VAs.
+Nothing was lost in the move. The architecture boot entry points every hart's `stvec`
+at a parking vector before ordinary Rust runs, then re-points it at the high alias.
 So a trap in the current kernel stops the faulting hart deterministically with
 `scause`/`sepc`/`stval` intact. For a boot path with no console guarantees that is
 strictly more useful than a half-built dispatcher, because every trap in this phase
@@ -61,6 +61,5 @@ direction. In particular:
    `satp` write and TLB flush. That mask is currently protecting against nothing,
    since no source is enabled. It must still be correct the moment a timer can fire
    during memory bring-up.
-6. **`start.rs` calls nothing.** Both `start` and `secondary_start` carry a comment
-   pointing here where `trap::init()` used to be. `stvec` is a CSR, so whatever
-   replaces it is per-hart and both entry points need it.
+6. **`start.rs` calls nothing.** `stvec` is a CSR, so whatever replaces the parking
+   vector is per-hart and both Rust entries need it.

@@ -1,8 +1,7 @@
 //! Flattened Device Tree (FDT / DTB) discovery.
 //!
-//! The previous boot stage (QEMU with `-bios none`, or an SBI firmware) hands us
-//! the physical address of the device tree blob in register `a1`. `boot.S`
-//! preserves it, `start(dtb)` threads it through, and we parse it here with the
+//! The SBI firmware hands the boot hart the physical address of the device tree blob
+//! in register `a1`. The architecture entry preserves it, and we parse it here with the
 //! zero-allocation [`fdt_raw`] crate. No heap is required, so discovery runs
 //! before `memory::init` brings the allocator up — in fact before *anything*
 //! prints, because the console itself learns the UART address from here.

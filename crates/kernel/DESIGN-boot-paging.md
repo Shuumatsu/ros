@@ -1,3 +1,5 @@
+<!-- this is draft, might not be correct -->
+
 # Boot, Paging and Memory — Design Notes & Session Handoff
 
 Everything in **§2 Completed** is landed, builds, and boots. **§4** is the open
