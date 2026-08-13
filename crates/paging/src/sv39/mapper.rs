@@ -58,6 +58,26 @@ pub enum MapError {
     },
 }
 
+/// A leaf that [`Mapper::unmap`] removed.
+///
+/// The frame is reported as its own base rather than as the translation of the
+/// address that was passed in: an unmapped page is only useful as a whole, so the
+/// low bits of the caller's address have no meaning left.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Unmapped {
+    /// Base of the frame the leaf pointed at.
+    pub frame: PhysicalAddr,
+    /// Level the leaf was installed at: 0 = 4 KiB, 1 = 2 MiB, 2 = 1 GiB.
+    pub level: usize,
+}
+
+impl Unmapped {
+    /// Bytes the leaf covered.
+    pub fn len(&self) -> usize {
+        page_size_at(self.level)
+    }
+}
+
 /// Reconstruct the physical address a leaf at `level` maps `vaddr` to.
 ///
 /// The upper bits come from the entry's PPN; the low `12 + 9*level` bits (the
@@ -207,6 +227,50 @@ impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
     /// leaf must be.
     pub fn translate(&self, vaddr: VirtualAddr) -> Option<PhysicalAddr> {
         self.entry_of(vaddr).map(|(entry, level)| leaf_to_phys(entry, vaddr, level))
+    }
+
+    /// Remove the leaf that maps `vaddr`, whatever page size it was installed at,
+    /// and report what was there.
+    ///
+    /// The frame is **not** released: this crate does not own leaf-mapped memory,
+    /// so whether it goes back to an allocator is the caller's decision —
+    /// [`Unmapped::frame`] and [`Unmapped::level`] are what it needs to make it.
+    ///
+    /// Intermediate tables are left in place. They are shared with every
+    /// neighbouring mapping in the same region, so freeing one because *this* leaf
+    /// went away would need a per-table occupancy count that only pays off when a
+    /// whole tree is being torn down — which is [`free_subtables`](Self::free_subtables).
+    ///
+    /// # The TLB is not flushed
+    ///
+    /// It cannot be: `sfence.vma` is an instruction, and this crate is data
+    /// structures. Until the caller executes one, this hart may keep translating
+    /// `vaddr` through the entry that was just cleared. Unmapping a range means one
+    /// flush after the last page, not one per page, so the choice has to belong to
+    /// the caller.
+    ///
+    /// The walk is [`entry_of`](Self::entry_of)'s, repeated rather than shared for
+    /// the same reason `get` and `get_mut` are two functions: that one hands out an
+    /// entry read through a `&self`, and this one writes through the table holding it.
+    pub fn unmap(&mut self, vaddr: VirtualAddr) -> Option<Unmapped> {
+        let mut table: *mut Table = self.root;
+        for level in (0..LEVELS).rev() {
+            let index = vaddr.vpn(level);
+            // SAFETY: `table` is the root or a child from a valid branch entry, and
+            // `access` maps such frames to live pointers.
+            let entry = unsafe { (*table).entries[index] };
+            if !entry.is_valid() {
+                return None;
+            }
+            if entry.is_leaf() {
+                // SAFETY: same table; the slot is the one that maps `vaddr`.
+                unsafe { (*table).entries[index] = Entry::empty() };
+                return Some(Unmapped { frame: entry.target(), level });
+            }
+            table = self.access.ptr::<Table>(entry.target());
+        }
+        // Fell off the bottom without a leaf: a branch at level 0 is malformed.
+        None
     }
 
     /// Map every page of the size `level` selects that overlaps `[start, end)`,
@@ -664,5 +728,94 @@ mod tests {
             None,
             "freed branches must be cleared, not left dangling",
         );
+    }
+
+    #[test]
+    fn unmap_clears_one_leaf_and_leaves_its_neighbours() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        let base = VirtualAddr::new(0x4000_0000);
+        mapper
+            .id_map_range(base, base.add(3 * PAGE_SIZE), PteFlags::READ_WRITE)
+            .expect("range must map");
+
+        let removed = mapper.unmap(base.add(PAGE_SIZE)).expect("the middle page was mapped");
+        assert_eq!(
+            removed,
+            Unmapped { frame: PhysicalAddr::new(base.bits() + PAGE_SIZE), level: 0 },
+            "unmap must report the frame and the size that were there",
+        );
+        assert_eq!(removed.len(), PAGE_SIZE, "a level-0 leaf covers one base page");
+        assert_eq!(mapper.translate(base.add(PAGE_SIZE)), None, "the leaf must be gone");
+        assert_eq!(
+            mapper.translate(base),
+            Some(PhysicalAddr::new(base.bits())),
+            "the page below must survive",
+        );
+        assert_eq!(
+            mapper.translate(base.add(2 * PAGE_SIZE)),
+            Some(PhysicalAddr::new(base.bits() + 2 * PAGE_SIZE)),
+            "the page above must survive",
+        );
+        assert!(
+            mapper.frames_mut().freed.is_empty(),
+            "unmap must not release anything: the leaf frame is not the mapper's, and the \
+             intermediate tables are still in use by the neighbours",
+        );
+    }
+
+    #[test]
+    fn unmap_reports_the_level_a_superpage_was_installed_at() {
+        let two_mib = page_size_at(1);
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        let va = VirtualAddr::new(0x4000_0000);
+        mapper.map_at_level(va, PhysicalAddr::new(0), 1, PteFlags::READ_WRITE).expect("superpage");
+
+        // Asked from *inside* the superpage: an address in its middle must find the
+        // same leaf, or a caller freeing what came back would free the wrong frame.
+        let removed = mapper.unmap(va.add(PAGE_SIZE)).expect("the superpage covers this address");
+        assert_eq!(
+            removed,
+            Unmapped { frame: PhysicalAddr::new(0), level: 1 },
+            "a 2 MiB leaf must report its own base and level 1",
+        );
+        assert_eq!(removed.len(), two_mib, "a level-1 leaf covers 2 MiB");
+        assert_eq!(mapper.translate(va), None, "the whole superpage must be gone");
+    }
+
+    #[test]
+    fn unmap_of_an_unmapped_address_reports_nothing() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        let va = VirtualAddr::new(0x4000_0000);
+        mapper.map(va, PhysicalAddr::new(0x1000), PteFlags::READ_WRITE).expect("mapping");
+
+        assert_eq!(mapper.unmap(va.add(PAGE_SIZE)), None, "never-mapped VA in a live table");
+        assert_eq!(mapper.unmap(VirtualAddr::new(0x8000_0000)), None, "VA with no branch at all");
+        assert_eq!(mapper.unmap(va), Some(Unmapped { frame: PhysicalAddr::new(0x1000), level: 0 }));
+        assert_eq!(mapper.unmap(va), None, "a second unmap of the same page finds nothing");
+    }
+
+    #[test]
+    fn unmap_keeps_the_intermediate_tables_for_the_next_mapping() {
+        let mut root = Table::new();
+        let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
+        let va = VirtualAddr::new(0x4000_0000);
+        mapper.map(va, PhysicalAddr::new(0x1000), PteFlags::READ_WRITE).expect("first mapping");
+        let built = mapper.frames_mut().tables.len();
+        assert_eq!(built, 2, "a 4 KiB mapping needs a level-1 and a level-0 table");
+
+        mapper.unmap(va).expect("the leaf was there");
+        mapper.map(va, PhysicalAddr::new(0x2000), PteFlags::READ_WRITE).expect("second mapping");
+
+        // Allocating nothing the second time is the observable form of "the tables
+        // are still in the tree": a torn-down branch would have to be rebuilt.
+        assert_eq!(
+            mapper.frames_mut().tables.len(),
+            built,
+            "the mapping after an unmap must reuse the tables, not build new ones",
+        );
+        assert_eq!(mapper.translate(va), Some(PhysicalAddr::new(0x2000)));
     }
 }

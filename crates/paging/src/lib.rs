@@ -31,5 +31,5 @@ pub use sv39::access::{Identity, LinearOffset, PhysAccess};
 pub use sv39::addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
 pub use sv39::entry::{Entry, PteFlags};
 pub use sv39::frames::FrameSource;
-pub use sv39::mapper::{MapError, Mapper};
+pub use sv39::mapper::{MapError, Mapper, Unmapped};
 pub use sv39::table::Table;

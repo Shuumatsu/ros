@@ -25,7 +25,7 @@ pub use access::{Identity, LinearOffset, PhysAccess};
 pub use addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
 pub use entry::{Entry, PteFlags};
 pub use frames::FrameSource;
-pub use mapper::{MapError, Mapper};
+pub use mapper::{MapError, Mapper, Unmapped};
 pub use table::Table;
 
 use crate::utils::{KILOBYTE, MEGABYTE};
