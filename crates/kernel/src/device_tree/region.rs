@@ -18,11 +18,8 @@ pub struct PhysRegion {
 }
 
 impl PhysRegion {
-    /// Build a region, truncating an over-long label but never the range.
-    ///
-    /// The name goes through [`truncated`] rather than a byte slice: node names are
-    /// firmware input and `&name[..n]` panics when `n` lands inside a multi-byte
-    /// character.
+    /// Build a region, truncating an over-long label but never the range. See
+    /// [`truncated`] for why the name is not byte-sliced.
     pub fn new(name: &str, base: usize, size: usize) -> Self {
         Self { name: truncated(name), base, size }
     }

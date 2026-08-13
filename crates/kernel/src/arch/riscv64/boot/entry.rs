@@ -1,20 +1,13 @@
 //! The ISA entry points, and the low-to-high transition they share.
 //!
-//! # What the firmware hands over
+//! What firmware hands over: `a0` is this hart's id, `a1` is the device tree (boot hart)
+//! or `sbi_hart_start`'s `opaque` (a secondary), `satp` is zero and `sstatus.SIE` clear.
+//! **Every other register is undefined**, `sp`, `gp` and `tp` included.
 //!
-//! `a0` is this hart's id, and `a1` is either the device tree (the boot hart, per
-//! the RISC-V boot protocol) or the `opaque` from `sbi_hart_start` (a secondary,
-//! per SBI HSM). `satp` is zero and `sstatus.SIE` is clear. **Every other register
-//! is undefined** — `sp`, `gp` and `tp` included.
-//!
-//! # Why none of this is Rust
-//!
-//! There is no stack to call one with, and no compiled function can be trusted
-//! before [`enter_high`] finishes: `medany` makes most references PC-relative, but
-//! a jump table, a vtable or a `&'static str` in `.rodata` is an *absolute*
-//! link-time address, and every one of those is unmapped until translation is on.
-//! So this file does exactly the work that has to happen first, and hands off the
-//! moment there is a stack.
+//! None of this is Rust because there is no stack to call one with, and no compiled
+//! function can be trusted before [`enter_high`] finishes: `medany` makes most references
+//! PC-relative, but a jump table, a vtable or a `&'static str` is an *absolute* link-time
+//! address, and those are unmapped until translation is on.
 
 use core::arch::naked_asm;
 
@@ -64,14 +57,13 @@ unsafe extern "custom" fn secondary_entry() {
 
 /// Install the boot page table and continue at the kernel's link-time addresses.
 ///
-/// Knows nothing about which kind of hart it is running on. `t2` carries the
-/// physical address of the prologue to continue into, and the entry point above is
-/// the one that chose it — so the two paths are named where they differ, rather
-/// than multiplexed on a flag here.
+/// Knows nothing about which kind of hart this is: `t2` carries the prologue to continue
+/// into, chosen by the entry point above, so the two paths are named where they differ
+/// rather than multiplexed on a flag here.
 ///
-/// Leaves `a0` and `a1` untouched, `a3` holding the measured VMA-to-LMA skew, and
-/// `gp`, `tp` and `stvec` set to what Rust expects. Does *not* set `sp`: which
-/// stack this hart gets, and which page table maps it, is the prologue's business.
+/// Leaves `a0` and `a1` untouched, `a3` holding the measured VMA-to-LMA skew, and `gp`,
+/// `tp` and `stvec` as Rust expects. Does *not* set `sp` — which stack this hart gets is
+/// the prologue's business.
 #[unsafe(naked)]
 #[unsafe(link_section = ".text.init.entry")]
 unsafe extern "custom" fn enter_high() {
@@ -85,10 +77,9 @@ unsafe extern "custom" fn enter_high() {
         "lla  t0, {park}",
         "csrw stvec, t0",
 
-        // satp = the boot table. Its physical address is a link-time fact, so the
-        // mode bits arrive as a const template and the root is folded in here.
-        // `boot_table` owns both halves of that recipe and pins them to `Satp` at
-        // compile time.
+        // satp = the boot table. Its address is a link-time fact, so the mode bits arrive
+        // as a const template and the root is folded in here; `boot_table` owns both
+        // halves and pins them to `Satp` at compile time.
         "lla  t0, {table}",
         "srli t0, t0, {root_shift}",
         "li   t1, {satp_template}",
@@ -96,12 +87,11 @@ unsafe extern "custom" fn enter_high() {
         "csrw satp, t0",
         "sfence.vma",
 
-        // Translation is live, and the next fetch still resolves through the
-        // identity half — which is the entire reason that half exists. Label `1:`
-        // is then reached two ways: read out of the image, where the linker wrote
-        // its absolute high address, and PC-relatively, which yields the physical
-        // one. Jump to the first. Their difference is the skew, checked against
-        // VA_OFFSET by `direct_map::verify` once there is a stack to check it on.
+        // Translation is live and the next fetch still resolves through the identity half,
+        // which is the entire reason that half exists. Label `1:` is reached two ways:
+        // read out of the image, where the linker wrote its absolute high address, and
+        // PC-relatively, which yields the physical one. Jump to the first; their difference
+        // is the skew `direct_map::verify` later checks.
         "lla  t0, 2f",
         "ld   t1, 0(t0)",
         "lla  t0, 1f",
@@ -111,13 +101,11 @@ unsafe extern "custom" fn enter_high() {
         "2:   .dword 1f",
         "1:",
 
-        // High. Restore the registers the Rust ABI assumes: `gp` for relaxed global
-        // access, and `tp` zeroed — `cpu::current` reads a non-zero `tp` as a live
-        // per-hart control block, and the firmware left garbage there.
+        // High. Restore what the Rust ABI assumes: `gp` for relaxed global access, and `tp`
+        // zeroed, since `cpu::current` reads a non-zero `tp` as a live control block.
         "la   gp, {global_pointer}",
         "mv   tp, zero",
-        // Re-point the park vector at its high alias; the identity half goes away
-        // with the boot table.
+        // Re-point the park vector high; the identity half goes with the boot table.
         "la   t0, {park}",
         "csrw stvec, t0",
 
@@ -147,9 +135,8 @@ unsafe extern "custom" fn trap_park() {
 
 /// [`secondary_entry`] as the virtual address it is linked at.
 ///
-/// SBI needs the physical one; [`crate::cpu::start_secondaries`] converts, because
-/// crossing between the two address spaces is `memory`'s to spell out and this
-/// module has no business doing it silently.
+/// SBI needs the physical one, and [`crate::cpu::start_secondaries`] converts: crossing
+/// between the address spaces is `memory`'s to spell out, not this module's to do quietly.
 pub(crate) fn secondary_entry_address() -> VirtualAddr {
     VirtualAddr::new(secondary_entry as *const () as usize)
 }

@@ -8,10 +8,9 @@ use crate::println;
 
 /// Per-hart control block. `tp` points at this hart's.
 ///
-/// Following Linux, which keeps a pointer here rather than a bare id: `tp` is the
-/// one register that is per-hart for free, so spending it on an integer we were
-/// already handed in `a0` means every future piece of per-hart state needs a new
-/// home and a new lookup.
+/// A pointer rather than a bare id, as Linux does: `tp` is the one register that is
+/// per-hart for free, and spending it on an integer already handed to us in `a0` would
+/// leave every future piece of per-hart state needing a home and a lookup.
 ///
 #[repr(C)]
 pub struct Cpu {
@@ -49,14 +48,10 @@ static BOOT_READY: AtomicBool = AtomicBool::new(false);
 
 /// This hart's control block, or `None` before one was adopted.
 ///
-/// The architecture entry zeroes `tp` precisely so that this question has an
-/// answer: the firmware leaves garbage there, and garbage is indistinguishable
-/// from a live control block.
-///
-/// Only the console has any business asking — it prints from inside the window
-/// between the entry and [`init_boot`], and a console that panics for want of a
-/// hart id loses exactly the message worth having. Everything else runs after that
-/// window and uses [`current`].
+/// The architecture entry zeroes `tp` so this question has an answer at all — firmware
+/// leaves garbage there, indistinguishable from a live block. Only the console should
+/// ask: it prints from inside the window before [`init_boot`], where panicking for want
+/// of a hart id would lose the message worth having. Everything else uses [`current`].
 pub fn try_current() -> Option<&'static Cpu> {
     let tp: usize;
     // SAFETY: reading a register.
@@ -74,10 +69,8 @@ pub fn current() -> &'static Cpu {
     try_current().expect("tp is null: the boot entry did not adopt a Cpu")
 }
 
-/// This hart's physical id, or `None` before one was adopted. See [`try_current`].
-///
-/// Every `[hart N]` console prefix comes from here. Anything that already knows a
-/// control block exists should say so by using [`current`].
+/// This hart's physical id, or `None` before one was adopted; every `[hart N]` prefix
+/// comes from here. Callers that know a block exists should say so with [`current`].
 pub fn try_hart_id() -> Option<usize> { try_current().map(Cpu::hartid) }
 
 /// Secondary harts that have reached [`crate::start::secondary`].
@@ -125,18 +118,14 @@ pub fn boot_hart() -> Option<usize> {
 
 /// Every hart the machine reports except the boot hart.
 ///
-/// Defined against [`boot_hart`] rather than against whoever happens to be asking, so
-/// the answer does not depend on which hart calls it. Iterated, never ranged over:
-/// hart ids need not be `0..n`.
+/// Defined against [`boot_hart`], not against whoever is asking, so the answer does not
+/// depend on which hart calls it. Iterated, never ranged over: ids need not be `0..n`.
 ///
-/// Consumed exactly once, by [`crate::memory::init`], which allocates a stack per
-/// entry and stores the pairing. [`start_secondaries`] then reads that pairing back
-/// instead of walking this again — one traversal, so there is no second answer to
-/// disagree with the first.
+/// Consumed once, by [`crate::memory::init`], which stores the hart-to-stack pairing;
+/// [`start_secondaries`] reads that back rather than walking this again.
 ///
 /// # Panics
-/// Before [`init_boot`], since "every hart except the boot hart" has no
-/// meaning yet.
+/// Before [`init_boot`], when "except the boot hart" has no meaning yet.
 pub fn secondary_hart_ids() -> impl Iterator<Item = usize> {
     let boot = boot_hart().expect("secondary_hart_ids called before the boot hart was recorded");
     crate::device_tree::hart_ids().iter().copied().filter(move |&hart| hart != boot)
@@ -144,14 +133,11 @@ pub fn secondary_hart_ids() -> impl Iterator<Item = usize> {
 
 /// Bring up every hart [`crate::memory::init`] reserved a stack for.
 ///
-/// Call once, from the boot hart, **after** [`crate::memory::init`]: it hands each
-/// hart a stack that only the kernel page table maps, so both have to exist first.
+/// Call once, from the boot hart, **after** [`crate::memory::init`]: each hart is handed a
+/// stack that only the kernel page table maps, so both must exist first.
 ///
-/// # What the hart is told
-///
-/// Two things, and it derives nothing: the architecture's stackless secondary
-/// entry to start at, and `opaque`, which lands in `a1` and points at one
-/// release-published handoff carrying the final page table, stack top, and
+/// A hart is told two things and derives nothing: the stackless entry to start at, and an
+/// `opaque` pointing at one release-published handoff with the page table, stack top and
 /// prepared [`Cpu`].
 pub fn start_secondaries() {
     let entry = virt_to_phys(boot::secondary_entry_address());
@@ -163,8 +149,8 @@ pub fn start_secondaries() {
     for (index, &stack::Secondary { hart, stack }) in (1..).zip(stack::secondaries()) {
         assert!(index < MAX_CPUS, "machine reports more than {MAX_CPUS} harts; raise MAX_CPUS");
         let slot = &CPU_SLOTS[index];
-        // Ask first. "Already started" and "no such hart" are different problems, and
-        // a bare error code from hart_start would not distinguish them.
+        // Ask first: "already started" and "no such hart" are different problems, and
+        // hart_start's error code does not distinguish them.
         match sbi::hart_get_status(hart) {
             Ok(sbi::HartState::Stopped) => {}
             Ok(state) => {
@@ -203,27 +189,18 @@ pub fn start_secondaries() {
     await_secondaries(requested);
 }
 
-/// Wait for the harts we asked for to actually arrive, and say so if they do not.
+/// Wait for the harts we asked for to arrive, and say so if they do not.
 ///
-/// `hart_start` returning `Ok` means only that the firmware *accepted* the request —
-/// the hart is `StartPending`. Without confirming arrival, a secondary that faults
-/// inside the stackless entry (a bad stack mapping, say) parks forever while
-/// the boot hart continues and `kmain` prints its success line: a boot with N-1 dead
-/// harts is indistinguishable from a good one.
+/// `hart_start` returning `Ok` means only that firmware accepted the request. Without
+/// confirming arrival, a secondary that faults in the stackless entry parks forever while
+/// `kmain` prints its success line — a boot with N-1 dead harts looks like a good one.
 ///
-/// # The bound is a duration, not a spin count
-///
-/// A spin count measures the *host's* speed, not the guest's: a number generous on
-/// real hardware can exceed a minute under QEMU's TCG interpreter, making the
-/// timeout indistinguishable from the hang it exists to report.
-///
-/// `rdtime` reads the `time` CSR — readable in S-mode because OpenSBI sets
-/// `[m|s]counteren.TM` — and `/cpus/timebase-frequency` says what its ticks are
-/// worth, so the bound is a real second anywhere. This needs no timer *interrupt*,
-/// only a CSR read, so it does not depend on the parked trap subsystem.
-///
-/// Without the frequency there is no clock to bound by, so the wait is skipped and
-/// said so rather than guessed at.
+/// Bounded by a duration, not a spin count: a count measures the *host's* speed, and one
+/// generous on real hardware can exceed a minute under TCG, making the timeout
+/// indistinguishable from the hang it reports. `rdtime` plus
+/// `/cpus/timebase-frequency` makes it a real second anywhere, and needs no timer
+/// interrupt — only a CSR read — so it does not depend on the parked trap subsystem.
+/// Without the frequency there is no clock, so the wait is skipped and said to be.
 fn await_secondaries(requested: usize) {
     /// Long enough that a slow emulated hart is not slandered, short enough that a
     /// genuinely dead one does not look like a hang.
@@ -268,11 +245,7 @@ fn now() -> u64 {
     t
 }
 
-/// Report what this hart is, as opposed to what memory looks like.
-///
-/// The kernel image layout used to be printed here too, which put a function that
-/// imports nothing but `memory::layout` and `memory::stack` in the CPU module. It
-/// lives in [`crate::memory::layout::report`] now; this reports CPU facts only.
+/// Report what this hart is. The image layout is [`crate::memory::layout::report`]'s.
 pub fn print_info() {
     match boot_hart() {
         Some(hart) => println!("boot hart: {hart} (chosen by the firmware, not assumed)"),

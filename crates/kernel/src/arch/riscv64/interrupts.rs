@@ -1,13 +1,8 @@
-//! Supervisor interrupt masking.
+//! Supervisor interrupt masking: the only place in the kernel that writes `sstatus.sie`.
 //!
-//! The only place in the kernel that writes `sstatus.sie`. Anything needing a critical
-//! section against interrupts calls [`without`] rather than hand-rolling the
-//! read/clear/restore sequence, so there is one answer to how masking works.
-//!
-//! It takes a closure instead of returning a token so the restore cannot be skipped by
-//! an early return. A `Drop` guard would read more idiomatically but guarantee no more:
-//! both profiles set `panic = "abort"`, so nothing unwinds and `Drop` would not run on
-//! the panic path either.
+//! A closure rather than a token, so the restore cannot be skipped by an early return. A
+//! `Drop` guard would read better but guarantee no more — `panic = "abort"` means nothing
+//! unwinds, so it would not run on the panic path either.
 
 use riscv::register::sstatus;
 

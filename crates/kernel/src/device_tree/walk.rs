@@ -1,15 +1,8 @@
-//! The single traversal.
+//! The single traversal: RAM extent, well-known devices, MMIO windows, carve-outs, hart
+//! ids and the timebase, all from one `all_nodes()` pass.
 //!
-//! # One pass
-//!
-//! Everything the kernel needs from the tree is collected in one `all_nodes()` walk:
-//! RAM extent, well-known devices, MMIO windows, carve-outs, hart ids and the
-//! timebase.
-//!
-//! The reason is correctness, not cost. A second traversal is a second *opinion* —
-//! two searches for the same device can settle on different nodes, and nothing
-//! downstream can tell. Resolving each device once, from the node the walk is
-//! already standing on, makes that unrepresentable rather than unlikely.
+//! For correctness, not cost. A second traversal is a second *opinion* — two searches for
+//! one device can settle on different nodes, and nothing downstream can tell.
 
 use fdt_raw::{Fdt, Node};
 
@@ -23,10 +16,9 @@ const CLINT: &[&str] = &["riscv,clint0", "sifive,clint0"];
 
 /// What a node's `reg` property actually describes.
 ///
-/// `reg` is not always a device address, and mistaking one kind for another is a
-/// real bug in both directions: treating reserved RAM as a device maps memory the
-/// firmware forbids, and treating a device as RAM would hand register space to the
-/// allocator.
+/// Mistaking one kind for another is a bug in both directions: reserved RAM read as a
+/// device maps memory the firmware forbids, and a device read as RAM hands register space
+/// to the allocator.
 enum RegKind {
     /// A memory-mapped device window.
     Mmio,
@@ -39,17 +31,12 @@ enum RegKind {
     Ram,
 }
 
-/// Classify a node by its path. The single place this distinction is made.
+/// Classify a node by its path — the single place this distinction is made.
 ///
-/// - `/memory@…` — the RAM itself.
-/// - `/cpus/cpu@N` — `reg` there is a hart id, not an address at all.
-/// - `/reserved-memory/…` — firmware carve-outs. OpenSBI *adds* these for itself
-///   (`mmode_resv0`/`mmode_resv1` at the bottom of RAM) and its PMP then denies
-///   supervisor access, so they must reach the frame allocator, never the page table.
-///
-/// Note the reserved-memory nodes are absent from QEMU's own device tree and appear
-/// only in the one OpenSBI hands on, so they are invisible to `-machine dumpdtb` —
-/// they were found by printing what the kernel actually walked.
+/// `/reserved-memory/…` are firmware carve-outs, which OpenSBI adds for itself and its PMP
+/// then denies to S-mode, so they must reach the frame allocator and never the page table.
+/// They are absent from QEMU's own tree and appear only in the one OpenSBI hands on, so
+/// `-machine dumpdtb` does not show them.
 fn classify(name: &str, path: &str) -> RegKind {
     if path.starts_with("/reserved-memory") {
         RegKind::ReservedRam
@@ -64,15 +51,12 @@ fn classify(name: &str, path: &str) -> RegKind {
 
 /// Whether the OS should ignore this node.
 ///
-/// Absent `status` means enabled, per the spec. Only `okay`/`ok` are usable —
-/// `disabled`, `fail`, `fail-sss` and `reserved` all mean "not yours", so anything
-/// not explicitly fine is skipped.
+/// Absent `status` means enabled, per the spec; `disabled`, `fail`, `fail-sss` and
+/// `reserved` all mean "not yours", so anything not explicitly fine is skipped.
 ///
-/// Selection takes the first compatible node, so this is what stops a board that
-/// lists an unpopulated UART ahead of the real one from binding the console to a
-/// dead port. That failure is silent: `console` caches its `MmioSerialPort` as soon
-/// as a base exists and drops the SBI fallback, so there would be no output left to
-/// report it with.
+/// Selection takes the first compatible node, so this is what stops a board listing an
+/// unpopulated UART ahead of the real one from binding the console to a dead port — a
+/// silent failure, since `console` drops the SBI fallback as soon as a base exists.
 fn is_disabled(node: &Node<'_>) -> bool {
     !matches!(node.find_property_str("status"), None | Some("okay") | Some("ok"))
 }
@@ -124,9 +108,8 @@ pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) 
     let blob_region = PhysRegion::new("device tree blob", blob, blob_size);
     push_foreign(&mut foreign, blob_region.clone());
 
-    // The FDT header's reservation block — the spec's *other* mechanism, separate
-    // from the `/reserved-memory` nodes handled in the walk. It lives in the header,
-    // not the node tree, so it is not a second traversal.
+    // The FDT header's reservation block: the spec's *other* mechanism, in the header
+    // rather than the node tree, so reading it is not a second traversal.
     for (index, entry) in fdt.memory_reservations().enumerate() {
         if entry.size == 0 {
             continue;
@@ -167,10 +150,9 @@ pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) 
         let kind = classify(name, &path);
 
         if matches!(kind, RegKind::Ram) {
-            // Only the bank backing the kernel is ours to describe. Others are
-            // reported rather than silently dropped: on a multi-bank machine the
-            // difference between "one bank" and "the only bank" is 4 GiB of RAM the
-            // allocator never hears about.
+            // Only the bank backing the kernel is ours to describe; others are reported
+            // rather than dropped, since "one bank" and "the only bank" differ by however
+            // much RAM the allocator never hears about.
             for reg in node.reg().into_iter().flatten() {
                 let base = reg.address as usize;
                 let end = base.saturating_add(reg.size.unwrap_or(0) as usize);
@@ -212,9 +194,8 @@ pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) 
 
         // A node may describe several ranges — QEMU virt's `flash` has two.
         for reg in regs {
-            // Loud, not a bare `continue`. A reserved range dropped in silence is
-            // memory the allocator will hand out. A missing size usually means the
-            // parent declared `#size-cells = <0>`.
+            // Loud, not a bare `continue`: a reserved range dropped in silence is memory
+            // the allocator hands out. A missing size usually means `#size-cells = <0>`.
             let Some(size) = reg.size else {
                 println!("[dtb] WARNING: {name} has a reg with no size; skipped");
                 continue;

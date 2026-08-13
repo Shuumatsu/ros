@@ -9,9 +9,9 @@ use crate::memory::layout;
 /// Reached from [`super::entry::enter_high`] at a high virtual address, with `a0`
 /// the hart id, `a1` the device tree and `a3` the measured VMA-to-LMA skew.
 ///
-/// Nothing else happens here. Everything the boot hart still owes before it can
-/// trust a static — zeroing `.bss` above all — is Rust in [`crate::start::boot`],
-/// because once `sp` exists there is no longer a reason for it to be assembly.
+/// Nothing else: everything the boot hart still owes before it can trust a static —
+/// zeroing `.bss` above all — is Rust in [`crate::start::boot`], since once `sp` exists
+/// there is no reason for assembly.
 #[unsafe(naked)]
 #[unsafe(link_section = ".text.init.entry")]
 pub(super) unsafe extern "custom" fn prologue() {
@@ -19,9 +19,8 @@ pub(super) unsafe extern "custom" fn prologue() {
         ".option push",
         ".option norvc",
         ".option norelax",
-        // The only stack there is until the frame allocator exists. `.boot_stack`
-        // is NOLOAD and sits outside `.bss`, so it needs no zeroing and the clear
-        // that follows will not walk over the frames holding it.
+        // The only stack until the frame allocator exists. `.boot_stack` is NOLOAD and
+        // outside `.bss`, so the clear that follows will not walk over it.
         "la sp, {boot_stack_end}",
         // `a3` is `enter_high`'s output register; `a2` is the third argument.
         "mv a2, a3",

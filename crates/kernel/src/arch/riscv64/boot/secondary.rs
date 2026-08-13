@@ -1,9 +1,8 @@
-//! Secondary-hart startup: the state the boot hart publishes, and the prologue
-//! that consumes it.
+//! Secondary-hart startup: the state the boot hart publishes, and the prologue that
+//! consumes it.
 //!
-//! Both live here because they are one interface written twice — the `#[repr(C)]`
-//! struct below, and the field offsets the assembly loads from it. Keeping them
-//! apart would put those offsets a module away from the only code that reads them.
+//! Together because they are one interface written twice — the `#[repr(C)]` struct, and
+//! the field offsets the assembly loads from it.
 
 use core::arch::naked_asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -50,13 +49,12 @@ const CPU_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, cpu);
 /// Adopt the kernel page table, the stack the boot hart reserved and the [`Cpu`]
 /// it chose, then enter Rust.
 ///
-/// Still assembly, unlike [`super::primary::prologue`], because the stack is only
-/// mapped by the kernel table: `sp` cannot be set before the switch, and no Rust
-/// can run before `sp`.
+/// Still assembly, because the stack is only mapped by the kernel table: `sp` cannot be
+/// set before the switch, and no Rust runs before `sp`.
 ///
-/// Reached from [`super::entry::enter_high`] with `a0` the hart id and `a1` the
-/// `opaque` from `hart_start` — this hart's handoff, as a kernel virtual address.
-/// Reachable already, because the boot table maps the high half too.
+/// Reached from [`super::entry::enter_high`] with `a0` the hart id and `a1` the `opaque`
+/// from `hart_start` — this hart's handoff, as a kernel VA, already reachable because the
+/// boot table maps the high half too.
 ///
 /// [`Cpu`]: crate::cpu::Cpu
 #[unsafe(naked)]
@@ -66,10 +64,9 @@ pub(super) unsafe extern "custom" fn prologue() {
         ".option push",
         ".option norvc",
         ".option norelax",
-        // `publish` finishes before `hart_start` is called, so this does not spin
-        // in practice. It is the acquire half of that release store: SBI does not
-        // promise the start request orders the boot hart's writes against this
-        // hart's reads, and every field below is garbage if it does not.
+        // Does not spin in practice — `publish` finishes before `hart_start` — but it is
+        // the acquire half of that release store: SBI does not promise the start request
+        // orders the boot hart's writes, and every field below is garbage if nothing does.
         "1:",
         "ld    t0, {ready}(a1)",
         "beqz  t0, 1b",

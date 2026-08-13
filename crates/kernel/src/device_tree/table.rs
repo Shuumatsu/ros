@@ -1,15 +1,9 @@
 //! What one walk of the device tree found, and the one place it is kept.
 //!
-//! # One table, not per-device statics
-//!
-//! A device's address has exactly one home here. Keeping the UART's base in its own
-//! static *and* in the MMIO window list would let the two disagree: `kernel_table`
-//! maps only the window list while `console` reads only the base, so if the window
-//! list overflowed and dropped the UART, the console would hold an address nothing
-//! had mapped — a store page fault on the first `println!` after the `satp` switch.
-//!
-//! So the well-known devices are indices into the same walk that produced the window
-//! list, and every accessor is a lookup rather than a second parse.
+//! One table, not per-device statics: a UART base kept both in its own static and in the
+//! MMIO window list could disagree, and since `kernel_table` maps only the list, the
+//! console would end up holding an address nothing mapped. The well-known devices are
+//! therefore indices into the same walk that produced the list.
 
 use heapless::Vec;
 
@@ -28,11 +22,9 @@ pub const MAX_HART_IDS: usize = 64;
 
 /// A device the kernel knows by name, resolved from a single node.
 ///
-/// `base`, `size` and `irq` must come off the **same** node. Searching for each
-/// separately finds the first *compatible* node carrying that particular property,
-/// so a tree with a debug UART lacking `interrupts` and a real one carrying it
-/// yields a base from one node and an IRQ from the other — a console wired to the
-/// wrong interrupt line.
+/// `base`, `size` and `irq` must come off the **same** node: searching per property finds
+/// the first compatible node carrying *that* property, so a debug UART without
+/// `interrupts` beside a real one would yield a base from one and an IRQ from the other.
 #[derive(Clone, Copy, Debug)]
 pub struct Device {
     pub base: usize,
