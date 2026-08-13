@@ -195,21 +195,23 @@ SECTIONS {
     } :bss
 
 
-    /* our heap starts right after the boot stack. Its END is not a linker
-    symbol: the heap runs up to the RAM top discovered from the device tree at
-    runtime (see memory::init), not to a compile-time LENGTH.
+    /* Free RAM starts right after the boot stack: everything from here to the RAM
+    top belongs to the frame allocator, which is where the kernel heap, page tables
+    and user pages all come from. Its END is not a linker symbol — the RAM top is a
+    runtime fact from the device tree (see memory::init), not a compile-time LENGTH.
 
     Both symbols below come from the location counter, NOT from _boot_stack_end.
     Writing `_boot_stack_end + _page_size` would restate "the image ends at the boot
     stack" as arithmetic, and the linker does place sections this script omits. A
     NOBITS orphan ranked after .boot_stack (it and .bss are both NOBITS+WA) would
-    put _heap_start inside it — and memory::init hands virt_to_phys(_heap_start) to
-    frame::init as the bottom of free RAM, so the allocator would vend frames over
-    live kernel data. `.` cannot drift from where the linker actually is. */
+    put _free_ram_start inside it — and memory::init hands
+    virt_to_phys(_free_ram_start) to frame::init as the bottom of free RAM, so the
+    allocator would vend frames over live kernel data. `.` cannot drift from where
+    the linker actually is. */
     . = ALIGN(_page_size);
     _image_end = .;
-    . = . + _page_size;              /* guard page below the heap */
-    PROVIDE(_heap_start = .);
+    . = . + _page_size;              /* guard page above the boot stack */
+    PROVIDE(_free_ram_start = .);
 }
 
 /* No section may appear after .boot_stack, and none between the five named above.
@@ -236,4 +238,4 @@ ASSERT((_boot_stack_end & 15) == 0, "boot stack top must be 16-byte aligned")
    the loader has already been told about. This is an absolute symbol (a constant
    difference), so the Image header emits its value, not an
    address. */
-_image_size = _heap_start - _memory_start;
+_image_size = _free_ram_start - _memory_start;

@@ -12,6 +12,7 @@ mod console;
 mod device_tree;
 mod memory;
 mod start;
+mod sync;
 mod utils;
 
 // the -> ! means that this function won't return

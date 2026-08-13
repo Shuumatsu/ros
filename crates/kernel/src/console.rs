@@ -1,16 +1,19 @@
 use core::fmt::{self, Write};
 use paging::PhysicalAddr;
-use spin::Mutex;
 use uart_16550::MmioSerialPort;
 
-use crate::arch::riscv64::interrupts;
 use crate::cpu;
 use crate::device_tree;
+use crate::sync::IrqMutex;
 
 /// The primary MMIO UART, bound to the device-tree base the first time we print
 /// after the DTB is parsed. `None` until then, when output falls back to the SBI
 /// console — so no UART address is ever hardcoded.
-static UART: Mutex<Option<MmioSerialPort>> = Mutex::new(None);
+///
+/// An [`IrqMutex`], because an interrupt handler that prints on a hart already inside
+/// this lock would spin against itself forever. That masking used to be open-coded
+/// here; it is a property of the lock, not of the console.
+static UART: IrqMutex<Option<MmioSerialPort>> = IrqMutex::new(None);
 
 /// Write `s` to the DTB-discovered MMIO UART if we have it, else the SBI console.
 fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
@@ -91,11 +94,9 @@ fn write_prefix(out: &mut impl Write) {
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    // Masked across the whole locked section so an interrupt handler on THIS hart
-    // cannot arrive and try to take a lock this hart already holds.
-    interrupts::without(|| {
-        let mut port = UART.lock();
-        let mut out = Uart(&mut port);
+    // One `with`, so the prefix and the message cannot be split by another hart.
+    UART.with(|port| {
+        let mut out = Uart(port);
         write_prefix(&mut out);
         let _ = out.write_fmt(args);
     });

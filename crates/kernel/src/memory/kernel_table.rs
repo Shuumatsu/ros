@@ -1,96 +1,48 @@
-//! The kernel's own page table — the one that replaces the boot table.
+//! The kernel's own page table, replacing the boot table's blanket `RWX` gigapages with
+//! per-section rights, W^X and no identity half.
 //!
-//! The architecture boot entry installs a table of 1 GiB `RWX` gigapages.
-//! It is exactly enough to get Rust running at high virtual addresses and not one
-//! bit more: with a single blanket permission covering all of memory, `.text` is
-//! writable and `.rodata` is executable. Paging is on but buying no protection.
+//! Only the *policy* — which regions exist and what rights they get. Installing and
+//! auditing is [`super::region`]'s, the tree itself
+//! [`AddressSpace`](super::address_space::AddressSpace)'s, and every fact here is looked
+//! up from its owner: [`layout`], [`crate::device_tree`], [`frame::owned_range`],
+//! [`kernel_va`].
 //!
-//! This module is the *policy* — which regions exist and what rights they get —
-//! plus the `satp` switch. The mechanics of installing and auditing a region list
-//! live in [`super::region`], which knows nothing about this particular layout.
+//! [`regions`] is computed once and then installed, audited and reported, so there is no
+//! second list to drift. The audit precedes the switch because a mis-mapped `.text` faults
+//! on the instruction *after* `csrw satp`, with the old table already gone.
 //!
-//! # Nothing here decides a fact it can look up
-//!
-//! | Fact | Owner |
-//! |---|---|
-//! | section bounds | the linker, via [`layout`] |
-//! | where device memory is | the device tree, via [`crate::device_tree::mmio_regions`] |
-//! | which physical memory is ours | [`frame::owned_range`] |
-//! | the direct-map base | [`super::direct_map::VA_OFFSET`] |
-//!
-//! # No identity mapping
-//!
-//! Unlike the boot table, this one maps nothing at `VA == PA`. Every physical
-//! address the kernel dereferences goes through [`super::phys_to_virt`] first —
-//! device registers included, which is what the linear direct map bought. The
-//! low half of the address space is now entirely unmapped and available to user
-//! processes.
-//!
-//! # One layout, consumed twice
-//!
-//! [`regions`] computes the list once, and it is used to *install*, then to
-//! *audit*, then to *report*. A separate list of expectations would be a second
-//! encoding free to drift, and the drift would not surface until something
-//! faulted.
-//!
-//! # Why auditing must precede the switch
-//!
-//! Installing a table that mis-maps `.text` faults on the instruction *after*
-//! `csrw satp`, with the old table already gone: unrecoverable, and nearly
-//! undiagnosable. So every page of every region is walked while the boot table is
-//! still live, along with the running PC and stack pointer, and the switch happens
-//! only if all of it checks out.
-//!
-//! # One table, adopted rather than rebuilt
-//!
-//! Secondary harts install *this* table; they do not build their own. Two trees
-//! mapping the same kernel would work, but they would double the page-table memory
-//! and, worse, drift the moment anything mapped something at run time.
-//!
-//! They adopt it in the stackless architecture entry because a secondary has to be
-//! on this table before it can touch its guarded stack.
-//!
-//! # Not yet
-//!
-//! - `GLOBAL` is deliberately not set. It is a TLB optimisation whose correctness
-//!   depends on address spaces that do not exist yet.
-
-use core::sync::atomic::{AtomicUsize, Ordering};
+//! `GLOBAL` is unset: a TLB optimisation whose correctness depends on address spaces that
+//! do not exist yet.
 
 use alloc::vec::Vec;
 
 use paging::sv39::{LEVELS, page_size_at};
-use paging::{
-    LinearOffset, MemoryAddr, Mapper, PhysicalAddr, PteFlags, Satp, Table, VirtualAddr,
-};
+use paging::{MemoryAddr, PhysicalAddr, PteFlags, VirtualAddr};
+use spin::Once;
 
-use crate::memory::frame::{self, TableFrames};
+use crate::memory::address_space::{AddressSpace, KernelMapper};
+use crate::memory::direct_map::SUPERPAGE;
 use crate::memory::region::{self, Region};
-use crate::memory::stack;
-use crate::memory::{SUPERPAGE, direct_map, layout, phys_to_virt, virt_to_phys};
+use crate::memory::{frame, kernel_va, layout, phys_to_virt, stack, virt_to_phys};
+use crate::sync::IrqMutex;
 
-/// This kernel's one mapper flavour: frames from the physical allocator, physical
-/// memory reached through the direct map.
-type KernelMapper<'a> = Mapper<'a, TableFrames, LinearOffset>;
+/// One address space, never switched away from, so no id is needed. Named so the zero
+/// does not read as a magic argument.
+const KERNEL_ASID: usize = 0;
 
-/// `A` is pre-set on every kernel mapping so the hardware walker never has to
-/// write back into a table. `D` is set only where the page is writable, since it
-/// means "has been written" and is meaningless on a read-only page.
+/// `A` is pre-set everywhere so the walker never writes back into a table; `D` only where
+/// writable, since it means "has been written".
 const READ_ONLY: PteFlags = PteFlags::READ.union(PteFlags::ACCESS);
 const READ_EXEC: PteFlags = PteFlags::READ_EXECUTE.union(PteFlags::ACCESS);
-const READ_WRITE: PteFlags =
-    PteFlags::READ_WRITE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
+const READ_WRITE: PteFlags = PteFlags::READ_WRITE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
 
-// No MAX_REGIONS. The count is four sections, one boot stack, one per secondary hart
-// the machine reports, three direct-map pieces and however many MMIO windows the device
-// tree describes; two of those are runtime facts, so the bound could not even be
-// written. The heap is up by the time this runs, so the list simply grows.
+// No MAX_REGIONS: the hart count and the MMIO window count are runtime facts, so the
+// bound could not be written. The heap is up by the time this runs.
 
-/// The largest page-table level that can tile `[base, base + len)` exactly.
+/// The largest page-table level that tiles `[base, base + len)` *exactly*.
 ///
-/// "Exactly" is the requirement, not "approximately": a superpage rounds outward, so
-/// using one that does not divide the window would map whatever sits next to the
-/// device. Both the base and the length must be multiples of the page size.
+/// Exactly, because a superpage rounds outward: one that does not divide the window
+/// would map whatever sits next to the device.
 fn largest_level_for(base: PhysicalAddr, len: usize) -> usize {
     (0..LEVELS)
         .rev()
@@ -98,13 +50,11 @@ fn largest_level_for(base: PhysicalAddr, len: usize) -> usize {
             let page = page_size_at(level);
             base.is_aligned(page) && len % page == 0
         })
-        // Level 0 always fits: every MMIO window is page-aligned and page-sized once
-        // `Region::install` has rounded it, and `validate` rejects it otherwise.
         .unwrap_or(0)
 }
 
-/// A direct-map region: `VA` and `PA` differ by the fixed offset, so the physical
-/// side is *derived* rather than restated and given a chance to disagree.
+/// A direct-map region: the physical side is *derived* from the virtual one, so the two
+/// cannot disagree.
 fn direct(
     name: &'static str,
     start: VirtualAddr,
@@ -129,45 +79,28 @@ fn regions() -> Vec<Region> {
         regions.push(region);
     };
 
-    // ---- Device memory, exactly as the device tree describes it ----
-    //
-    // Direct map only, no identity alias: everything that touches a device goes through
-    // `phys_to_virt`, so a physical address is never dereferenced as one.
-    //
-    // Every window the tree describes, not just the devices this kernel drives today —
-    // that is what makes a new driver work through `phys_to_virt` instead of needing its
-    // own base constant.
+    // Every window the tree describes, not just the devices driven today: that is what
+    // lets a new driver work through `phys_to_virt` instead of its own base constant.
     for device in crate::device_tree::mmio_regions() {
         // The device tree reports raw integers; this is where they become addresses.
-        // Named once and derived from, so the virtual and physical sides cannot be
-        // filled in the wrong way round.
         let base = PhysicalAddr::new(device.base);
         push(Region {
             name: "mmio",
             va: phys_to_virt(base),
             pa: base,
             len: device.size,
-            // Largest page the window's own geometry permits: QEMU virt's PCI ECAM is
-            // 256 MiB, i.e. 128 superpages instead of 65536 pages.
             level: largest_level_for(base, device.size),
             flags: READ_WRITE,
         });
     }
 
-    // ---- The kernel image, one section at a time ----
     push(direct("text", layout::text_start(), layout::text_end(), 0, READ_EXEC));
     push(direct("rodata", layout::rodata_start(), layout::rodata_end(), 0, READ_ONLY));
     push(direct("data", layout::data_start(), layout::data_end(), 0, READ_WRITE));
     push(direct("bss", layout::bss_start(), layout::bss_end(), 0, READ_WRITE));
-    // One region per stack. Individually is what leaves the guard pages unmapped: a
-    // single region spanning the area would map straight over them.
-    //
-    // Boot and secondary stacks go through the same loop. A secondary's is not direct
-    // mapped — `stack` explains why it is deliberately double mapped — but each stack
-    // reports its own `va` and `pa`, so nothing here has to know the difference.
-    //
-    // Mapped now, before any secondary starts: a starting hart installs this table and
-    // *then* sets `sp`.
+    // One region per stack, which is what leaves the guards unmapped — a single region
+    // spanning the area would map over them. Each stack reports its own `va` and `pa`,
+    // so the secondaries' double mapping needs no special case here.
     for stack in stack::all() {
         push(Region {
             name: stack.name,
@@ -179,55 +112,75 @@ fn regions() -> Vec<Region> {
         });
     }
 
-    // ---- The direct map, covering exactly what the frame allocator owns ----
-    // Asking `frame` rather than re-deriving a RAM extent is the point: the allocator
-    // decides which frames it will hand out, and this maps precisely those.
+    // The direct map covers exactly what the allocator owns — asked for, not re-derived.
     let (pool_start, pool_end) = frame::owned_range();
     let pool_start_va = phys_to_virt(pool_start);
     let pool_end_va = phys_to_virt(pool_end);
     assert_eq!(
         pool_start_va,
-        layout::heap_start(),
+        layout::free_ram_start(),
         "the frame pool must begin at the top of the kernel image for the two to tile"
     );
 
-    // The image occupies part of one superpage-aligned slot. Everything inside
-    // that slot is mapped at 4 KiB so the sections above can carry different
-    // rights; everything past it is bulk direct map and gets superpages. The two
-    // must not overlap, or the finer mappings would hit `SuperpageInPath`.
+    // The image sits in one superpage-aligned slot, mapped at 4 KiB so its sections can
+    // carry different rights; the bulk beyond gets superpages. They must not overlap, or
+    // the finer mappings hit `SuperpageInPath`.
     assert!(
         layout::text_start().is_aligned(SUPERPAGE),
         "the kernel image must start superpage-aligned, or its slot would overlap the bulk direct map"
     );
     let slot_end = pool_start_va.align_up(SUPERPAGE);
-    // Superpages only reach the last superpage boundary below the end; any
-    // remainder is mapped at 4 KiB rather than rounded up past owned memory.
     let bulk_end = pool_end_va.align_down(SUPERPAGE).max(slot_end);
 
-    // Rest of the image's slot: the frame allocator's bitmap and the first of the
-    // frames it vends. 4 KiB, because the slot is.
+    // Rest of the image's slot: the frame bitmap and the first frames vended.
     push(direct("frame pool head", pool_start_va, slot_end, 0, READ_WRITE));
-    // Bulk direct map. Never executable — page tables, user pages and DMA buffers
-    // live here, and none of it is kernel text.
+    // Never executable: page tables, user pages and DMA buffers live here.
     push(direct("direct map", slot_end, bulk_end, 1, READ_WRITE));
-    // Whatever sub-superpage remainder is left at the top.
+    // The sub-superpage remainder at the top, rather than rounding past owned RAM.
     push(direct("direct map tail", bulk_end, pool_end_va, 0, READ_WRITE));
 
     audit_disjoint(&regions);
+    audit_kernel_va(&regions);
     regions
+}
+
+/// Require every mapping above the direct map to have come from [`kernel_va`], and
+/// everything below to stay below.
+///
+/// Addresses up there are *chosen*, and the choice has one legitimate source; inventing
+/// one is then a boot panic instead of a collision found later by whoever gets mapped
+/// over. Both directions, because the boundary is derived in two modules.
+fn audit_kernel_va(regions: &[Region]) {
+    let free_start = kernel_va::start();
+    for region in regions.iter().filter(|region| !region.is_empty()) {
+        let end = region.va.add(region.len);
+        if region.va < free_start {
+            assert!(
+                end <= free_start,
+                "region '{}' ({:#x}..{:#x}) runs past {free_start:#x}, where the kernel VA \
+                 allocator starts handing addresses out",
+                region.name,
+                region.va,
+                end
+            );
+            continue;
+        }
+        assert!(
+            kernel_va::is_reserved(region.va, region.len),
+            "region '{}' ({:#x}..{end:#x}) is above the direct map but was never reserved from \
+             kernel_va, whose watermark is {:#x}",
+            region.name,
+            region.va,
+            kernel_va::watermark()
+        );
+    }
 }
 
 /// Require the regions to tile the address space rather than overlap it.
 ///
-/// Two regions covering one page is not a mapping error the hardware can report: the
-/// second `install` simply wins, and the loser's rights vanish. So it is checked here,
-/// while the list is still just data.
-///
-/// The specific hazard: the stacks sit *above* the direct map, at
-/// [`super::kernel_va_free_start`], and the direct map's own extent is a runtime fact.
-/// They cannot collide today, but they are computed in different modules.
-///
-/// `O(n²)` over ~30 regions, once, at boot.
+/// Overlap is not an error the hardware reports: the second `install` wins and the
+/// loser's rights vanish. Against each other rather than against [`kernel_va`], which is
+/// what catches two mappings that both came from geometry. `O(n²)`, once.
 fn audit_disjoint(regions: &[Region]) {
     for (index, a) in regions.iter().enumerate() {
         if a.is_empty() {
@@ -250,100 +203,68 @@ fn audit_disjoint(regions: &[Region]) {
     }
 }
 
+/// The kernel address space, published *after* the switch: a value here means frames,
+/// heap, stacks and table are all up, which is what a secondary needs before it adopts the
+/// table. The lock holds the kernel's only `&mut` to the root.
+static KERNEL: Once<IrqMutex<AddressSpace>> = Once::new();
+
 /// Build the kernel's page table, audit it, and switch `satp` to it.
 ///
-/// Call once, on the boot hart, after [`super::init`] — it allocates frames.
+/// Call once, on the boot hart, after [`super::init`]'s earlier steps — it needs frames
+/// for the tree and the heap for the region list.
 pub fn init() {
     let regions = regions();
+    let mut space = AddressSpace::new(KERNEL_ASID);
 
-    // The root table is permanent: `satp` points at it for the kernel's lifetime, so
-    // the token is dropped without freeing to pin the frame.
-    let root_frame = frame::alloc().expect("no frame for the kernel root page table");
-    let root_pa = root_frame.base();
-    // SAFETY: a freshly allocated, zeroed, page-aligned frame that this module now
-    // owns exclusively and never releases, reachable through the direct map. That
-    // makes a unique `'static` borrow of it sound.
-    let root: &'static mut Table = unsafe { &mut *phys_to_virt(root_pa).as_mut_ptr::<Table>() };
-
-    let mut mapper = Mapper::new(root, TableFrames, LinearOffset(direct_map::VA_OFFSET));
-
-    for region in &regions {
-        region
-            .install(&mut mapper)
-            .unwrap_or_else(|error| panic!("mapping region '{}' failed: {error}", region.name));
-    }
-    for region in &regions {
-        region.audit(&mapper);
+    {
+        let mut mapper = space.mapper();
+        for region in &regions {
+            region
+                .install(&mut mapper)
+                .unwrap_or_else(|error| panic!("mapping region '{}' failed: {error}", region.name));
+        }
+        for region in &regions {
+            region.audit(&mapper);
+        }
+        audit_holes(&mapper);
+        audit_live_context(&mapper);
     }
 
-    audit_holes(&mapper);
-    audit_live_context(&mapper);
-
-    println!("[memory] kernel page table root at {root_pa:#x}:");
+    println!("[memory] kernel page table root at {:#x}:", space.root());
     region::report(&regions);
 
-    let satp = Satp::sv39(root_pa, 0);
-    // SAFETY: `root` is a live Sv39 tree, just audited to map every kernel region
-    // — the running PC and SP included — to the same physical addresses the boot
-    // table does, so execution continues across the write.
-    unsafe { switch_to(satp.bits()) };
+    let satp = space.satp();
+    // SAFETY: a live Sv39 tree, just audited to map every kernel region — the running
+    // PC and SP included — to the same physical addresses the boot table does, so
+    // execution continues across the write.
+    unsafe { space.activate() };
 
-    // Published last, so a non-zero value means frames, heap, stacks and table are
-    // all up. Release, so the tree itself is visible to any hart that reads it —
-    // A secondary handoff copies this value and publishes the complete launch state.
-    KERNEL_SATP.store(satp.bits(), Ordering::Release);
-
+    KERNEL.call_once(|| IrqMutex::new(space));
     println!("[memory] kernel page table live (satp {:#x}); boot table retired", satp.bits());
 }
 
-/// The `satp` the boot hart installed. Zero until [`init`] has finished.
+/// Edit or walk the kernel address space; the way in for anything that maps after boot.
 ///
-/// Read through [`satp`] and copied into each secondary handoff.
-static KERNEL_SATP: AtomicUsize = AtomicUsize::new(0);
-
-/// The live kernel page table, or `None` before [`init`] has published one.
-pub fn satp() -> Option<usize> {
-    match KERNEL_SATP.load(Ordering::Acquire) {
-        0 => None,
-        bits => Some(bits),
-    }
+/// `None` until [`init`] has finished — during it the space is still a local, so a
+/// half-built table is unreachable.
+pub fn with<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
+    KERNEL.get().map(|space| space.with(f))
 }
 
-/// Point `satp` at `bits` and flush the TLB.
+/// The live kernel page table's `satp`, copied into each secondary handoff.
 ///
-/// Interrupts are masked across the pair so no trap can observe a half-switched
-/// translation. Nothing can fire here today — `sstatus.SIE` is clear — but the mask is
-/// the invariant this function needs, not a reaction to a source that happens to exist.
-///
-/// # Safety
-///
-/// `bits` must describe a live, correct Sv39 tree that maps the running PC and
-/// stack pointer to the same physical addresses the current table does. Otherwise
-/// this faults on the very next instruction, with no table left to diagnose it
-/// from.
-unsafe fn switch_to(bits: usize) {
-    crate::arch::riscv64::interrupts::without(|| unsafe {
-        core::arch::asm!(
-            "csrw satp, {satp}",
-            "sfence.vma",
-            satp = in(reg) bits,
-            options(nostack)
-        );
-    });
-}
+/// Read out of the address space rather than mirrored in a static: two copies could
+/// disagree about which table is live.
+pub fn satp() -> Option<usize> { with(|space| space.satp().bits()) }
 
-/// Require the gaps the layout leaves to really be gaps.
+/// Require the deliberate gaps to really be gaps.
 ///
-/// A guard page only guards if it is genuinely unmapped, and "unmapped" is the one
-/// property that is invisible in the region list — it is the *absence* of an entry.
-///
-/// Only deliberate gaps are checked. The `.rodata`/`.data` alignment slack happens
-/// to be unmapped too, but that is incidental geometry and would be a fragile thing
-/// to pin.
+/// A guard only guards if it is unmapped, which is the one property a region list cannot
+/// express. Only the deliberate ones: section alignment slack is unmapped too, but
+/// incidentally.
 fn audit_holes(mapper: &KernelMapper<'_>) {
     let unmapped = |va: VirtualAddr| mapper.entry_of(va).is_none();
 
-    // One guard page below every stack. `stack` says which; this only checks them.
     for guard in stack::guards() {
         assert!(
             unmapped(guard),
@@ -352,9 +273,8 @@ fn audit_holes(mapper: &KernelMapper<'_>) {
         );
     }
 
-    // The linker also reserves a page between the boot stack and the heap
-    // (`_heap_start = _boot_stack_end + _page_size`); a mapping there would mean the
-    // region list had grown over it.
+    // The linker's page between the boot stack and free RAM. A mapping there means the
+    // region list has grown over it.
     let tail = layout::boot_stack_end();
     assert!(
         unmapped(tail),
@@ -362,8 +282,8 @@ fn audit_holes(mapper: &KernelMapper<'_>) {
     );
 }
 
-/// Require the addresses the switch itself depends on to survive it, read from the
-/// *running* machine rather than assumed.
+/// Require the addresses the switch depends on to survive it, read from the *running*
+/// machine rather than assumed.
 fn audit_live_context(mapper: &KernelMapper<'_>) {
     let pc: usize;
     let sp: usize;
@@ -372,8 +292,6 @@ fn audit_live_context(mapper: &KernelMapper<'_>) {
         core::arch::asm!("auipc {}, 0", out(reg) pc, options(nomem, nostack));
         core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack));
     }
-    // Both are bare registers coming out of assembly — the one place in this module
-    // where an address genuinely enters untyped.
     check_live(mapper, "instruction stream", VirtualAddr::new(pc), PteFlags::EXECUTE);
     check_live(mapper, "stack pointer", VirtualAddr::new(sp), PteFlags::WRITE);
 }
@@ -383,10 +301,7 @@ fn check_live(mapper: &KernelMapper<'_>, what: &str, va: VirtualAddr, needed: Pt
     let (entry, _) = mapper
         .entry_of(va)
         .unwrap_or_else(|| panic!("the running {what} at {va:#x} would be unmapped"));
-    assert!(
-        entry.flags().contains(needed),
-        "the running {what} at {va:#x} would lack {needed:?}"
-    );
+    assert!(entry.flags().contains(needed), "the running {what} at {va:#x} would lack {needed:?}");
     assert_eq!(
         mapper.translate(va),
         Some(virt_to_phys(va)),

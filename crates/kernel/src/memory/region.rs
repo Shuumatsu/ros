@@ -1,19 +1,15 @@
-//! A mapped region, and the mechanics of installing, auditing and reporting a
-//! set of them.
+//! A mapped region, and the mechanics of installing, auditing and reporting a set of
+//! them.
 //!
-//! Deliberately free of any particular *layout*. This is the mechanism; the
-//! kernel's own address-space policy lives in [`super::kernel_table`], and a user
-//! address space will want the same install-and-audit treatment over a different
-//! list. Everything here is generic over the mapper's two policies
-//! ([`FrameSource`], [`PhysAccess`]) so it never depends on the kernel's choice
-//! of either.
+//! The mechanism, free of any particular layout — that is [`super::kernel_table`]'s, and
+//! a user address space will want the same treatment over a different list. Generic over
+//! the mapper's two policies so it never depends on the kernel's choice of either.
 //!
-//! [`Region::install`] refuses a region before writing any PTE — W^X and page
-//! alignment both. Validating *there* rather than in a separate pass means no caller
-//! can forget: there is exactly one way to turn a `Region` into mappings.
+//! [`Region::install`] validates before writing any PTE, rather than in a separate pass,
+//! so no caller can forget: there is one way to turn a `Region` into mappings.
 
 use paging::sv39::{FrameSource, PhysAccess, page_size_at};
-use paging::{MapError, MemoryAddr, Mapper, PhysicalAddr, PteFlags, VirtualAddr};
+use paging::{MapError, Mapper, MemoryAddr, PhysicalAddr, PteFlags, VirtualAddr};
 
 use crate::utils::ByteSize;
 
@@ -42,32 +38,22 @@ pub struct Region {
 
 impl Region {
     /// Bytes mapped by one leaf of this region.
-    pub fn page_size(&self) -> usize {
-        page_size_at(self.level)
-    }
+    pub fn page_size(&self) -> usize { page_size_at(self.level) }
 
     /// Pages installed, counting a partial final page as a whole one.
-    pub fn pages(&self) -> usize {
-        self.len.div_ceil(self.page_size())
-    }
+    pub fn pages(&self) -> usize { self.len.div_ceil(self.page_size()) }
 
-    /// True when there is nothing to map — a region that a given platform's
-    /// geometry happens to collapse to zero length, rather than a special case
-    /// the layout has to leave out.
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
+    /// True when there is nothing to map: a region a platform's geometry collapses to
+    /// zero, rather than one the layout has to leave out.
+    pub fn is_empty(&self) -> bool { self.len == 0 }
 
     /// Exclusive end of the virtual range, before page rounding.
-    fn end_va(&self) -> VirtualAddr {
-        self.va.add(self.len)
-    }
+    fn end_va(&self) -> VirtualAddr { self.va.add(self.len) }
 
     /// Reject a region the kernel must never install.
     ///
     /// [`Mapper::map_range_at_level`] rounds outward, so a misaligned superpage region
-    /// would quietly pull in its neighbourhood — which for this kernel means OpenSBI's
-    /// memory, whose PMP entry denies supervisor access.
+    /// pulls in its neighbourhood — here, OpenSBI's memory, which PMP denies to S-mode.
     fn validate(&self) {
         let writable = self.flags.contains(PteFlags::WRITE);
         let executable = self.flags.contains(PteFlags::EXECUTE);
@@ -102,12 +88,9 @@ impl Region {
         }
         self.validate();
 
-        // The whole region shares one VA→PA difference, so the walk needs no
-        // per-page bookkeeping. Wrapping because a direct-map VA exceeds its PA.
-        //
-        // The one place here that computes across the two address spaces, so the one
-        // place the types have to come off: a VA minus a PA is not an address of
-        // either kind. It goes straight back on in the closure below.
+        // One difference for the whole region, so the walk needs no per-page bookkeeping.
+        // The types come off because a VA minus a PA is an address of neither kind; they
+        // go back on in the closure. Wrapping, since a direct-map VA exceeds its PA.
         let delta = self.pa.bits().wrapping_sub(self.va.bits());
         mapper.map_range_at_level(
             self.va,
@@ -118,11 +101,10 @@ impl Region {
         )
     }
 
-    /// Walk every page of this region and require it to be exactly what was asked
-    /// for: right level, right rights, right frame.
+    /// Walk every page of this region and require the right level, rights and frame.
     ///
-    /// Every page, not a sample — this runs once at boot, and a wrong leaf anywhere
-    /// is either a fault or a silent protection hole.
+    /// Every page, not a sample: this runs once, and a wrong leaf anywhere is either a
+    /// fault or a silent protection hole.
     pub fn audit<F: FrameSource, A: PhysAccess>(&self, mapper: &Mapper<'_, F, A>) {
         if self.is_empty() {
             return;
@@ -161,12 +143,9 @@ impl Region {
 /// Puts the protection policy in the boot log, where it can be read off a failing run.
 /// The rights come from [`PteFlags::rwx`].
 ///
-/// A run of adjacent regions sharing a name **and a page size** is collapsed into one
-/// line with the run's total page count and a `xN` marker: secondary hart stacks are
-/// one region each, so a big machine would otherwise bury everything else under one
-/// line per hart. The page size has to match too, or the total is a lie — collapsing
-/// 4 KiB and 2 MiB device windows into one count understates the mapping by orders of
-/// magnitude.
+/// Adjacent regions sharing a name, page size and rights collapse into one `xN` line —
+/// stacks are one region each, so a big machine would otherwise bury everything else.
+/// All three must match or the printed total is a lie.
 pub fn report(regions: &[Region]) {
     let mut index = 0;
     while index < regions.len() {
@@ -176,11 +155,8 @@ pub fn report(regions: &[Region]) {
             continue;
         }
 
-        // Consume the run of regions this one is genuinely contiguous with. Every
-        // field below is load-bearing: without the address checks, scattered MMIO
-        // windows sharing a name collapse into one line printed against one of their
-        // bases, reading as a single contiguous mapping; without `flags`, a run mixing
-        // rights shows the first region's for all of them.
+        // Every field below is load-bearing: without the address checks, scattered MMIO
+        // windows sharing a name would print as one contiguous mapping.
         let page_size = region.page_size();
         let mut run = 1;
         let mut pages = region.pages();

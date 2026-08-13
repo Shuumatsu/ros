@@ -272,7 +272,7 @@ fn now() -> u64 {
 ///
 /// The kernel image layout used to be printed here too, which put a function that
 /// imports nothing but `memory::layout` and `memory::stack` in the CPU module. It
-/// lives in [`crate::memory::report_layout`] now; this reports CPU facts only.
+/// lives in [`crate::memory::layout::report`] now; this reports CPU facts only.
 pub fn print_info() {
     match boot_hart() {
         Some(hart) => println!("boot hart: {hart} (chosen by the firmware, not assumed)"),

@@ -57,14 +57,20 @@ The boot hart initializes memory in dependency order:
 
 1. validate linker and stack geometry;
 2. initialize the physical frame allocator from the DTB RAM range;
-3. carve the bounded kernel heap from owned frames;
-4. allocate one guarded stack per secondary;
+3. carve the kernel heap from owned frames — it grows on demand, up to a ceiling;
+4. allocate one guarded stack per secondary, at addresses taken from the kernel
+   virtual-address allocator;
 5. build and audit the final kernel page table;
 6. switch the boot hart to that table.
 
 The final table removes the identity map, applies per-section W^X permissions,
 maps discovered MMIO, maps allocator-owned RAM through the direct map, and maps
 each stack separately so its lower guard page remains unmapped.
+
+The table is not write-once: it stays owned as an address space behind a lock, so
+later mappings edit the live tree rather than building a second view of it. Every
+mapping above the direct map is audited against the virtual-address allocator that
+handed it out.
 
 ## Secondary handoff
 
