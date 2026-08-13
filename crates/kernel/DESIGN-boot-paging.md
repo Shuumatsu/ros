@@ -1120,93 +1120,214 @@ it. The VA base is derived from `frame::owned_range()` via
 Unlike the two items above, this one is a *design* deferral rather than a known
 defect: nothing is wrong today, it is only narrower than it will need to be.
 
+### P. Stage 11 — the six holes an audit of the finished subsystem found
+
+Bring-up worked; that is not the same as the subsystem being right. A read of the
+whole memory path against AGENTS.md turned up six things, in descending order of
+what they would have cost.
+
+#### There was no way to fence the TLB
+
+`sfence.vma` appeared in exactly three places: `AddressSpace::activate` and the two
+boot entries. Meanwhile `kernel_table::with` was documented as *"the way in for
+anything that maps after boot"* and handed out a `&mut` mapper. Sv39 permits a hart
+to cache the **absence** of a translation, so the first post-boot `map()` would have
+installed a leaf the hardware was free to ignore — and no API existed to fix it.
+
+`arch/riscv64/tlb.rs` now owns the instruction and the `satp` write both; nothing
+else in Rust writes either. `AddressSpace::mapper` is private, and the two ways in
+are:
+
+- `edit(f)` — hands out `&mut KernelMapper`, fences afterwards. Unconditionally:
+  whether some hart is running this tree is not a question the calling hart can
+  answer.
+- `walk(f)` — hands out `&KernelMapper`. Every mutator on `Mapper` takes `&mut
+  self`, so this is read-only *by type*, not by promise, and needs no fence.
+
+Cross-hart shootdown is still absent and still needs §4.1's IPI path. What changed
+is that the local half is no longer missing.
+
+#### The high half had two owners
+
+`DIRECT_MAP_END` was `ROOT_ENTRIES_PER_HALF * GIGAPAGE` — 256 GiB, which is the
+*entire* Sv39 high half — and `phys_to_virt` was documented as valid across all of
+it, MMIO included. `kernel_va::start()` then began handing out addresses from the
+top of RAM upward, i.e. from inside that same window. Two modules deciding the same
+thing, reconciled only by `audit_kernel_va` at boot.
+
+It never fired on QEMU virt because every device window there sits below the RAM
+top. On a board with a device above DRAM, or a second `/memory` bank, the boot
+would have died in the audit — correctly, but on a legitimate machine.
+
+The high half is now partitioned in `direct_map`, with the table drawn in its module
+docs: `DIRECT_MAP_SPAN` (128 GiB, half of it) for the direct map, the rest for
+`kernel_va`. Consequences worth noting:
+
+- `kernel_va::START` is a **constant**. The `UNSET` sentinel and the "panics before
+  `frame::init`" caveat are gone, and `kernel_va` no longer depends on `frame` at
+  all.
+- `Table::identity_and_offset` takes the span, so the *boot* table mirrors only the
+  window too. Chosen kernel addresses are unmapped there exactly as in the final
+  table, instead of aliasing physical memory 128 GiB up that need not exist.
+- Secondary stacks moved from just-above-RAM to `0xffff_ffe0_0000_0000`.
+
+#### `memory` was reaching into `device_tree` in three places
+
+`memory::init` took `secondary_harts` as a parameter and explained in a comment why
+it should not look that up — then the subsystem looked up `ram_end`,
+`foreign_ram()` and `mmio_regions()` for itself. Same principle, honoured once and
+broken three times.
+
+`memory::machine` now owns `PhysRange` (moved out of `device_tree`, since a named
+physical range is a memory concept), the two list capacities, and
+`MachineMemory::check` — the one place a machine this layout cannot describe is
+rejected. `device_tree::machine_memory()` builds the value; `memory::init(machine,
+harts)` consumes it. The dependency runs one way now: `device_tree → memory`, and
+the only mention of the tree inside `memory` is a doc comment naming today's
+builder.
+
+`Reservation` also collapsed into `PhysRange` + `newly_withheld`, which removed a
+second 40-byte name buffer and a second `MAX_*` constant that had to agree with
+`MAX_FOREIGN` by hand.
+
+#### `kernel_table::init` published the first table and activated the second
+
+`Once::call_once` came *after* `activate()`, deliberately — a published space means
+everything is up. But a second call would have built a second tree, switched `satp`
+to it, and then silently dropped it, leaving `kernel_table::satp()` reporting the
+first. Two answers to which table is live, in the module whose whole job is that
+there is one. Now an assert at the top, since `Once` cannot express "guard a
+sequence that must publish last".
+
+#### The heap was the one memory module with no injected policy and no tests
+
+`paging` takes a `FrameSource`, `frame-allocator` takes its bitmap; both are
+host-tested. The heap hard-coded `frame::alloc_contiguous` and so could only be
+exercised by booting.
+
+Now `crates/heap`: an unsynchronized `GrowableHeap<ORDER>` that **never fetches
+memory itself**. When dry it returns `Outcome::Grow { at_least }` and the caller
+supplies the memory. That is not indirection for its own sake — it is what keeps
+the heap lock released while the frame lock is taken, which the old code achieved
+by hand and by comment. Eight host tests cover the growth arithmetic, and one of
+them pinned a real improvement: the ask is now
+`size.next_power_of_two().max(align)`, not `size`, because a buddy serves from a
+power-of-two block — so "one retry is enough" is now true rather than merely
+usually true. It also pairs exactly with `frame::alloc_contiguous`, which vends a
+power-of-two run aligned to itself.
+
+The ceiling is derived too: `min(64 MiB, pool/4)` rounded to whole grow steps. A
+fixed 64 MiB ceiling is not a backstop on a 32 MiB board — the pool drains first
+and a page table is what gets refused a frame.
+
+#### Small change, and a log line that lied
+
+`frame::owned_range` was two `AtomicUsize`es for one interval; it is one
+`Once<FrameRange>` now. And the switch printed `boot table retired`, which was
+false: every hart started afterwards still enters through it, because a starting
+hart has no translation of its own to arrive with.
+
 ---
 
 ## 3. Verified state
 
 ```
-cargo test -p paging --features std     # 43 passed  (NOTE: --features std is required;
+cargo test -p paging --features std     # 53 passed  (NOTE: --features std is required;
                                         #  without it the crate is no_std → 0 tests run)
 cargo test -p frame-allocator           # 25 passed
+cargo test -p heap                      #  8 passed  (growth policy, on host memory)
 cargo build -p paging                   # no_std, host        ) both, to keep the
 cargo build -p paging --target riscv64imac-unknown-none-elf   ) crate honest
-cargo kbuild                            # builds; 34 warnings, all pre-existing
-cargo krun                              # boots to kmain
+cargo kbuild                            # builds, no warnings
+cargo krun                              # boots to kmain on 4 harts
 ```
 
-Boot log — `direct map:` is the Stage 2 line, and `frames:` still precedes
-`heap:` (the §2.B ordering fix). Note the heap VA is now `0xffffffc0_80800000`:
-PA `0x80800000` + `VA_OFFSET`, i.e. the linear map, where it used to be
-`0xffffffc0_00800000`.
+Boot log, `-smp 4 -m 128M`, hart prefixes and the seventeen MMIO lines trimmed. Note
+that `frames:` precedes `heap:` (the §2.B ordering fix), and that the two windows of
+§2.P's high-half split are visible: the direct map stops at `0xffffffe000000000` and
+the secondary stacks start there.
 
 ```
-[memory] direct map: PA 0x0..0x100000000 -> VA 0xffffffc000000000.. (4 GiB)
-boot hart: 0 (chosen by the firmware, not assumed)
-[dtb] blob at 0x87e00000 (size 0x17c4)
-[memory] reserved device tree: 0x87e00000..0x87e02000 (2 frames)
-[memory] frames: 0x8032d000..0x88000000 (124 MiB, physical)
+[memory] direct map: PA 0x0..0x2000000000 -> VA 0xffffffc000000000..0xffffffe000000000 (128 GiB addressable)
+[memory] reserve: mmode_resv1@80000000 at 0x80000000..0x80040000 is outside the pool, skipped
+[memory] reserve: mmode_resv0@80040000 at 0x80040000..0x80060000 is outside the pool, skipped
+[memory] frames: 0x80251000..0x88000000 (128700 KiB, physical)
+[memory]   32173 frames, 32170 free (128680 KiB), 12 KiB in use
+[memory]   withheld 3 frames in 1 reservations:
+[memory]     device tree blob         0x87e00000..0x87e03000 (12 KiB)
 [memory] frame allocator self-test passed
-[memory] heap:   0xffffffc080800000..0xffffffc081000000 (8 MiB, virtual)
-[memory] kernel page table root at 0x87e02000:
-[memory]   uart                   0xffffffc010000000 -> 0x0010000000  rw-     1 x 4KiB
-[memory]   plic                   0xffffffc00c000000 -> 0x000c000000  rw-  1536 x 4KiB
-[memory]   clint                  0xffffffc002000000 -> 0x0002000000  rw-    16 x 4KiB
-[memory]   text                   0xffffffc080200000 -> 0x0080200000  r-x    26 x 4KiB
-[memory]   rodata                 0xffffffc08021a000 -> 0x008021a000  r--    14 x 4KiB
-[memory]   data                   0xffffffc080229000 -> 0x0080229000  rw-     2 x 4KiB
-[memory]   bss                    0xffffffc08022b000 -> 0x008022b000  rw-     2 x 4KiB
-[memory]   boot stack             0xffffffc08023d000 -> 0x008023d000  rw-    16 x 4KiB
-[memory]   secondary stack        0xffffffc088001000 -> 0x0080250000  rw-    48 x 4KiB (x3)
-[memory]   frame pool head        0xffffffc08033e000 -> 0x008033e000  rw-   194 x 4KiB
-[memory]   direct map             0xffffffc080400000 -> 0x0080400000  rw-    62 x 2MiB
-[memory] kernel page table live (satp 0x8000000000087e02); boot table retired
+[memory] heap:   0xffffffc080800000..0xffffffc081000000 (8 MiB, virtual; grows by 2 MiB up to 30 MiB)
+[memory]   ceiling is 1/4 of the 128692 KiB pool, not the 64 MiB default
+[memory] kernel heap self-test passed (0 B of 8 MiB in use)
+[memory] stacks: 1 boot + 3 secondary x 64 KiB (each above a 4 KiB guard)
+[memory]   secondary stacks at 0xffffffe000000000..0xffffffe000033000
+[memory] kernel VA: 0xffffffe000000000..0xffffffe000033000 taken (204 KiB), free through 0xffffffffffe00000
+[memory] kernel page table root at 0x80253000:
+[memory]   mmio                   0xffffffc00c000000 -> 0x000c000000  rw-     3 x 2 MiB
+[memory]   mmio                   0xffffffc030000000 -> 0x0030000000  rw-   128 x 2 MiB
+[memory]   text                   0xffffffc080200000 -> 0x0080200000  r-x    38 x 4 KiB
+[memory]   rodata                 0xffffffc080226000 -> 0x0080226000  r--    18 x 4 KiB
+[memory]   data                   0xffffffc080238000 -> 0x0080238000  rw-     2 x 4 KiB
+[memory]   bss                    0xffffffc08023a000 -> 0x008023a000  rw-     5 x 4 KiB
+[memory]   boot stack             0xffffffc080240000 -> 0x0080240000  rw-    16 x 4 KiB
+[memory]   secondary stack        0xffffffe000001000 -> 0x0087e10000  rw-    16 x 4 KiB
+[memory]   secondary stack        0xffffffe000012000 -> 0x0080260000  rw-    16 x 4 KiB
+[memory]   secondary stack        0xffffffe000023000 -> 0x0080270000  rw-    16 x 4 KiB
+[memory]   frame pool head        0xffffffc080251000 -> 0x0080251000  rw-   431 x 4 KiB
+[memory]   direct map             0xffffffc080400000 -> 0x0080400000  rw-    62 x 2 MiB
+[memory] kernel page table live on this hart (satp 0x8000000000080253)
+[smp] hart 0 (cpu 1) online on the kernel page table
 enter kmain
-[timer] tick 1
 ```
 
-`secondary stack (x3)` is three regions collapsed into one line by `region::report`
-(this excerpt is from an `-smp 4` run); they are separate regions precisely so the
-guard page below each stays unmapped, and their VA is above the direct map rather than
-`phys_to_virt(pa)` — see §2.N. The `direct map tail` region is absent because this
-platform's RAM top is already superpage-aligned, so it is empty and skipped. `tick 1`
-is the proof traps still work *after* the switch.
+The stacks are one region each precisely so the guard page below each stays unmapped;
+a single region spanning them would map over the holes. The PLIC's 3 aligned MiB are
+three superpages rather than 1536 leaves — `largest_level_for` picks the coarsest level
+that tiles a window *exactly*, since a superpage rounds outward and would otherwise
+pull in whatever sits beside the device. The `direct map tail` region is absent
+because this platform's RAM top is already superpage-aligned, so it is empty and
+skipped.
 
 ELF facts verified by inspection after the relink (`llvm-readelf`, `llvm-nm`,
 and a byte-level dump of the table out of the image):
 
 ```
 .text     VMA ffffffc080200000   LMA 80200000   (uniform skew = VA_OFFSET)
-.rodata   VMA ffffffc080214000   PROGBITS, in the first LOAD segment
-EARLY_PGTABLE        ffffffc080218000  R   (page-aligned, .rodata)
-EARLY_SATP_TEMPLATE  ffffffc080219000  R   = 0x8000000000000000
-_va_offset           ffffffc000000000  A
+.rodata   VMA ffffffc080226000   PROGBITS, in the first LOAD segment
+memory::boot_table::TABLE  ffffffc080229000  r   (page-aligned, .rodata)
+_va_offset                 ffffffc000000000  A
+no relocations in the file
 
-EARLY_PGTABLE: exactly 8 non-zero entries of 512 —
-  root[0..3]     -> PA 0, 1G, 2G, 3G   flags 0xcf (V R W X A D)
-  root[256..259] -> PA 0, 1G, 2G, 3G   flags 0xcf
-table PA 0x80218000  ->  boot.S writes satp = 0x8000000000080218
+TABLE: 384 valid entries of 512, all flags 0xcf (V R W X A D) —
+  root[0..255]   -> PA 0 .. 255G   the identity half, in full
+  root[256..383] -> PA 0 .. 127G   the direct-map window, and nothing above it
+  root[384..511] -> invalid        kernel_va's territory (§2.P)
+table PA 0x80229000  ->  the entry writes satp = 0x8000000000080229
 ```
 
-`0xcf` is bit-for-bit what the old `ori t3, t3, 0xcf` produced — the encoding
-did not change, only *who* computes it.
+`0xcf` is bit-for-bit what the original `ori t3, t3, 0xcf` produced — the encoding
+did not change, only *who* computes it. The 128 invalid slots at the top are the
+observable form of the high-half split: dump this table on a kernel from before
+§2.P and all 512 are valid.
 
 Environment facts established by inspection:
 
 - Target is `code-model: medium` (medany) + `relocation-model: static` → symbol
   refs are PC-relative and VMA−LMA is a uniform constant across the image. This
-  is what makes `lla` yield *physical* addresses pre-paging, which is how
-  `boot.S` finds `EARLY_PGTABLE`. Stage 2 no longer *runs* Rust pre-paging, so
-  the two hazards that would have mattered (relaxation to `gp`-relative,
-  absolute relocations in read data) are moot; verified anyway — the whole
-  pre-`satp` path is `auipc`/`addi` and the image has **no relocations at all**.
+  is what makes `lla` yield *physical* addresses pre-paging, which is how the
+  architecture entry finds `boot_table::TABLE`. Stage 2 no longer *runs* Rust
+  pre-paging, so the two hazards that would have mattered (relaxation to
+  `gp`-relative, absolute relocations in read data) are moot; verified anyway —
+  the whole pre-`satp` path is `auipc`/`addi` and the image has **no relocations
+  at all**.
 - QEMU runs `-m 128M`, RAM base `0x8000_0000` → RAM is `0x80000000..0x88000000`,
-  comfortably inside the 4 GiB direct-map window.
+  comfortably inside the 128 GiB direct-map window.
 - `_va_offset = 0xffffffc000000000` (pure constant); kernel links at
   `0xffffffc080200000`, loads at `0x80200000`.
 - `VPN[2]` of `0xffffffc000000000` is **256**, so the direct map occupies root
-  entries 256..259 and the kernel image itself sits in **258**
-  (`0xffffffc080200000`). All four high-half VAs are canonical Sv39; the old
-  skewed offset's MMIO VA was not.
+  entries 256..383 and the kernel image itself sits in **258**
+  (`0xffffffc080200000`). Every high-half VA the kernel uses is canonical Sv39;
+  the old skewed offset's MMIO VA was not.
 
 ---
 
@@ -1228,18 +1349,16 @@ What is missing is everything a hart is *for*. Every secondary reaches `kmain_ap
 calls `wait_forever`; there is no scheduler, no IPI path, no per-CPU state and no
 cross-hart TLB shootdown. Concretely, the next pieces:
 
-- **A per-hart control block reached through `tp`.** `tp` currently holds the raw hart
-  id, which is fine for a console prefix and useless as a per-CPU pointer. When there
-  is per-CPU state to hold — current process, scheduler context, preempt count — `tp`
-  should point at it, and a dense logical-cpu index should appear alongside the hart
-  id at the same time. Not before: an index with no array to index is the `NCPU`
-  mistake again.
-- **IPIs.** The natural next reach from HSM. Needs `SupervisorSoft` handled first:
-  `interrupts::handler` currently sends it to `unimplemented!()` and
-  `clint::software::init` is never called, so enabling it today would panic on the
-  first delivery.
-- **`sfence.vma` shootdown**, once anything unmaps. Nothing does yet: the kernel table
-  is permanent and only ever grows at boot.
+- ~~**A per-hart control block reached through `tp`.**~~ Done: `tp` points at a
+  `cpu::Cpu` carrying the hart id and a dense logical index, installed by both Rust
+  entries and zeroed by the architecture entry so "is there one" has an answer.
+- **IPIs.** The natural next reach from HSM. Needs `SupervisorSoft` handled first, and
+  the trap subsystem is parked (§2.O), so there is nothing to deliver to yet.
+- **Cross-hart `sfence.vma` shootdown.** The *local* half landed in §2.P:
+  `arch::riscv64::tlb` owns the instruction and `AddressSpace::edit` fences after every
+  change, so a mapping made after boot is one the hardware sees. What is still missing
+  is telling the *other* harts, which is an IPI away. Nothing needs it today — the
+  kernel table is edited only by the boot hart, before any secondary is running.
 
 When those land, the calls to make are the **IPI** (EID `0x735049`) and **RFENCE**
 (EID `0x52464E43`) extensions, which take `hart_mask` and `hart_mask_base` *by value*.
@@ -1254,24 +1373,36 @@ optimisation and it has no observable effect until there is more than one addres
 space — which is why it was deferred, and why it should land *with* user paging
 rather than before it.
 
-### 4.3 RAM above the Sv39 direct-map capacity
+### 4.3 Memory outside the direct map's window
 
-The boot table uses all 512 root entries: 256 identity-map the low canonical half
-and 256 mirror the same physical range in the high half. `DIRECT_MAP_END` is
-therefore 256 GiB, the architectural capacity of this Sv39 layout rather than a
-tunable boot limit. `frame::init` warns and drops RAM beyond it; supporting that
-memory requires Sv48 or a different mapping layout.
+Since §2.P the window is **128 GiB**, half the Sv39 high half, so that `kernel_va` has
+the other half to hand out. Two consequences, both loud rather than silent:
+
+- RAM above it is dropped by `frame::init`, with a warning naming the byte count.
+- A *device* window above it is fatal, in `MachineMemory::check`, because a device the
+  kernel cannot alias is an address a future driver would take from `phys_to_virt`
+  and find unmapped. The message names `DIRECT_MAP_SPAN`.
+
+Raising the span costs `kernel_va` an equal amount, and no Sv39 machine is close to
+either limit. Genuinely needing both means Sv48 — a wider high half — not a different
+split of this one.
+
+Still open, and unrelated to the window: only the `/memory` bank containing the kernel
+is managed. Others are reported by name in the boot log and otherwise ignored. A
+multi-bank board therefore boots but loses memory, and `MachineMemory` is where a
+second bank would arrive.
 
 ### 4.4 Nice-to-haves, in rough order of value
 
-- **Superpages for aligned device windows.** QEMU virt's PLIC is 3 aligned MiB
-  mapped as 1536 4 KiB leaves. Picking the largest level that divides both base and
-  size would cut that to 3, at the cost of a size-must-divide argument.
-- **A reservation list rather than one-shot reserve.** `FrameAllocator::reserve`
-  handles the DTB; an initrd or DTB `/reserved-memory` nodes would each need
-  another call, which is fine, but nothing currently *enumerates* what was reserved.
-- **~34 dead-code warnings** in `plic`/`utils`/`trap`/`proc`. Unrelated to memory;
-  they have survived four stages untouched.
+- **Reclaiming the DTB.** It is withheld as three frames and never handed back, though
+  nothing reads the blob after `device_tree::init` — the table holds owned copies.
+  `reserve::list()` already records the range, and returning it is a `deallocate_at`
+  per frame, so this is a small, self-contained win.
+- **A growth path exercised on the target.** `crates/heap`'s tests cover the arithmetic
+  on the host, and `heap::init` runs the same `add_frames` path, but the `Grow` branch
+  in `GlobalAlloc::alloc` has not run in a boot: nothing has yet asked for more than
+  the initial 8 MiB. Forcing it in the self-test would cost 2 MiB of pool on every
+  boot, which is why it is a note rather than a test.
 
 ### 4.5 Explicitly out of scope here
 
@@ -1289,9 +1420,10 @@ Struck-through items are closed; kept so the history of each is legible.
 1. ~~DTB not reserved.~~ **Done** (§2.G) — `FrameAllocator::reserve` withholds
    `0x87e00000..0x87e02000`. Note the earlier suggested fix ("allocate over it and
    never free") was **impossible**: `allocate` cannot target an address.
-2. ~~Arbitrary 4 GiB boot-map limit.~~ **Done** (§4.3) — the Sv39 root is filled
-   completely. RAM beyond the resulting 256 GiB direct-map capacity is still
-   rejected explicitly.
+2. ~~Arbitrary 4 GiB boot-map limit.~~ **Done**, then revised (§2.P): the window is a
+   deliberate 128 GiB, because the direct map and `kernel_va` share one 256 GiB half
+   and the boundary between them has to be *somewhere*, stated once. RAM above it is
+   dropped and a device above it is fatal; see §4.3.
 3. ~~No free-by-PFN.~~ **Done** — `deallocate_at` (§2.E). Residual sharp edge: the
    *order* passed cannot be validated, so it is `unsafe` and the token-based
    `deallocate` stays the default. `frame::free_at` hardcodes order 0, correct for
@@ -1325,8 +1457,9 @@ Struck-through items are closed; kept so the history of each is legible.
 12. ~~Reservations are not enumerable.~~ **Done** (§2.J) — `frame::reservations()`
     records every withholding, the boot log prints from it, and `/reserved-memory` is
     now fed in rather than discovered and discarded.
-13. **~30 pre-existing dead-code warnings** in `plic`/`utils`/`trap`/`proc`.
-    Unrelated to memory; the count has not moved across six stages.
+13. ~~**~30 pre-existing dead-code warnings** in `plic`/`utils`/`trap`/`proc`.~~
+    Gone with the code that carried them: `trap`, `plic` and `proc` are in `attic/`
+    and no longer compiled. `cargo kbuild` is warning-free.
 14. ~~`stvec` undefined until `trap::init`.~~ **Done** (§2.O) — `boot.S` points it at
     `_trap_park` on entry and again after the high jump. Verified by A/B on the
     parked PC over the gdb stub; the control build silently *reset the machine* and
@@ -1335,6 +1468,18 @@ Struck-through items are closed; kept so the history of each is legible.
     The `remote_sfence_vma*` pair took a range and discarded it. Modern IPI/RFENCE
     EIDs recorded in §4.1, to be written with their first caller so they can be
     tested rather than inspected.
+16. ~~No way to fence the TLB after an edit.~~ **Done** (§2.P) — `arch::riscv64::tlb`
+    owns `sfence.vma` and the `satp` write; `AddressSpace::edit` fences, `walk` cannot
+    write, and a bare mapper is unreachable. Cross-hart shootdown is still item 4.1.
+17. ~~The direct map and `kernel_va` both owned the high half.~~ **Done** (§2.P) — one
+    constant split, `kernel_va::START` derived from it, and the boot table mirroring
+    only the window so the two tables agree about what is unmapped.
+18. ~~`memory` read the device tree in three places.~~ **Done** (§2.P) —
+    `machine::MachineMemory` is the single seam and the single validator; the
+    dependency now runs `device_tree → memory` only.
+19. ~~The heap had no injected policy and no tests.~~ **Done** (§2.P) — `crates/heap`,
+    eight host tests, and a ceiling derived from the pool instead of a fixed 64 MiB
+    that a small board could never reach.
 
 
 ---
@@ -1342,8 +1487,9 @@ Struck-through items are closed; kept so the history of each is legible.
 ## 6. Commands
 
 ```bash
-cargo test -p paging --features std   # 43 — the --features std is NOT optional
+cargo test -p paging --features std   # 53 — the --features std is NOT optional
 cargo test -p frame-allocator         # 25
+cargo test -p heap                    #  8
 cargo kbuild                          # build kernel (riscv64imac-unknown-none-elf)
 cargo krun                            # boot under QEMU + OpenSBI (Ctrl-A X to exit)
 
@@ -1358,7 +1504,7 @@ and it is the fastest way to check a change to `direct_map`:
 
 ```bash
 ELF=target/riscv64imac-unknown-none-elf/debug/kernel
-llvm-nm "$ELF" | grep -E 'EARLY_PGTABLE|EARLY_SATP|_va_offset'
+llvm-nm -C "$ELF" | grep -E 'boot_table::TABLE|_va_offset'
 llvm-readelf --section-headers "$ELF" | grep -E '\.text|\.rodata'   # VMA vs LMA skew
 llvm-readelf -r "$ELF"                                             # must be: no relocations
 llvm-objdump -d --start-address=0xffffffc080200040 \

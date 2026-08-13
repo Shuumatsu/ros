@@ -1,6 +1,7 @@
 pub(crate) mod boot;
 pub mod interrupts;
 pub mod sbi;
+pub mod tlb;
 
 // Hart identity lives in `cpu`: `tp` points at a per-hart control block, and
 // reading a field out of it is that module's business, not the ISA layer's.

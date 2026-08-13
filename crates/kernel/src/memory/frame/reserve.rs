@@ -6,50 +6,40 @@
 //! carve-out of 200 frames.
 
 use frame_allocator::{FrameAllocator, FrameRange};
-use heapless::{String, Vec};
+use heapless::Vec;
 
 use paging::MemoryAddr;
 use paging::sv39::{PAGE_SIZE, PhysicalAddr};
 
+use crate::memory::machine::{MAX_FOREIGN, PhysRange};
 use crate::sync::IrqMutex;
 use crate::utils::ByteSize;
-
-/// Longest reservation label kept. Device-tree node names reach ~20 characters.
-const RESERVATION_NAME_LEN: usize = 40;
-
-/// Reservations recordable: the device-tree blob plus every firmware carve-out.
-const MAX_RESERVATIONS: usize = 24;
 
 /// One physical range withheld from the pool, and what withheld it.
 #[derive(Clone, Debug)]
 pub struct Reservation {
-    name: String<RESERVATION_NAME_LEN>,
-    /// First withheld physical address.
-    pub start: PhysicalAddr,
-    /// Exclusive end.
-    pub end: PhysicalAddr,
-    /// Frames this record was the first to withhold. Not derivable from `start..end`:
+    /// The range as actually withheld: rounded outward to whole frames and clipped to the
+    /// pool, so it is what left the allocator rather than what was asked for.
+    pub range: PhysRange,
+    /// Frames this record was the first to withhold. Not derivable from `range`:
     /// carve-outs may overlap, so summed extents exceed what left the pool.
     pub newly_withheld: usize,
 }
 
 impl Reservation {
-    /// Why this range is withheld.
-    pub fn name(&self) -> &str { &self.name }
-
     /// Frames this range spans, overlap included.
-    pub fn frames(&self) -> usize { self.end.sub_addr(self.start) / PAGE_SIZE }
+    pub fn frames(&self) -> usize { self.range.size / PAGE_SIZE }
 }
 
 /// Everything withheld from the pool, in the order it was withheld.
-static RESERVATIONS: IrqMutex<Vec<Reservation, MAX_RESERVATIONS>> = IrqMutex::new(Vec::new());
+static RESERVATIONS: IrqMutex<Vec<Reservation, MAX_FOREIGN>> = IrqMutex::new(Vec::new());
 
 /// Every range withheld from the pool, cloned out so no lock is held by the caller.
-pub fn list() -> Vec<Reservation, MAX_RESERVATIONS> {
+pub fn list() -> Vec<Reservation, MAX_FOREIGN> {
     RESERVATIONS.with(|reservations| reservations.clone())
 }
 
-/// Withhold `[start, end)` from the pool, recording it as `name`.
+/// Withhold `foreign` from the pool, recording it under its own name.
 ///
 /// Rounded **outward**: a partially covered frame is still a frame that must not be
 /// handed out. Only the overlap with the pool is withheld, and a range that misses it
@@ -57,11 +47,11 @@ pub fn list() -> Vec<Reservation, MAX_RESERVATIONS> {
 fn withhold(
     allocator: &mut FrameAllocator<'static>,
     managed: FrameRange,
-    withheld: &mut Vec<FrameRange, MAX_RESERVATIONS>,
-    name: &str,
-    start: PhysicalAddr,
-    end: PhysicalAddr,
+    withheld: &mut Vec<FrameRange, MAX_FOREIGN>,
+    foreign: &PhysRange,
 ) {
+    let (start, end) = (foreign.base, foreign.end());
+    let name = foreign.name();
     let first = start.align_down(PAGE_SIZE).ppn().max(managed.start());
     let last = end.align_up(PAGE_SIZE).ppn().min(managed.end());
 
@@ -75,7 +65,7 @@ fn withhold(
     // is a real conflict — but overlap between carve-outs is not, and the outward
     // rounding above manufactures it. Firmware supplies genuine duplicates too, via both
     // the FDT rsvmap and a /reserved-memory node. Disjointness belongs here rather than
-    // in the device tree, which would have to lose the names to merge.
+    // in whoever described the machine, which would have to lose the names to merge.
     let free_before = allocator.free_frames();
     let mut newly = 0;
     for frame in range.start()..range.end() {
@@ -93,7 +83,7 @@ fn withhold(
         // range overlapping this one would then hit the allocator's rejection and
         // panic, so this has to be loud.
         println!(
-            "[memory] WARNING: more than {MAX_RESERVATIONS} reservations; overlap detection \
+            "[memory] WARNING: more than {MAX_FOREIGN} reservations; overlap detection \
              is now incomplete"
         );
     }
@@ -106,47 +96,45 @@ fn withhold(
         "reserving {newly} new frames for {name} did not remove them from the pool"
     );
 
+    let withheld_base = PhysicalAddr::from_ppn(range.start());
     let record = Reservation {
-        name: crate::utils::truncated(name),
-        start: PhysicalAddr::from_ppn(range.start()),
-        end: PhysicalAddr::from_ppn(range.end()),
+        range: PhysRange::new(
+            name,
+            withheld_base,
+            PhysicalAddr::from_ppn(range.end()).sub_addr(withheld_base),
+        ),
         newly_withheld: newly,
     };
     if RESERVATIONS.with(|reservations| reservations.push(record)).is_err() {
         // The frames are withheld either way; only the record is lost. Say so, since
         // the list is what the boot log and any future reclaim rely on.
-        println!("[memory] WARNING: more than {MAX_RESERVATIONS} reservations; {name} unrecorded");
+        println!("[memory] WARNING: more than {MAX_FOREIGN} reservations; {name} unrecorded");
     }
 }
 
-/// Withhold every physical range the device tree reports as not ours: the blob itself,
+/// Withhold every physical range the machine reports as not ours: the device-tree blob,
 /// firmware carve-outs, an initrd. On QEMU virt the blob is inside the pool and the
 /// carve-outs are below it — safe by accident there, but firmware reserving above the
 /// kernel is entirely normal.
 ///
 /// Takes the allocator by reference rather than reaching for the global one: this runs
 /// before publication, so no frame can be vended in between.
-pub fn foreign_memory(allocator: &mut FrameAllocator<'static>, managed: FrameRange) {
-    let foreign = crate::device_tree::foreign_ram();
+pub fn foreign_memory(
+    allocator: &mut FrameAllocator<'static>,
+    managed: FrameRange,
+    foreign: &[PhysRange],
+) {
     assert!(
         !foreign.is_empty(),
-        "no foreign RAM discovered, not even the device-tree blob; \
-         call device_tree::init before memory::init"
+        "the machine reports no foreign RAM at all, not even a device-tree blob; \
+         something described it wrong"
     );
     // The frame ranges withheld so far, so a later carve-out overlapping an earlier one
     // is recognised rather than rejected. Local: it only makes the sequence of calls
     // order-independent.
-    let mut withheld: Vec<FrameRange, MAX_RESERVATIONS> = Vec::new();
+    let mut withheld: Vec<FrameRange, MAX_FOREIGN> = Vec::new();
     for range in foreign {
-        // The device tree reports raw integers; this is where they become addresses.
-        withhold(
-            allocator,
-            managed,
-            &mut withheld,
-            range.name(),
-            PhysicalAddr::new(range.base),
-            PhysicalAddr::new(range.end()),
-        );
+        withhold(allocator, managed, &mut withheld, range);
     }
 }
 
@@ -164,10 +152,10 @@ pub fn report() {
         let note = if overlap > 0 { " (already covered)" } else { "" };
         println!(
             "[memory]     {:<24} {:#x}..{:#x} ({}){}",
-            entry.name(),
-            entry.start,
-            entry.end,
-            ByteSize(entry.end.sub_addr(entry.start)),
+            entry.range.name(),
+            entry.range.base,
+            entry.range.end(),
+            ByteSize(entry.range.size),
             note
         );
     }

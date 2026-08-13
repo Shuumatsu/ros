@@ -5,9 +5,10 @@
 //! one device can settle on different nodes, and nothing downstream can tell.
 
 use fdt_raw::{Fdt, Node};
+use paging::PhysicalAddr;
 
-use super::region::PhysRegion;
-use super::table::{Device, DeviceTable, MAX_FOREIGN, MAX_HART_IDS, MAX_MMIO, Ram};
+use super::table::{Device, DeviceTable, MAX_HART_IDS, Ram};
+use crate::memory::machine::{MAX_FOREIGN, MAX_MMIO, NAME_LEN, PhysRange};
 
 /// `compatible` strings for the devices the kernel resolves by name.
 const UART: &[&str] = &["ns16550a", "ns16550"];
@@ -78,7 +79,7 @@ fn device_of(node: &Node<'_>) -> Option<Device> {
 
 /// Record a foreign range, warning if the list is full rather than dropping it
 /// quietly — an unrecorded carve-out is memory the allocator will hand out.
-fn push_foreign(foreign: &mut heapless::Vec<PhysRegion, MAX_FOREIGN>, entry: PhysRegion) {
+fn push_foreign(foreign: &mut heapless::Vec<PhysRange, MAX_FOREIGN>, entry: PhysRange) {
     if let Err(dropped) = foreign.push(entry) {
         println!(
             "[dtb] WARNING: more than {MAX_FOREIGN} foreign RAM ranges; {} at {:#x} is unreserved",
@@ -88,11 +89,20 @@ fn push_foreign(foreign: &mut heapless::Vec<PhysRegion, MAX_FOREIGN>, entry: Phy
     }
 }
 
+/// A `reg` cell as a physical address. The tree reports raw integers; this is the one place
+/// they become addresses, so nothing downstream has to decide what they are.
+fn phys(address: u64) -> PhysicalAddr { PhysicalAddr::new(address as usize) }
+
 /// Walk the tree once and build the device table.
 ///
 /// `kernel_pa` selects which `/memory` bank is ours: the one containing the kernel's
 /// own physical load address, derived rather than hardcoded.
-pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) -> DeviceTable {
+pub fn discover(
+    fdt: &Fdt<'_>,
+    blob: PhysicalAddr,
+    blob_size: usize,
+    kernel_pa: PhysicalAddr,
+) -> DeviceTable {
     let mut mmio = heapless::Vec::new();
     let mut foreign = heapless::Vec::new();
     let mut hart_ids = heapless::Vec::new();
@@ -105,7 +115,7 @@ pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) 
 
     // The blob is foreign RAM like any other: it sits in the pool and the allocator
     // would vend it.
-    let blob_region = PhysRegion::new("device tree blob", blob, blob_size);
+    let blob_region = PhysRange::new("device tree blob", blob, blob_size);
     push_foreign(&mut foreign, blob_region.clone());
 
     // The FDT header's reservation block: the spec's *other* mechanism, in the header
@@ -114,11 +124,11 @@ pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) 
         if entry.size == 0 {
             continue;
         }
-        let mut label: heapless::String<{ super::region::NAME_LEN }> = heapless::String::new();
+        let mut label: heapless::String<NAME_LEN> = heapless::String::new();
         let _ = core::fmt::Write::write_fmt(&mut label, format_args!("fdt-rsvmap[{index}]"));
         push_foreign(
             &mut foreign,
-            PhysRegion::new(&label, entry.address as usize, entry.size as usize),
+            PhysRange::new(&label, phys(entry.address), entry.size as usize),
         );
     }
 
@@ -134,8 +144,8 @@ pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) 
         // `/chosen` and `/cpus` carry properties rather than a `reg`, so they are
         // read here rather than by a targeted lookup of their own.
         if &*path == "/chosen" {
-            if let Some((start, end)) = initrd_range(&node) {
-                push_foreign(&mut foreign, PhysRegion::new("initrd", start, end - start));
+            if let Some((base, size)) = initrd_range(&node) {
+                push_foreign(&mut foreign, PhysRange::new("initrd", base, size));
             }
             continue;
         }
@@ -154,8 +164,8 @@ pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) 
             // rather than dropped, since "one bank" and "the only bank" differ by however
             // much RAM the allocator never hears about.
             for reg in node.reg().into_iter().flatten() {
-                let base = reg.address as usize;
-                let end = base.saturating_add(reg.size.unwrap_or(0) as usize);
+                let base = phys(reg.address);
+                let end = phys(reg.address.saturating_add(reg.size.unwrap_or(0)));
                 if (base..end).contains(&kernel_pa) {
                     ram = Some(Ram { base, end });
                 } else if end > base {
@@ -204,7 +214,7 @@ pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) 
                 println!("[dtb] WARNING: {name} has a zero-length reg at {:#x}; skipped", reg.address);
                 continue;
             }
-            let entry = PhysRegion::new(name, reg.address as usize, size as usize);
+            let entry = PhysRange::new(name, phys(reg.address), size as usize);
 
             // The two lists have different capacities, so they are different types
             // and cannot share one push site; only the diagnostic is shared.
@@ -243,18 +253,17 @@ pub fn discover(fdt: &Fdt<'_>, blob: usize, blob_size: usize, kernel_pa: usize) 
     }
 }
 
-/// The initrd's extent, if the previous stage loaded one.
+/// The initrd's base and length, if the previous stage loaded one.
 ///
 /// `fdt_raw`'s `Chosen` does not expose it, so the two properties are read directly.
 /// They are `#address-cells`-sized, so 8 bytes here and 4 on a 32-bit tree.
-fn initrd_range(chosen: &Node<'_>) -> Option<(usize, usize)> {
+fn initrd_range(chosen: &Node<'_>) -> Option<(PhysicalAddr, usize)> {
     let cell = |key: &str| {
         chosen
             .find_property(key)
             .and_then(|prop| prop.as_u64().or_else(|| prop.as_u32().map(u64::from)))
-            .map(|value| value as usize)
     };
     let start = cell("linux,initrd-start")?;
     let end = cell("linux,initrd-end")?;
-    (end > start).then_some((start, end))
+    (end > start).then(|| (phys(start), (end - start) as usize))
 }

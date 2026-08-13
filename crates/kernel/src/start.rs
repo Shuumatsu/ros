@@ -18,9 +18,10 @@ pub(crate) unsafe extern "C" fn boot(hartid: usize, dtb: usize, va_offset: usize
     cpu::print_info();
 
     println!("initializing memory...");
-    // `memory` owns the ordering; it is handed the hart list rather than looking it up,
-    // since `cpu` decides that and already depends on `memory`. This knows both.
-    memory::init(cpu::secondary_hart_ids());
+    // `memory` owns the ordering; it is handed the machine description and the hart list
+    // rather than looking either up, since `device_tree` and `cpu` own those and both
+    // already depend on `memory`. This knows all three.
+    memory::init(crate::device_tree::machine_memory(), cpu::secondary_hart_ids());
     println!("initializing memory completed");
 
     cpu::start_secondaries();

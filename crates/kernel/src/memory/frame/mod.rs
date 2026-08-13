@@ -14,13 +14,14 @@ mod reserve;
 mod self_test;
 
 use core::num::NonZeroUsize;
-use core::sync::atomic::{AtomicUsize, Ordering};
 
 use frame_allocator::{FrameAllocator, FrameBlock, FrameRange, metadata_layout};
+use spin::Once;
 
 use paging::MemoryAddr;
 use paging::sv39::{PAGE_SIZE, PhysicalAddr};
 
+use crate::memory::machine::PhysRange;
 use crate::memory::phys_to_virt;
 use crate::sync::IrqMutex;
 use crate::utils::ByteSize;
@@ -33,21 +34,17 @@ pub use self_test::run as self_test;
 /// already inside this lock would deadlock against itself.
 static FRAME_ALLOCATOR: IrqMutex<Option<FrameAllocator<'static>>> = IrqMutex::new(None);
 
-/// Physical span this module took at [`init`], bitmap included. Zero until then. Bare
-/// words because there is no atomic address type; [`owned_range`] puts it back on.
-static OWNED_START: AtomicUsize = AtomicUsize::new(0);
-static OWNED_END: AtomicUsize = AtomicUsize::new(0);
+/// Frames this module took at [`init`], bitmap included — one value, so its two ends
+/// cannot be read at different times or disagree.
+static OWNED: Once<FrameRange> = Once::new();
 
 /// The physical span this module owns, **including** the metadata bitmap.
 ///
-/// [`crate::memory::kernel_table`] maps exactly this and [`crate::memory::kernel_va`]
-/// starts where it ends. Not the allocator's `range()`, which excludes the bitmap — that
-/// needs mapping too, since this module writes it.
+/// [`crate::memory::kernel_table`] maps exactly this. Not the allocator's `range()`, which
+/// excludes the bitmap — that needs mapping too, since this module writes it.
 pub fn owned_range() -> (PhysicalAddr, PhysicalAddr) {
-    let start = PhysicalAddr::new(OWNED_START.load(Ordering::Relaxed));
-    let end = PhysicalAddr::new(OWNED_END.load(Ordering::Relaxed));
-    assert!(start < end, "frame::owned_range queried before frame::init");
-    (start, end)
+    let owned = OWNED.get().expect("frame::owned_range queried before frame::init");
+    (PhysicalAddr::from_ppn(owned.start()), PhysicalAddr::from_ppn(owned.end()))
 }
 
 /// Pool occupancy, in frames.
@@ -97,22 +94,23 @@ impl Frames {
     pub fn leak(self) -> PhysicalAddr { self.base() }
 }
 
-/// Bring the allocator up over free physical RAM `[free_start, ram_end)`.
+/// Bring the allocator up over free physical RAM `[free_start, ram_end)`, withholding
+/// `foreign`.
 ///
 /// The bitmap is reserved from the front of the range and excluded from the
-/// managed frames. RAM beyond the Sv39 direct-map capacity is dropped (loudly),
+/// managed frames. RAM beyond the direct map's window is dropped (loudly),
 /// because its frames would have no high-half alias.
-pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr) {
+pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr, foreign: &[PhysRange]) {
     let direct_map_end = crate::memory::direct_map::DIRECT_MAP_END;
     assert!(
         free_start < direct_map_end,
-        "kernel image top {free_start:#x} lies outside the Sv39 direct map ending at \
+        "kernel image top {free_start:#x} lies outside the direct map's window, which ends at \
          {direct_map_end:#x}"
     );
     let usable_end = ram_end.min(direct_map_end);
     if ram_end > direct_map_end {
         println!(
-            "[memory] WARNING: {} of RAM above the {:#x} Sv39 direct-map limit is unmanaged",
+            "[memory] WARNING: {} of RAM above the direct map's {:#x} window is unmanaged",
             ByteSize(ram_end.sub_addr(direct_map_end)),
             direct_map_end
         );
@@ -144,12 +142,11 @@ pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr) {
         FrameAllocator::new(managed, bitmap).expect("frame allocator initialization failed")
     };
     // Before publication, so nothing can be vended out of a carve-out in between.
-    reserve::foreign_memory(&mut allocator, managed);
+    reserve::foreign_memory(&mut allocator, managed, foreign);
     FRAME_ALLOCATOR.with(|slot| *slot = Some(allocator));
 
     // The span taken, bitmap included, rather than `managed`; see `owned_range`.
-    OWNED_START.store(PhysicalAddr::from_ppn(start_ppn).bits(), Ordering::Relaxed);
-    OWNED_END.store(PhysicalAddr::from_ppn(end_ppn).bits(), Ordering::Relaxed);
+    OWNED.call_once(|| full);
 }
 
 /// Print what the kernel owns, what is left, and what was withheld.

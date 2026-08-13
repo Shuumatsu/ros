@@ -1,25 +1,26 @@
 //! The kernel heap: this crate's `#[global_allocator]`.
 //!
-//! A buddy allocator over frames from [`super::frame`], reached through the direct map —
-//! so it is a customer of the frame allocator, not a peer, and growing needs no
-//! page-table work. Bookkeeping that is not page-shaped belongs here; anything
-//! page-sized comes from [`super::frame`] directly.
+//! Three things live here and nothing else: the lock, the frames, and the limits. The
+//! allocator itself is [`heap::GrowableHeap`] — a crate, so its growth arithmetic is
+//! exercised on the host rather than only on the way through a boot.
 //!
-//! [`INITIAL_SIZE`] is where it starts, not what it is: an allocation that cannot be
-//! served takes more frames and retries. [`MAX_SIZE`] is the backstop — a runaway leak
-//! dies here, with statistics, rather than draining the pool until a page table is
-//! refused a frame.
+//! Frames come from [`super::frame`] and are reached through the direct map, so this is a
+//! customer of the frame allocator rather than a peer and growing needs no page-table work.
+//! Bookkeeping that is not page-shaped belongs here; anything page-sized comes from
+//! [`super::frame`] directly.
+//!
+//! The heap asks for memory and this module fetches it, which is what keeps the two locks
+//! ordered: the heap's is released before the frame allocator's is taken, never nested.
 
 mod self_test;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::{self, NonNull};
 
-use buddy_system_allocator::Heap;
+use heap::{GrowableHeap, Limits, Outcome, Stats};
 
-use paging::MemoryAddr;
-use paging::VirtualAddr;
 use paging::sv39::PAGE_SIZE;
+use paging::{MemoryAddr, VirtualAddr};
 
 use crate::memory::{frame, phys_to_virt};
 use crate::sync::IrqMutex;
@@ -37,55 +38,43 @@ const INITIAL_SIZE: usize = 8 * 1024 * 1024;
 /// time, so a smaller step would only scatter the heap across the pool.
 const GROW_STEP: usize = 2 * 1024 * 1024;
 
-/// Ceiling on the whole heap; see the module docs.
+/// Ceiling on the whole heap, unless the machine is too small to spare it.
 const MAX_SIZE: usize = 64 * 1024 * 1024;
 
-#[global_allocator]
-static HEAP: KernelHeap = KernelHeap(IrqMutex::new(Heap::new()));
-
-/// The global allocator: a buddy heap behind a lock that masks interrupts.
+/// Largest share of the frame pool the heap may ever hold, as a divisor.
 ///
-/// `buddy_system_allocator`'s own `LockedHeap` is deliberately unused — its lock is a
-/// bare spin lock, and a `#[global_allocator]` is the one lock guaranteed to be reachable
-/// from an interrupt handler. See [`IrqMutex`].
-struct KernelHeap(IrqMutex<Heap<ORDER>>);
+/// A fixed ceiling is no backstop on a machine whose RAM is smaller than the ceiling: the
+/// pool drains first and the page tables are what get refused. So the limit is whichever of
+/// the two is tighter, and the boot log says which one won.
+const MAX_POOL_SHARE: usize = 4;
+
+#[global_allocator]
+static HEAP: KernelHeap = KernelHeap(IrqMutex::new(GrowableHeap::new()));
+
+/// The global allocator: a growable buddy heap behind a lock that masks interrupts.
+///
+/// The lock is an [`IrqMutex`] rather than a bare spin lock because a `#[global_allocator]`
+/// is the one lock guaranteed to be reachable from an interrupt handler — a handler that
+/// allocated while ordinary code held a plain spin lock would deadlock against itself.
+struct KernelHeap(IrqMutex<GrowableHeap<ORDER>>);
 
 impl KernelHeap {
-    /// Take `pages` frames from the pool and give them to the buddy allocator, returning
-    /// where they landed and how many bytes arrived.
+    /// Take at least `at_least` bytes from the frame pool and give them to the heap,
+    /// returning where they landed and how many arrived.
     ///
-    /// The one place frames become heap; [`init`] and [`grow`](Self::grow) differ only in
-    /// how they react to failure. The frame allocation happens with the heap lock
-    /// *released*, so the heap lock is never held outside the frame lock.
-    fn add_frames(&self, pages: usize) -> Option<(VirtualAddr, usize)> {
-        let frames = frame::alloc_contiguous(pages)?;
+    /// The one place frames become heap. The frame allocation happens with the heap lock
+    /// *released*, which is the whole reason the heap asks instead of fetching: the heap
+    /// lock is never held outside the frame lock.
+    fn add_frames(&self, at_least: usize) -> Option<(VirtualAddr, usize)> {
+        let frames = frame::alloc_contiguous(at_least.div_ceil(PAGE_SIZE))?;
         // What the pool gave us, not what was asked for; the difference would strand.
         let len = frames.len();
         let start = phys_to_virt(frames.leak());
         // SAFETY: pool frames now owned by the heap for good, mapped read-write through
         // the direct map, reached at no other address, and never released — which is what
         // lets the heap keep its free lists inside them.
-        self.0.with(|heap| unsafe { heap.add_to_heap(start.bits(), start.bits() + len) });
+        self.0.with(|heap| unsafe { heap.add_region(start.bits(), len) });
         Some((start, len))
-    }
-
-    /// Widen the heap by at least `at_least` bytes, or say why not.
-    fn grow(&self, at_least: usize) -> bool {
-        let total = self.0.with(|heap| heap.stats_total_bytes());
-        let step = at_least.max(GROW_STEP).next_multiple_of(PAGE_SIZE);
-        if total + step > MAX_SIZE {
-            println!(
-                "[memory] kernel heap refusing to grow past its {} ceiling ({} in use)",
-                ByteSize(MAX_SIZE),
-                ByteSize(total)
-            );
-            return false;
-        }
-        if self.add_frames(step / PAGE_SIZE).is_none() {
-            println!("[memory] kernel heap cannot grow: the frame pool is exhausted");
-            return false;
-        }
-        true
     }
 }
 
@@ -93,17 +82,39 @@ impl KernelHeap {
 // vended again; `dealloc` returns a block to the same allocator under the same lock.
 unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if let Some(block) = self.0.with(|heap| heap.alloc(layout).ok()) {
-            return block.as_ptr();
-        }
-        // Dry. `grow` sizes its step to cover this request, so one retry is enough: a
-        // second failure is out-of-memory, not a too-small step.
-        if self.grow(layout.size()) {
-            if let Some(block) = self.0.with(|heap| heap.alloc(layout).ok()) {
-                return block.as_ptr();
+        let mut grown = false;
+        loop {
+            match self.0.with(|heap| heap.allocate(layout)) {
+                Outcome::Served(block) => return block.as_ptr(),
+                Outcome::Grow { at_least } => {
+                    // Growing twice for one request would mean the frames arrived and did
+                    // not help, which the sizing rules out: the heap asks for the buddy
+                    // block this request is served from, and the pool vends a run aligned
+                    // to its own size. Bounded anyway — an unbounded retry against a
+                    // mistake in either half is an infinite loop inside the allocator.
+                    // The `alloc_error` handler reports the numbers.
+                    if grown {
+                        return ptr::null_mut();
+                    }
+                    grown = true;
+                    if self.add_frames(at_least).is_none() {
+                        println!("[memory] kernel heap cannot grow: the frame pool is exhausted");
+                        return ptr::null_mut();
+                    }
+                }
+                Outcome::AtCeiling { wanted } => {
+                    let Stats { total, .. } = self.0.with(|heap| heap.stats());
+                    println!(
+                        "[memory] kernel heap refusing to grow by {} past its {} ceiling \
+                         ({} given out)",
+                        ByteSize(wanted),
+                        ByteSize(self.0.with(|heap| heap.limits()).max),
+                        ByteSize(total)
+                    );
+                    return ptr::null_mut();
+                }
             }
         }
-        ptr::null_mut()
     }
 
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
@@ -112,25 +123,14 @@ unsafe impl GlobalAlloc for KernelHeap {
         };
         // SAFETY: forwarded from the trait's contract — `block` came from `alloc` with
         // this `layout` and is not freed twice.
-        self.0.with(|heap| unsafe { heap.dealloc(block, layout) });
+        self.0.with(|heap| unsafe { heap.deallocate(block, layout) });
     }
 }
 
-/// Heap occupancy, in bytes.
-#[derive(Clone, Copy, Debug)]
-pub struct Stats {
-    /// Bytes handed out, after rounding each request up to a buddy block.
-    pub used: usize,
-    /// Bytes the heap has been given, including what is free.
-    pub total: usize,
-}
-
 /// What the heap is holding right now.
-pub fn stats() -> Stats {
-    HEAP.0.with(|heap| Stats { used: heap.stats_alloc_actual(), total: heap.stats_total_bytes() })
-}
+pub fn stats() -> Stats { HEAP.0.with(|heap| heap.stats()) }
 
-/// Give the heap its first frames. Call once, on the boot hart, after
+/// Give the heap its limits and its first frames. Call once, on the boot hart, after
 /// [`super::frame::init`].
 ///
 /// # Panics
@@ -138,20 +138,36 @@ pub fn stats() -> Stats {
 /// If the pool cannot produce [`INITIAL_SIZE`] contiguous bytes. Nothing to fall back
 /// to: the kernel page table's region list is a `Vec`.
 pub fn init() {
+    let pool = frame::stats().expect("heap::init ran before frame::init").total * PAGE_SIZE;
+    // Whole steps: the heap only ever grows by one, so a remainder is unreachable anyway.
+    // Never below the initial size — that has to fit, and a pool too small to hold it fails
+    // in `add_frames` below, where the message is about the memory rather than the policy.
+    let share = (pool / MAX_POOL_SHARE) / GROW_STEP * GROW_STEP;
+    let ceiling = MAX_SIZE.min(share).max(INITIAL_SIZE);
+    let limits = Limits { initial: INITIAL_SIZE, step: GROW_STEP, max: ceiling };
+    HEAP.0.with(|heap| heap.configure(limits));
+
     let (start, len) =
-        HEAP.add_frames(INITIAL_SIZE / PAGE_SIZE).expect("no contiguous RAM for the kernel heap");
+        HEAP.add_frames(limits.initial).expect("no contiguous RAM for the kernel heap");
     println!(
         "[memory] heap:   {:#x}..{:#x} ({}, virtual; grows by {} up to {})",
         start,
         start.add(len),
         ByteSize(len),
-        ByteSize(GROW_STEP),
-        ByteSize(MAX_SIZE)
+        ByteSize(limits.step),
+        ByteSize(limits.max)
     );
+    if ceiling < MAX_SIZE {
+        println!(
+            "[memory]   ceiling is 1/{MAX_POOL_SHARE} of the {} pool, not the {} default",
+            ByteSize(pool),
+            ByteSize(MAX_SIZE)
+        );
+    }
 }
 
 /// Nothing can be done about a failed kernel allocation: no process to kill, no caller
-/// that checked. `alloc` has already tried to grow, so a `total` well below [`MAX_SIZE`]
+/// that checked. `alloc` has already tried to grow, so a `total` well below the ceiling
 /// means the *pool* ran out.
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {

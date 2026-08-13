@@ -3,7 +3,7 @@
 use paging::sv39::{PAGE_OFFSET_BITS, PPN_BITS, PteFlags};
 use paging::{PhysicalAddr, Satp, Table};
 
-use super::direct_map::VA_OFFSET;
+use super::direct_map::{DIRECT_MAP_SPAN, VA_OFFSET};
 
 /// Blanket rights, `A`/`D` pre-set so the walker never writes back into a table living in
 /// `.rodata`. Temporary: [`super::kernel_table`] replaces every leaf once there is an
@@ -14,8 +14,13 @@ const BOOT: PteFlags = PteFlags::READ_WRITE_EXECUTE.union(PteFlags::ACCESS).unio
 ///
 /// A `const` initializer, so it is bytes in the image rather than code — the code that
 /// would build it could not reach its own `&'static`s yet.
+///
+/// The high half covers the direct map's window and no more, so the addresses
+/// [`super::kernel_va`] hands out are unmapped here exactly as they are in the finished
+/// table — a stray write to one faults instead of landing on whatever physical memory the
+/// blanket mapping would have aliased.
 #[used]
-pub(crate) static TABLE: Table = Table::identity_and_offset(VA_OFFSET, BOOT);
+pub(crate) static TABLE: Table = Table::identity_and_offset(VA_OFFSET, DIRECT_MAP_SPAN, BOOT);
 
 /// The `satp` for [`TABLE`], in the two pieces assembly can assemble it from.
 ///

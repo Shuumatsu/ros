@@ -5,25 +5,26 @@
 //! `memory::init` — in fact before anything prints, since the console learns the UART
 //! base from here.
 //!
-//! One walk, one table: [`walk`] traverses, [`table`] keeps the single copy, [`region`] is
-//! a named range, [`report`] prints. Everything the kernel needs comes from the accessors
-//! below, never from a platform constant.
+//! One walk, one table: [`walk`] traverses, [`table`] keeps the single copy, [`report`]
+//! prints. Everything the kernel needs comes from the accessors below, never from a
+//! platform constant; memory bring-up takes all of its share in one go, as
+//! [`machine_memory`].
 //!
 //! **Known gap:** a `reg` address is used as a CPU physical address directly, which is
 //! silently wrong where `/soc` declares a non-identity `ranges`. `Fdt::translate_address`
 //! borrows the blob while `Node::path()` returns an owned string, so composing them means
 //! reimplementing the `ranges` walk here. QEMU virt is identity, so it has never bitten.
 
-mod region;
 mod report;
 mod table;
 mod walk;
 
-pub use region::PhysRegion;
 pub use report::summary;
 
 use fdt_raw::Fdt;
 use paging::PhysicalAddr;
+
+use crate::memory::MachineMemory;
 
 /// Parse the device tree at `dtb_ptr` and record the hardware the kernel needs.
 ///
@@ -52,12 +53,25 @@ pub unsafe fn init(dtb_ptr: usize) {
     let kernel_pa = crate::memory::virt_to_phys(crate::memory::layout::text_start());
     let size = fdt.header().totalsize as usize;
 
-    table::TABLE.call_once(|| walk::discover(&fdt, dtb_ptr, size, kernel_pa.bits()));
+    table::TABLE.call_once(|| walk::discover(&fdt, PhysicalAddr::new(dtb_ptr), size, kernel_pa));
 }
 
-/// Exclusive end of the RAM region backing the kernel: the authoritative RAM top.
-pub fn ram_end() -> Option<usize> {
-    table::get().map(|t| t.ram.end)
+/// Everything [`crate::memory::init`] needs to know about physical memory, as one value.
+///
+/// The whole of this module's contribution to memory bring-up, in one call: `memory` reads
+/// nothing out of the tree itself, so a board without an FDT means another builder of this
+/// struct and no change over there.
+///
+/// # Panics
+///
+/// Before [`init`], since none of it is known until the tree has been walked.
+pub fn machine_memory() -> MachineMemory<'static> {
+    let table = table::get().expect("device tree not parsed; call device_tree::init first");
+    MachineMemory {
+        ram_end: table.ram.end,
+        foreign: table.foreign.as_slice(),
+        mmio: table.mmio.as_slice(),
+    }
 }
 
 /// Primary UART base. No address is hardcoded anywhere — the console falls back to the
@@ -72,27 +86,6 @@ pub fn uart_base() -> Option<usize> {
 /// what to do without a clock rather than being handed a fabricated frequency.
 pub fn timebase_hz() -> Option<usize> {
     table::get().and_then(|t| t.timebase_hz)
-}
-
-/// Every MMIO window the device tree describes — the single answer to "where is device
-/// memory", and a genuine walk rather than a list of the devices driven today, so a future
-/// driver finds its window here.
-///
-/// A window says the *device* exists, not that S-mode may touch it: PMP is a separate
-/// layer, and denies the CLINT on QEMU virt.
-pub fn mmio_regions() -> &'static [PhysRegion] {
-    table::get().map(|t| t.mmio.as_slice()).unwrap_or(&[])
-}
-
-/// Every RAM range that exists but is not the kernel's to hand out; the frame allocator
-/// would otherwise vend all of it.
-///
-/// Four sources, since honouring some of them is indistinguishable from honouring none:
-/// `/reserved-memory`, the older FDT `off_mem_rsvmap` block (used by U-Boot and coreboot),
-/// `/chosen`'s initrd, and the blob itself. Overlap is expected — `memory::frame` owns
-/// disjointness, because its outward rounding is what destroys it.
-pub fn foreign_ram() -> &'static [PhysRegion] {
-    table::get().map(|t| t.foreign.as_slice()).unwrap_or(&[])
 }
 
 /// Every hart id the machine reports, from `/cpus/cpu@N`'s `reg`.

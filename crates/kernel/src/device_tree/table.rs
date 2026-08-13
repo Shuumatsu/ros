@@ -7,14 +7,9 @@
 
 use heapless::Vec;
 
-use super::region::PhysRegion;
+use paging::PhysicalAddr;
 
-/// MMIO windows recordable. QEMU virt describes seventeen.
-pub const MAX_MMIO: usize = 48;
-
-/// Foreign RAM ranges recordable: `/reserved-memory` nodes, FDT reservation-block
-/// entries, the initrd and the blob itself.
-pub const MAX_FOREIGN: usize = 24;
+use crate::memory::machine::{MAX_FOREIGN, MAX_MMIO, PhysRange};
 
 /// Hart ids recordable. Independent of how many the kernel has stacks for — the
 /// machine reports what exists, `memory::stack` decides how many we can serve.
@@ -36,15 +31,15 @@ pub struct Device {
 /// Physical RAM backing the kernel.
 #[derive(Clone, Copy, Debug)]
 pub struct Ram {
-    pub base: usize,
+    pub base: PhysicalAddr,
     /// Exclusive end — the authoritative RAM top.
-    pub end: usize,
+    pub end: PhysicalAddr,
 }
 
 /// Everything one pass over the tree turns up.
 pub struct DeviceTable {
     /// The blob itself: where it is and how big, so it can be reserved.
-    pub blob: PhysRegion,
+    pub blob: PhysRange,
     /// The `/memory` bank containing the kernel.
     pub ram: Ram,
     /// The primary console UART. Not optional: without it there is no console, and
@@ -56,10 +51,22 @@ pub struct DeviceTable {
     pub clint: Option<Device>,
     /// Ticks per second of the `time` CSR, from `/cpus/timebase-frequency`.
     pub timebase_hz: Option<usize>,
-    /// Every MMIO window the tree describes.
-    pub mmio: Vec<PhysRegion, MAX_MMIO>,
-    /// Every RAM range that exists but is not the kernel's to hand out.
-    pub foreign: Vec<PhysRegion, MAX_FOREIGN>,
+    /// Every MMIO window the tree describes — the single answer to "where is device
+    /// memory", and a genuine walk rather than a list of the devices driven today, so a
+    /// future driver finds its window here.
+    ///
+    /// A window says the *device* exists, not that S-mode may touch it: PMP is a separate
+    /// layer, and denies the CLINT on QEMU virt.
+    pub mmio: Vec<PhysRange, MAX_MMIO>,
+    /// Every RAM range that exists but is not the kernel's to hand out; the frame
+    /// allocator would otherwise vend all of it.
+    ///
+    /// Four sources, since honouring some of them is indistinguishable from honouring
+    /// none: `/reserved-memory`, the older FDT `off_mem_rsvmap` block (used by U-Boot and
+    /// coreboot), `/chosen`'s initrd, and the blob itself. Overlap is expected —
+    /// `memory::frame::reserve` owns disjointness, because its outward rounding is what
+    /// destroys it.
+    pub foreign: Vec<PhysRange, MAX_FOREIGN>,
     /// Every hart id the machine reports.
     pub hart_ids: Vec<usize, MAX_HART_IDS>,
     /// Nodes skipped for `status = "disabled"`, reported by [`super::summary`].

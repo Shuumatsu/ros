@@ -64,16 +64,22 @@ impl Table {
         self.entries[vaddr.vpn(ROOT_LEVEL)] = Entry::leaf(paddr, flags);
     }
 
-    /// The table a higher-half kernel enters paging on: every root slot of both
-    /// canonical halves filled with a gigapage, the low half identity mapped
-    /// (`VA == PA`) and the high half offset (`VA == PA + va_offset`).
+    /// The table a higher-half kernel enters paging on: the low canonical half
+    /// identity mapped (`VA == PA`) with a gigapage in every slot, and the first
+    /// `offset_span` bytes of physical memory mirrored at `va_offset`
+    /// (`VA == PA + va_offset`).
     ///
     /// Both halves are needed, and for different instructions. The low one keeps
     /// the fetch after the `satp` write working, because the program counter is
     /// still a physical address at that point; the high one is where the very next
-    /// jump goes. Filling every slot rather than just the kernel's own costs
+    /// jump goes. Filling every low slot rather than just the kernel's own costs
     /// nothing — a root table is one page either way — and it means the device
-    /// tree, wherever the loader put it, is reachable through both.
+    /// tree, wherever the loader put it, is reachable before translation is on.
+    ///
+    /// The high half is **not** filled the same way. `offset_span` is the caller's
+    /// direct-map window, and the slots above it are left invalid on purpose: a
+    /// kernel that hands out high addresses of its own above that window must not
+    /// find them already mapped here, to physical memory that need not exist.
     ///
     /// `flags` applies verbatim to all of it, so this grants one blanket
     /// permission over all of memory and is meant to be replaced by a table with
@@ -81,14 +87,29 @@ impl Table {
     ///
     /// # Panics
     ///
-    /// If `va_offset` is not the base of the high canonical half. In a `const`
-    /// context that is a compile-time error.
-    pub const fn identity_and_offset(va_offset: usize, flags: PteFlags) -> Self {
+    /// If `va_offset` is not the base of the high canonical half, or `offset_span`
+    /// is not a non-zero number of whole gigapages that fits in that half. In a
+    /// `const` context these are compile-time errors.
+    pub const fn identity_and_offset(
+        va_offset: usize,
+        offset_span: usize,
+        flags: PteFlags,
+    ) -> Self {
         const GIGAPAGE: usize = page_size_at(ROOT_LEVEL);
         assert!(va_offset % GIGAPAGE == 0, "the high half must begin on a gigapage boundary");
         assert!(
             VirtualAddr::new(va_offset).vpn(ROOT_LEVEL) == ROOT_ENTRIES_PER_HALF,
             "va_offset must be the base of the high canonical half"
+        );
+        assert!(
+            offset_span % GIGAPAGE == 0,
+            "the offset half is built from gigapages, so its span must be a multiple of one"
+        );
+        let offset_slots = offset_span / GIGAPAGE;
+        assert!(offset_slots > 0, "the offset half must map something");
+        assert!(
+            offset_slots <= ROOT_ENTRIES_PER_HALF,
+            "the offset half cannot be wider than the canonical half holding it"
         );
 
         let mut table = Self::new();
@@ -96,7 +117,9 @@ impl Table {
         while index < ROOT_ENTRIES_PER_HALF {
             let pa = PhysicalAddr::new(index * GIGAPAGE);
             table.map_gigapage(VirtualAddr::new(index * GIGAPAGE), pa, flags);
-            table.map_gigapage(VirtualAddr::new(va_offset + index * GIGAPAGE), pa, flags);
+            if index < offset_slots {
+                table.map_gigapage(VirtualAddr::new(va_offset + index * GIGAPAGE), pa, flags);
+            }
             index += 1;
         }
         table
@@ -115,6 +138,9 @@ mod tests {
     /// Bottom of the Sv39 high half, where a higher-half kernel lives.
     const HIGH_BASE: usize = 0xffff_ffc0_0000_0000;
     const GIGAPAGE: usize = 1 << 30;
+    /// A direct-map window narrower than the half holding it, as a real kernel's is:
+    /// half of it, leaving the other half for addresses the kernel chooses.
+    const SPAN: usize = (ROOT_ENTRIES_PER_HALF / 2) * GIGAPAGE;
     /// The permissions an early boot mapping needs: all access, and A/D
     /// pre-set so the hardware walker never has to write to the table.
     const BOOT: PteFlags =
@@ -123,7 +149,7 @@ mod tests {
     /// The kernel's boot table, forced through const evaluation: if
     /// [`Table::identity_and_offset`] were not truly const-usable, this would not
     /// compile, and the kernel could not hold it as a `static`.
-    static EARLY: Table = Table::identity_and_offset(HIGH_BASE, BOOT);
+    static EARLY: Table = Table::identity_and_offset(HIGH_BASE, SPAN, BOOT);
 
     #[test]
     fn layout_is_a_page() {
@@ -143,6 +169,7 @@ mod tests {
         // The high half starts at root index 256 — derived, not assumed.
         let high_index = VirtualAddr::new(HIGH_BASE).vpn(ROOT_LEVEL);
         assert_eq!(high_index, ROOT_ENTRIES_PER_HALF, "high half begins at root entry 256");
+        let window_slots = SPAN / GIGAPAGE;
 
         for i in 0..ROOT_ENTRIES_PER_HALF {
             let expected = PhysicalAddr::new(i * GIGAPAGE);
@@ -152,15 +179,52 @@ mod tests {
             assert_eq!(identity.target(), expected, "identity entry {i} targets the wrong frame");
 
             let high = EARLY.entries[high_index + i];
+            if i >= window_slots {
+                // Above the direct-map window: this is where the kernel hands out
+                // addresses of its own, and a mapping here would collide with them.
+                assert!(!high.is_valid(), "high-half entry {i} is outside the window and mapped");
+                continue;
+            }
             assert!(high.is_leaf(), "high-half entry {i} must be a leaf");
             assert_eq!(high.target(), expected, "high-half entry {i} targets the wrong frame");
             assert_eq!(high.flags(), BOOT | PteFlags::VALID, "high-half entry {i} lost flags");
         }
 
-        assert!(
-            EARLY.entries.iter().all(|entry| entry.is_valid()),
-            "the two canonical halves must fill the root table"
+        let valid = EARLY.entries.iter().filter(|entry| entry.is_valid()).count();
+        assert_eq!(
+            valid,
+            ROOT_ENTRIES_PER_HALF + window_slots,
+            "the table must map the whole low half and exactly the window above it"
         );
+    }
+
+    /// A full-width window is still legal — the split is the caller's policy, not this
+    /// function's — and it is the boundary case of the slot arithmetic.
+    #[test]
+    fn a_full_width_offset_half_fills_the_table() {
+        let table = Table::identity_and_offset(HIGH_BASE, ROOT_ENTRIES_PER_HALF * GIGAPAGE, BOOT);
+        assert!(
+            table.entries.iter().all(|entry| entry.is_valid()),
+            "a window as wide as the half must leave no slot invalid"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "multiple of one")]
+    fn rejects_a_window_that_is_not_whole_gigapages() {
+        let _ = Table::identity_and_offset(HIGH_BASE, GIGAPAGE + PAGE_SIZE, BOOT);
+    }
+
+    #[test]
+    #[should_panic(expected = "must map something")]
+    fn rejects_an_empty_window() { let _ = Table::identity_and_offset(HIGH_BASE, 0, BOOT); }
+
+    /// Slots past the end of the half belong to the *low* half, so an over-wide window
+    /// would silently overwrite the identity map the `satp` write depends on.
+    #[test]
+    #[should_panic(expected = "cannot be wider")]
+    fn rejects_a_window_wider_than_the_half() {
+        let _ = Table::identity_and_offset(HIGH_BASE, (ROOT_ENTRIES_PER_HALF + 1) * GIGAPAGE, BOOT);
     }
 
     #[test]
@@ -188,12 +252,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "high canonical half")]
     fn rejects_an_offset_outside_the_high_half() {
-        let _ = Table::identity_and_offset(GIGAPAGE, BOOT);
+        let _ = Table::identity_and_offset(GIGAPAGE, SPAN, BOOT);
     }
 
     #[test]
     #[should_panic(expected = "gigapage boundary")]
     fn rejects_an_unaligned_offset() {
-        let _ = Table::identity_and_offset(HIGH_BASE + PAGE_SIZE, BOOT);
+        let _ = Table::identity_and_offset(HIGH_BASE + PAGE_SIZE, SPAN, BOOT);
     }
 }

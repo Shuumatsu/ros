@@ -4,6 +4,8 @@
 //! discovery. Kept in its own file because reporting is the one part of this module
 //! that must run *after* the console exists, while everything else must run before.
 
+use paging::MemoryAddr;
+
 use super::table;
 use crate::utils::ByteSize;
 
@@ -22,7 +24,7 @@ pub fn summary() {
         "[dtb] ram:   {:#x}..{:#x} ({})",
         table.ram.base,
         table.ram.end,
-        ByteSize(table.ram.end - table.ram.base)
+        ByteSize(table.ram.end.sub_addr(table.ram.base))
     );
 
     let device = |what: &str, dev: &table::Device| match dev.irq {

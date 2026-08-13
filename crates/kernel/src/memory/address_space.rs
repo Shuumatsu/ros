@@ -4,10 +4,15 @@
 //! write-once; without it the next subsystem needing a mapping has no way in but a second
 //! `&mut` to the same root. Layout is not this module's — [`super::kernel_table`] is the
 //! kernel's instance, a user space would be another.
+//!
+//! Reaching the tree goes through [`AddressSpace::edit`] or [`AddressSpace::walk`], which is
+//! what pairs every write with a TLB fence. A mapper handed out bare would let a caller
+//! install leaves the hardware never looks at.
 
 use paging::sv39::FrameSource;
 use paging::{LinearOffset, Mapper, PhysicalAddr, Satp, Table};
 
+use crate::arch::riscv64::tlb;
 use crate::memory::direct_map::VA_OFFSET;
 use crate::memory::{frame, phys_to_virt};
 
@@ -64,16 +69,39 @@ impl AddressSpace {
     /// The `satp` value that makes this space live.
     pub fn satp(&self) -> Satp { self.satp }
 
-    /// Borrow this space for mapping, unmapping or walking — the one way to reach the
-    /// tree, and `&mut`, so edits are serialised by whoever owns the space.
-    pub fn mapper(&mut self) -> KernelMapper<'_> {
+    /// Change this space's mappings, then retire the translations the change invalidated.
+    ///
+    /// The only way to reach a `&mut` mapper, which is what makes the fence unskippable: a
+    /// hart may have cached the *absence* of a translation, so a leaf installed without one
+    /// is a mapping the hardware ignores. `&mut self`, so edits are serialised by whoever
+    /// owns the space.
+    ///
+    /// Fenced unconditionally rather than only when this space is live, because "is any hart
+    /// running this tree" is not a question the calling hart can answer — and for the same
+    /// reason this is not enough for a tree live on *another* hart. See
+    /// [`tlb`](crate::arch::riscv64::tlb).
+    pub fn edit<R>(&mut self, f: impl FnOnce(&mut KernelMapper<'_>) -> R) -> R {
+        let result = f(&mut self.mapper());
+        tlb::flush_all();
+        result
+    }
+
+    /// Walk this space's mappings without changing them.
+    ///
+    /// The mapper arrives as `&`, and every operation that writes a table takes `&mut self`,
+    /// so a walk cannot invalidate a translation and needs no fence. That is a type-level
+    /// distinction, not a promise in a doc comment.
+    pub fn walk<R>(&mut self, f: impl FnOnce(&KernelMapper<'_>) -> R) -> R { f(&self.mapper()) }
+
+    /// The tree, bound to the kernel's frame source and addressing policy.
+    ///
+    /// Private: handed out only through [`edit`](Self::edit) and [`walk`](Self::walk), so
+    /// there is no way to obtain a mutable mapper and skip the fence.
+    fn mapper(&mut self) -> KernelMapper<'_> {
         Mapper::new(&mut *self.root, TableFrames, LinearOffset(VA_OFFSET))
     }
 
-    /// Make this space the live translation on the calling hart, and flush the TLB.
-    ///
-    /// Interrupts are masked across the pair so no trap can observe a half-switched
-    /// translation.
+    /// Make this space the live translation on the calling hart.
     ///
     /// # Safety
     ///
@@ -81,17 +109,7 @@ impl AddressSpace {
     /// physical addresses the live tree does, or this faults on the next instruction with
     /// no table left to diagnose it from. [`super::kernel_table`] audits that first.
     pub unsafe fn activate(&self) {
-        let bits = self.satp.bits();
-        crate::arch::riscv64::interrupts::without(|| {
-            // SAFETY: forwarded from this function's contract.
-            unsafe {
-                core::arch::asm!(
-                    "csrw satp, {satp}",
-                    "sfence.vma",
-                    satp = in(reg) bits,
-                    options(nostack)
-                );
-            }
-        });
+        // SAFETY: forwarded from this function's contract.
+        unsafe { tlb::install(self.satp) };
     }
 }

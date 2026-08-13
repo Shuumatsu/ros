@@ -6,7 +6,8 @@
 //! | module | owns |
 //! |---|---|
 //! | [`layout`] | the kernel image, as the linker laid it out |
-//! | [`direct_map`] | `VA = PA + offset`, and the conversions made of it |
+//! | [`machine`] | what the kernel is told about physical memory, and its one seam |
+//! | [`direct_map`] | `VA = PA + offset`, how far it reaches, and the conversions |
 //! | [`boot_table`] | the compile-time table the architecture entry installs |
 //! | [`frame`] | which physical frames the kernel has, and vending them |
 //! | [`heap`] | the `#[global_allocator]`, carved out of those frames |
@@ -16,9 +17,8 @@
 //! | [`region`] | installing, auditing and reporting a list of mappings |
 //! | [`kernel_table`] | *which* mappings the kernel gets, and switching to them |
 //!
-//! Nothing here decides a fact one of those owns.
-
-use paging::PhysicalAddr;
+//! Nothing here decides a fact one of those owns, and nothing here reads the device tree:
+//! platform facts arrive through [`machine::MachineMemory`].
 
 pub mod address_space;
 pub(crate) mod boot_table;
@@ -28,10 +28,12 @@ pub mod heap;
 pub mod kernel_table;
 pub mod kernel_va;
 pub mod layout;
+pub mod machine;
 pub mod region;
 pub mod stack;
 
 pub use direct_map::{phys_to_virt, virt_to_phys};
+pub use machine::MachineMemory;
 
 /// Bring the memory subsystem up. **Boot hart only** — a secondary's architecture entry
 /// installs the finished page table and stack before it reaches Rust.
@@ -41,27 +43,26 @@ pub use direct_map::{phys_to_virt, virt_to_phys};
 /// stacks (frames *and* heap, and they must exist before the table that maps them), then
 /// the page table.
 ///
-/// `secondary_harts` is a parameter because deciding which harts to start is `cpu`'s
-/// business, and `cpu` already depends on this module; `start` knows both.
-pub fn init(secondary_harts: impl Iterator<Item = usize>) {
-    // Before anything derives an address from the linker symbols.
+/// Both arguments are parameters rather than lookups, for the same reason: `machine` is
+/// whoever probed the platform's to describe, `secondary_harts` is `cpu`'s to decide, and
+/// both of those already depend on this module. `start` knows all three.
+pub fn init(machine: MachineMemory<'_>, secondary_harts: impl Iterator<Item = usize>) {
+    // Before anything derives an address from the linker symbols or from the machine.
     layout::report();
     layout::check();
     stack::check_layout();
     direct_map::report();
+    machine.check();
 
     // 1. Physical frames: [free_start, ram_end). `free_start` is the top of the kernel
-    //    image (a high VA); the allocator vends *physical* addresses, so convert it
-    //    back. `ram_end` is already physical, validated by `device_tree::init`.
-    let free_start_pa = virt_to_phys(layout::free_ram_start());
-    let ram_end = PhysicalAddr::new(crate::device_tree::ram_end().expect(
-        "device tree RAM region not discovered; call device_tree::init before memory::init",
-    ));
+    //    image (a high VA); the allocator vends *physical* addresses, so convert it back.
+    let free_start = virt_to_phys(layout::free_ram_start());
     assert!(
-        free_start_pa < ram_end,
-        "kernel image top {free_start_pa:#x} meets/exceeds RAM top {ram_end:#x}; give the VM more RAM"
+        free_start < machine.ram_end,
+        "kernel image top {free_start:#x} meets/exceeds RAM top {:#x}; give the VM more RAM",
+        machine.ram_end
     );
-    frame::init(free_start_pa, ram_end);
+    frame::init(free_start, machine.ram_end, machine.foreign);
     frame::report();
     frame::self_test();
 
@@ -76,5 +77,5 @@ pub fn init(secondary_harts: impl Iterator<Item = usize>) {
 
     // 4. The real kernel page table: per-section rights and W^X, replacing the boot
     //    table's blanket RWX gigapages.
-    kernel_table::init();
+    kernel_table::init(machine.mmio);
 }

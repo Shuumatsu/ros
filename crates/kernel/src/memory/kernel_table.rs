@@ -3,9 +3,9 @@
 //!
 //! Only the *policy* — which regions exist and what rights they get. Installing and
 //! auditing is [`super::region`]'s, the tree itself
-//! [`AddressSpace`](super::address_space::AddressSpace)'s, and every fact here is looked
-//! up from its owner: [`layout`], [`crate::device_tree`], [`frame::owned_range`],
-//! [`kernel_va`].
+//! [`AddressSpace`](super::address_space::AddressSpace)'s, and every fact here comes from
+//! its owner: [`layout`], the [`MachineMemory`](super::machine::MachineMemory) handed to
+//! [`super::init`], [`frame::owned_range`], [`kernel_va`].
 //!
 //! [`regions`] is computed once and then installed, audited and reported, so there is no
 //! second list to drift. The audit precedes the switch because a mis-mapped `.text` faults
@@ -22,6 +22,7 @@ use spin::Once;
 
 use crate::memory::address_space::{AddressSpace, KernelMapper};
 use crate::memory::direct_map::SUPERPAGE;
+use crate::memory::machine::PhysRange;
 use crate::memory::region::{self, Region};
 use crate::memory::{frame, kernel_va, layout, phys_to_virt, stack, virt_to_phys};
 use crate::sync::IrqMutex;
@@ -73,23 +74,22 @@ fn direct(
 }
 
 /// Compute the kernel's address-space layout.
-fn regions() -> Vec<Region> {
+fn regions(mmio: &[PhysRange]) -> Vec<Region> {
     let mut regions = Vec::new();
     let mut push = |region: Region| {
         regions.push(region);
     };
 
-    // Every window the tree describes, not just the devices driven today: that is what
+    // Every window the machine describes, not just the devices driven today: that is what
     // lets a new driver work through `phys_to_virt` instead of its own base constant.
-    for device in crate::device_tree::mmio_regions() {
-        // The device tree reports raw integers; this is where they become addresses.
-        let base = PhysicalAddr::new(device.base);
+    // `MachineMemory::check` has already rejected any that the direct map cannot reach.
+    for device in mmio {
         push(Region {
             name: "mmio",
-            va: phys_to_virt(base),
-            pa: base,
+            va: phys_to_virt(device.base),
+            pa: device.base,
             len: device.size,
-            level: largest_level_for(base, device.size),
+            level: largest_level_for(device.base, device.size),
             flags: READ_WRITE,
         });
     }
@@ -151,7 +151,7 @@ fn regions() -> Vec<Region> {
 /// one is then a boot panic instead of a collision found later by whoever gets mapped
 /// over. Both directions, because the boundary is derived in two modules.
 fn audit_kernel_va(regions: &[Region]) {
-    let free_start = kernel_va::start();
+    let free_start = kernel_va::START;
     for region in regions.iter().filter(|region| !region.is_empty()) {
         let end = region.va.add(region.len);
         if region.va < free_start {
@@ -212,23 +212,36 @@ static KERNEL: Once<IrqMutex<AddressSpace>> = Once::new();
 ///
 /// Call once, on the boot hart, after [`super::init`]'s earlier steps — it needs frames
 /// for the tree and the heap for the region list.
-pub fn init() {
-    let regions = regions();
+///
+/// # Panics
+///
+/// If a table has already been published. A second call would build and *activate* a second
+/// tree while [`satp`] went on reporting the first, which is two answers to which table is
+/// live — the one thing this module exists to prevent. `Once` cannot express that on its
+/// own: publication has to follow the switch, so the guard is separate from it.
+pub fn init(mmio: &[PhysRange]) {
+    assert!(
+        KERNEL.get().is_none(),
+        "kernel_table::init called twice; the live table is already published"
+    );
+
+    let regions = regions(mmio);
     let mut space = AddressSpace::new(KERNEL_ASID);
 
-    {
-        let mut mapper = space.mapper();
+    space.edit(|mapper| {
         for region in &regions {
             region
-                .install(&mut mapper)
+                .install(mapper)
                 .unwrap_or_else(|error| panic!("mapping region '{}' failed: {error}", region.name));
         }
+    });
+    space.walk(|mapper| {
         for region in &regions {
-            region.audit(&mapper);
+            region.audit(mapper);
         }
-        audit_holes(&mapper);
-        audit_live_context(&mapper);
-    }
+        audit_holes(mapper);
+        audit_live_context(mapper);
+    });
 
     println!("[memory] kernel page table root at {:#x}:", space.root());
     region::report(&regions);
@@ -240,7 +253,9 @@ pub fn init() {
     unsafe { space.activate() };
 
     KERNEL.call_once(|| IrqMutex::new(space));
-    println!("[memory] kernel page table live (satp {:#x}); boot table retired", satp.bits());
+    // Not "boot table retired": every hart started from here on still enters through it,
+    // because a starting hart has no translation of its own to arrive with.
+    println!("[memory] kernel page table live on this hart (satp {:#x})", satp.bits());
 }
 
 /// Edit or walk the kernel address space; the way in for anything that maps after boot.

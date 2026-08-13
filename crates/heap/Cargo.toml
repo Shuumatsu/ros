@@ -1,0 +1,11 @@
+[package]
+name = "heap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Only the unsynchronized `Heap`; the lock and the `GlobalAlloc` impl are the caller's.
+buddy_system_allocator = { version = "0.12.0", default-features = false }
+
+[dev-dependencies]
+pretty_assertions = "1.4"

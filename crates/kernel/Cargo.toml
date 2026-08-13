@@ -12,9 +12,9 @@ name = "kernel"
 path = "src/main.rs"
 
 [dependencies]
-buddy_system_allocator = "0.12.0"
 fdt-raw = "0.3.0"
 frame-allocator = { path = "../frame-allocator" }
+heap = { path = "../heap" }
 heapless = "0.9"
 paging = { path = "../paging", default-features = false }
 riscv = "0.16.0"
