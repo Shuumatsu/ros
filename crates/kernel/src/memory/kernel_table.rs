@@ -139,7 +139,7 @@ fn regions(mmio: &[PhysRange]) -> Vec<Region> {
     // The sub-superpage remainder at the top, rather than rounding past owned RAM.
     push(direct("direct map tail", bulk_end, pool_end_va, 0, READ_WRITE));
 
-    audit_disjoint(&regions);
+    region::audit_disjoint(&regions);
     audit_kernel_va(&regions);
     regions
 }
@@ -153,53 +153,25 @@ fn regions(mmio: &[PhysRange]) -> Vec<Region> {
 fn audit_kernel_va(regions: &[Region]) {
     let free_start = kernel_va::START;
     for region in regions.iter().filter(|region| !region.is_empty()) {
-        let end = region.va.add(region.len);
-        if region.va < free_start {
+        // The footprint, not the requested extent: the rounding is what gets mapped, so
+        // it is what has to have been reserved.
+        let (start, end) = region.footprint();
+        if start < free_start {
             assert!(
                 end <= free_start,
-                "region '{}' ({:#x}..{:#x}) runs past {free_start:#x}, where the kernel VA \
-                 allocator starts handing addresses out",
-                region.name,
-                region.va,
-                end
+                "region '{}' ({start:#x}..{end:#x}) runs past {free_start:#x}, where the kernel \
+                 VA allocator starts handing addresses out",
+                region.name
             );
             continue;
         }
         assert!(
-            kernel_va::is_reserved(region.va, region.len),
-            "region '{}' ({:#x}..{end:#x}) is above the direct map but was never reserved from \
-             kernel_va, whose watermark is {:#x}",
+            kernel_va::is_reserved(start, end.sub_addr(start)),
+            "region '{}' ({start:#x}..{end:#x}) is above the direct map but was never reserved \
+             from kernel_va, whose watermark is {:#x}",
             region.name,
-            region.va,
             kernel_va::watermark()
         );
-    }
-}
-
-/// Require the regions to tile the address space rather than overlap it.
-///
-/// Overlap is not an error the hardware reports: the second `install` wins and the
-/// loser's rights vanish. Against each other rather than against [`kernel_va`], which is
-/// what catches two mappings that both came from geometry. `O(n²)`, once.
-fn audit_disjoint(regions: &[Region]) {
-    for (index, a) in regions.iter().enumerate() {
-        if a.is_empty() {
-            continue;
-        }
-        for b in regions[index + 1..].iter().filter(|b| !b.is_empty()) {
-            let disjoint = a.va.add(a.len) <= b.va || b.va.add(b.len) <= a.va;
-            assert!(
-                disjoint,
-                "regions '{}' ({:#x}..{:#x}) and '{}' ({:#x}..{:#x}) overlap; one would \
-                 silently replace the other's rights",
-                a.name,
-                a.va,
-                a.va.add(a.len),
-                b.name,
-                b.va,
-                b.va.add(b.len)
-            );
-        }
     }
 }
 

@@ -40,8 +40,26 @@ impl Region {
     /// Bytes mapped by one leaf of this region.
     pub fn page_size(&self) -> usize { page_size_at(self.level) }
 
-    /// Pages installed, counting a partial final page as a whole one.
-    pub fn pages(&self) -> usize { self.len.div_ceil(self.page_size()) }
+    /// The virtual range this region really occupies once installed: `[va, va + len)`
+    /// rounded outward to whole pages.
+    ///
+    /// The single answer to "what address space does this take", because the rounding is
+    /// [`install`](Self::install)'s — [`Mapper::map_range_at_level`] aligns both ends. An
+    /// unrounded extent calls two sub-page regions sharing one page disjoint, and sharing
+    /// a page means sharing a PTE, so whichever installed second would own it.
+    pub fn footprint(&self) -> (VirtualAddr, VirtualAddr) {
+        let page = self.page_size();
+        (self.va.align_down(page), self.end_va().align_up(page))
+    }
+
+    /// Pages installed, counting a partial page at either end as a whole one.
+    ///
+    /// Derived from [`footprint`](Self::footprint), so the count and the extent cannot
+    /// disagree about how far the region reaches.
+    pub fn pages(&self) -> usize {
+        let (start, end) = self.footprint();
+        end.sub_addr(start) / self.page_size()
+    }
 
     /// True when there is nothing to map: a region a platform's geometry collapses to
     /// zero, rather than one the layout has to leave out.
@@ -138,6 +156,36 @@ impl Region {
     }
 }
 
+/// Require a region list to tile the address space rather than overlap it.
+///
+/// Overlap is not an error the hardware reports: the second [`Region::install`] wins and
+/// the loser's rights vanish. Compared as [`footprint`](Region::footprint)s, since that is
+/// what gets written — two device windows a few hundred bytes apart are disjoint ranges
+/// and the same page.
+///
+/// Mechanism, so it lives beside `install` rather than beside any one layout: a user
+/// address space needs the same check over a different list. `O(n²)`, once, over tens of
+/// entries.
+pub fn audit_disjoint(regions: &[Region]) {
+    for (index, a) in regions.iter().enumerate() {
+        if a.is_empty() {
+            continue;
+        }
+        let (a_start, a_end) = a.footprint();
+        for b in regions[index + 1..].iter().filter(|b| !b.is_empty()) {
+            let (b_start, b_end) = b.footprint();
+            assert!(
+                a_end <= b_start || b_end <= a_start,
+                "regions '{}' ({a_start:#x}..{a_end:#x}) and '{}' ({b_start:#x}..{b_end:#x}) \
+                 overlap once rounded to their page size; one would silently replace the \
+                 other's rights",
+                a.name,
+                b.name
+            );
+        }
+    }
+}
+
 /// Print a region list as a memory map.
 ///
 /// Puts the protection policy in the boot log, where it can be read off a failing run.
@@ -161,7 +209,8 @@ pub fn report(regions: &[Region]) {
         let mut run = 1;
         let mut pages = region.pages();
         while let Some(next) = regions.get(index + run) {
-            // Against the rounded footprint, which is what `install` occupies.
+            // Against the accumulated [`Region::footprint`], not the requested extents:
+            // a run is contiguous when each region starts where the last one's pages stop.
             let span = pages * page_size;
             if next.name != region.name
                 || next.level != region.level
