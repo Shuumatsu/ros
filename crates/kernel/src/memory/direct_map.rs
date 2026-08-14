@@ -32,6 +32,7 @@
 use paging::sv39::{ROOT_ENTRIES_PER_HALF, ROOT_LEVEL, page_size_at};
 use paging::{PhysicalAddr, VirtualAddr};
 
+use crate::memory::layout;
 use crate::utils::ByteSize;
 
 /// Bottom of the Sv39 high half, and the base of the kernel's direct map.
@@ -104,11 +105,23 @@ pub const fn virt_to_phys(va: VirtualAddr) -> PhysicalAddr {
 
 /// Assert the direct map Rust believes in is the one we are running on, against the skew
 /// the boot entry measured at its high-half jump. Call once, before the conversions.
+///
+/// The skew is VMA minus LMA, so two different mistakes arrive here: `kernel.ld`'s
+/// `_va_offset` and [`VA_OFFSET`] having diverged, or the loader having put the image
+/// somewhere other than the physical base it is linked for. Nothing here can tell them
+/// apart — `_phys_base` is a small absolute linker symbol, which Rust cannot read (see
+/// [`super::layout`]) — so the message names both and prints where we actually landed.
 pub fn verify(measured: usize) {
+    let linked = layout::memory_start();
     assert_eq!(
-        measured, VA_OFFSET,
+        measured,
+        VA_OFFSET,
         "boot entry measured a VA offset of {measured:#x}, but the direct map is built for \
-         {VA_OFFSET:#x}; kernel.ld's _va_offset and memory::direct_map::VA_OFFSET have diverged"
+         {VA_OFFSET:#x}: the image runs at {linked:#x} and was loaded at {:#x}, not the {:#x} \
+         it is linked for. Either kernel.ld's _va_offset and memory::direct_map::VA_OFFSET \
+         have diverged, or the loader ignored the Image header's text_offset",
+        linked.bits().wrapping_sub(measured),
+        virt_to_phys(linked)
     );
 }
 
