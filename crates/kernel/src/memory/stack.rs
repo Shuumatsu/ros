@@ -143,7 +143,15 @@ static SECONDARIES: Once<Vec<Secondary>> = Once::new();
 /// reason: no `sp` points into the alias.
 ///
 /// Slots are reserved whole and one at a time, so there is no index to compute wrong.
+///
+/// # Panics
+///
+/// If the list has already been built. `Once` alone would keep the first one, so a second
+/// call would leave its harts with no stacks and say nothing — and `cpu` starts exactly
+/// the harts named here.
 pub fn init(harts: impl Iterator<Item = usize>) {
+    assert!(SECONDARIES.get().is_none(), "stack::init called twice; the stacks are already built");
+
     SECONDARIES.call_once(|| {
         harts
             .map(|hart| {

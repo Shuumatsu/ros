@@ -100,7 +100,16 @@ impl Frames {
 /// The bitmap is reserved from the front of the range and excluded from the
 /// managed frames. RAM beyond the direct map's window is dropped (loudly),
 /// because its frames would have no high-half alias.
+///
+/// # Panics
+///
+/// If the pool has already been published. `OWNED`'s `Once` cannot express that on its
+/// own: it would silently keep the first range while [`FRAME_ALLOCATOR`] took the second
+/// allocator — two answers to which frames the kernel owns — and the bitmap below is
+/// taken as a `&'static mut`, which a second call would alias.
 pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr, foreign: &[PhysRange]) {
+    assert!(OWNED.get().is_none(), "frame::init called twice; the pool is already published");
+
     let direct_map_end = crate::memory::direct_map::DIRECT_MAP_END;
     assert!(
         free_start < direct_map_end,
