@@ -129,7 +129,12 @@ fn regions(mmio: &[PhysRange]) -> Vec<Region> {
         layout::text_start().is_aligned(SUPERPAGE),
         "the kernel image must start superpage-aligned, or its slot would overlap the bulk direct map"
     );
-    let slot_end = pool_start_va.align_up(SUPERPAGE);
+    // Both boundaries are clamped into the pool, so the three regions below tile
+    // `[pool_start_va, pool_end_va)` and no more. Unclamped, a machine whose RAM ends
+    // inside the image's slot maps the head past the pool, onto physical memory that need
+    // not exist — and nothing catches it: such a region overlaps nothing and sits below
+    // `kernel_va::START`.
+    let slot_end = pool_start_va.align_up(SUPERPAGE).min(pool_end_va);
     let bulk_end = pool_end_va.align_down(SUPERPAGE).max(slot_end);
 
     // Rest of the image's slot: the frame bitmap and the first frames vended.
