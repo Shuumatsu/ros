@@ -77,6 +77,4 @@ pub struct DeviceTable {
 pub static TABLE: spin::Once<DeviceTable> = spin::Once::new();
 
 /// The table, or `None` before the tree has been parsed.
-pub fn get() -> Option<&'static DeviceTable> {
-    TABLE.get()
-}
+pub fn get() -> Option<&'static DeviceTable> { TABLE.get() }

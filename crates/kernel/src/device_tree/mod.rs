@@ -38,7 +38,9 @@ use crate::memory::MachineMemory;
 /// unmodified — it is borrowed in place.
 pub unsafe fn init(dtb_ptr: usize) {
     if dtb_ptr == 0 {
-        panic!("[dtb] no device tree pointer in a1 — previous boot stage violated the boot contract");
+        panic!(
+            "[dtb] no device tree pointer in a1 — previous boot stage violated the boot contract"
+        );
     }
 
     // `a1` is *physical*, so reach the blob through the direct map: both tables map it
@@ -76,23 +78,17 @@ pub fn machine_memory() -> MachineMemory<'static> {
 
 /// Primary UART base. No address is hardcoded anywhere — the console falls back to the
 /// SBI console until this is known.
-pub fn uart_base() -> Option<usize> {
-    table::get().map(|t| t.uart.base)
-}
+pub fn uart_base() -> Option<usize> { table::get().map(|t| t.uart.base) }
 
 /// Ticks per second of the `time` CSR, or `None` if the tree did not say.
 ///
 /// `Option` although the binding requires it: a caller needing a bounded wait decides
 /// what to do without a clock rather than being handed a fabricated frequency.
-pub fn timebase_hz() -> Option<usize> {
-    table::get().and_then(|t| t.timebase_hz)
-}
+pub fn timebase_hz() -> Option<usize> { table::get().and_then(|t| t.timebase_hz) }
 
 /// Every hart id the machine reports, from `/cpus/cpu@N`'s `reg`.
 ///
 /// A list to iterate, never a count and never an array index — ids need not be `0..n`;
 /// see [`crate::memory::stack`]. Harts not `status = "okay"` are absent, since a
 /// disabled core cannot be started.
-pub fn hart_ids() -> &'static [usize] {
-    table::get().map(|t| t.hart_ids.as_slice()).unwrap_or(&[])
-}
+pub fn hart_ids() -> &'static [usize] { table::get().map(|t| t.hart_ids.as_slice()).unwrap_or(&[]) }

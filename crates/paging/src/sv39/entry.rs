@@ -46,9 +46,7 @@ impl PteFlags {
 
     /// True if these flags describe a leaf mapping (any of R/W/X set).
     #[inline]
-    pub const fn is_leaf(self) -> bool {
-        self.bits() & Self::PERMS.bits() != 0
-    }
+    pub const fn is_leaf(self) -> bool { self.bits() & Self::PERMS.bits() != 0 }
 
     /// True if the R/W/X combination is architecturally legal (W implies R).
     #[inline]
@@ -150,14 +148,10 @@ impl Entry {
     }
 
     /// A valid entry that maps a page (has R/W/X).
-    pub const fn is_leaf(self) -> bool {
-        self.is_valid() && self.flags().is_leaf()
-    }
+    pub const fn is_leaf(self) -> bool { self.is_valid() && self.flags().is_leaf() }
 
     /// A valid entry that points to a next-level table (no R/W/X).
-    pub const fn is_branch(self) -> bool {
-        self.is_valid() && !self.flags().is_leaf()
-    }
+    pub const fn is_branch(self) -> bool { self.is_valid() && !self.flags().is_leaf() }
 }
 
 #[cfg(test)]

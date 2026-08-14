@@ -34,9 +34,7 @@ pub struct Identity;
 // identity mapping is live, which makes a physical address a valid pointer.
 unsafe impl PhysAccess for Identity {
     #[inline]
-    fn ptr<T>(&self, pa: PhysicalAddr) -> *mut T {
-        pa.bits() as *mut T
-    }
+    fn ptr<T>(&self, pa: PhysicalAddr) -> *mut T { pa.bits() as *mut T }
 }
 
 /// Physical memory is mapped at a fixed virtual offset: `VA = PA + offset`.
@@ -49,7 +47,5 @@ pub struct LinearOffset(pub usize);
 // frame the walk can reach.
 unsafe impl PhysAccess for LinearOffset {
     #[inline]
-    fn ptr<T>(&self, pa: PhysicalAddr) -> *mut T {
-        pa.bits().wrapping_add(self.0) as *mut T
-    }
+    fn ptr<T>(&self, pa: PhysicalAddr) -> *mut T { pa.bits().wrapping_add(self.0) as *mut T }
 }

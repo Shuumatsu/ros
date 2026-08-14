@@ -351,10 +351,7 @@ fn reserved_frames_are_never_vended_even_under_exhaustion() {
     let mut seen = [false; 64];
     while let Some(block) = allocator.allocate(count(1)) {
         let frame = block.start_frame();
-        check!(
-            !(21..26).contains(&frame),
-            "allocator handed out reserved frame {frame}"
-        );
+        check!(!(21..26).contains(&frame), "allocator handed out reserved frame {frame}");
         check!(!seen[frame], "frame {frame} was handed out twice");
         seen[frame] = true;
     }
@@ -408,9 +405,8 @@ fn reserve_rejects_ranges_it_cannot_honour() {
     let mut allocator = allocator(range(8, 16), &mut metadata);
 
     for bad in [range(0, 4), range(4, 10), range(12, 20), range(20, 24)] {
-        let error = allocator
-            .reserve(bad)
-            .expect_err("a range outside the managed range must be rejected");
+        let error =
+            allocator.reserve(bad).expect_err("a range outside the managed range must be rejected");
         assert_eq!(
             error,
             ReserveError::OutOfRange { start: bad.start(), end: bad.end() },
@@ -638,9 +634,8 @@ fn deallocate_at_rejects_a_start_that_cannot_begin_that_order() {
     // Frame 1 is inside the block but cannot *begin* an order-1 block. Accepting
     // this would free frames 1..3, straddling two buddies and corrupting the tree.
     // SAFETY: the misuse is the point; it must be rejected, not performed.
-    let error = unsafe {
-        allocator.deallocate_at(1, 1).expect_err("misaligned address free was accepted")
-    };
+    let error =
+        unsafe { allocator.deallocate_at(1, 1).expect_err("misaligned address free was accepted") };
     assert_eq!(
         error,
         DeallocationError::UnalignedFrame { start: 1, order: 1 },
@@ -656,17 +651,14 @@ fn deallocate_at_rejects_an_order_larger_than_its_root() {
     let mut allocator = allocator(range(3, 13), &mut metadata);
 
     // SAFETY: rejected before any metadata is touched; nothing is released.
-    let error = unsafe {
-        allocator.deallocate_at(3, 1).expect_err("order beyond the root was accepted")
-    };
+    let error =
+        unsafe { allocator.deallocate_at(3, 1).expect_err("order beyond the root was accepted") };
     assert_eq!(error, DeallocationError::ForeignBlock, "wrong over-order diagnostic");
 
     // An order that would overflow `1 << order` must be rejected, not shifted.
     // SAFETY: as above.
     let error = unsafe {
-        allocator
-            .deallocate_at(4, usize::BITS as usize)
-            .expect_err("absurd order was accepted")
+        allocator.deallocate_at(4, usize::BITS as usize).expect_err("absurd order was accepted")
     };
     assert_eq!(error, DeallocationError::ForeignBlock, "wrong absurd-order diagnostic");
     assert_eq!(allocator.free_frames(), 10, "rejected frees changed allocator state");

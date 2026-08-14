@@ -185,7 +185,9 @@ pub fn discover(
         if matches!(kind, RegKind::HartId) {
             for reg in regs {
                 if hart_ids.push(reg.address as usize).is_err() {
-                    println!("[dtb] WARNING: more than {MAX_HART_IDS} harts reported; ignoring rest");
+                    println!(
+                        "[dtb] WARNING: more than {MAX_HART_IDS} harts reported; ignoring rest"
+                    );
                 }
             }
             continue;
@@ -211,7 +213,10 @@ pub fn discover(
                 continue;
             };
             if size == 0 {
-                println!("[dtb] WARNING: {name} has a zero-length reg at {:#x}; skipped", reg.address);
+                println!(
+                    "[dtb] WARNING: {name} has a zero-length reg at {:#x}; skipped",
+                    reg.address
+                );
                 continue;
             }
             let entry = PhysRange::new(name, phys(reg.address), size as usize);

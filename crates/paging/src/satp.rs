@@ -54,9 +54,7 @@ pub enum Mode {
 
 impl Mode {
     /// The raw `MODE` field value.
-    pub const fn bits(self) -> usize {
-        self as usize
-    }
+    pub const fn bits(self) -> usize { self as usize }
 
     /// Decode a `MODE` field, or `None` for a reserved encoding.
     pub const fn from_bits(bits: usize) -> Option<Self> {
@@ -125,24 +123,16 @@ impl Satp {
     }
 
     /// Sv39 translation through `root`, the common case for this kernel.
-    pub const fn sv39(root: PhysicalAddr, asid: usize) -> Self {
-        Self::new(Mode::Sv39, asid, root)
-    }
+    pub const fn sv39(root: PhysicalAddr, asid: usize) -> Self { Self::new(Mode::Sv39, asid, root) }
 
     /// Translation off: physical addressing.
-    pub const fn bare() -> Self {
-        Self(0)
-    }
+    pub const fn bare() -> Self { Self(0) }
 
     /// Wrap a raw register value, e.g. one read back out of the CSR.
-    pub const fn from_bits(bits: usize) -> Self {
-        Self(bits)
-    }
+    pub const fn from_bits(bits: usize) -> Self { Self(bits) }
 
     /// The raw value to write to the CSR.
-    pub const fn bits(self) -> usize {
-        self.0
-    }
+    pub const fn bits(self) -> usize { self.0 }
 
     /// The translation mode, or `None` if the field holds a reserved encoding.
     pub const fn mode(self) -> Option<Mode> {
@@ -150,19 +140,13 @@ impl Satp {
     }
 
     /// The address-space identifier.
-    pub const fn asid(self) -> usize {
-        field(self.0, ASID_SHIFT, ASID_BITS)
-    }
+    pub const fn asid(self) -> usize { field(self.0, ASID_SHIFT, ASID_BITS) }
 
     /// The root table's physical page number.
-    pub const fn ppn(self) -> usize {
-        field(self.0, PPN_SHIFT, PPN_BITS)
-    }
+    pub const fn ppn(self) -> usize { field(self.0, PPN_SHIFT, PPN_BITS) }
 
     /// The root table's physical address.
-    pub const fn root(self) -> PhysicalAddr {
-        PhysicalAddr::from_ppn(self.ppn())
-    }
+    pub const fn root(self) -> PhysicalAddr { PhysicalAddr::from_ppn(self.ppn()) }
 
     /// Replace the root page number, keeping mode and ASID.
     ///

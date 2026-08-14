@@ -11,9 +11,9 @@ use super::access::PhysAccess;
 use super::addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
 use super::entry::{Entry, PteFlags};
 use super::frames::FrameSource;
+use super::page_size_at;
 use super::table::Table;
 use super::{ENTRIES_PER_PAGE, LEVELS, PAGE_OFFSET_BITS, ROOT_LEVEL, VPN_BITS};
-use super::page_size_at;
 use crate::utils::mask;
 
 /// Why a mapping could not be installed.
@@ -73,9 +73,7 @@ pub struct Unmapped {
 
 impl Unmapped {
     /// Bytes the leaf covered.
-    pub fn len(&self) -> usize {
-        page_size_at(self.level)
-    }
+    pub fn len(&self) -> usize { page_size_at(self.level) }
 }
 
 /// Reconstruct the physical address a leaf at `level` maps `vaddr` to.
@@ -126,14 +124,10 @@ pub struct Mapper<'a, F, A> {
 
 impl<'a, F: FrameSource, A: PhysAccess> Mapper<'a, F, A> {
     /// Bind `root` to a frame source and an addressing strategy.
-    pub fn new(root: &'a mut Table, frames: F, access: A) -> Self {
-        Self { root, frames, access }
-    }
+    pub fn new(root: &'a mut Table, frames: F, access: A) -> Self { Self { root, frames, access } }
 
     /// Borrow the frame source, for callers that share one allocator.
-    pub fn frames_mut(&mut self) -> &mut F {
-        &mut self.frames
-    }
+    pub fn frames_mut(&mut self) -> &mut F { &mut self.frames }
 
     /// Map a single 4 KiB page `vaddr -> paddr`.
     pub fn map(
@@ -418,9 +412,7 @@ mod tests {
 
     // SAFETY: never hands out a frame, so the contract holds vacuously.
     unsafe impl FrameSource for Barren {
-        fn alloc_zeroed(&mut self) -> Option<PhysicalAddr> {
-            None
-        }
+        fn alloc_zeroed(&mut self) -> Option<PhysicalAddr> { None }
         unsafe fn free(&mut self, _frame: PhysicalAddr) {}
     }
 
@@ -670,7 +662,11 @@ mod tests {
         let mut root = Table::new();
         let mut mapper = Mapper::new(&mut root, Arena::default(), Identity);
         mapper
-            .map(VirtualAddr::new(0x8000_0000), PhysicalAddr::new(0x8000_0000), PteFlags::READ_WRITE)
+            .map(
+                VirtualAddr::new(0x8000_0000),
+                PhysicalAddr::new(0x8000_0000),
+                PteFlags::READ_WRITE,
+            )
             .expect("mapping must succeed");
 
         assert_eq!(mapper.translate(VirtualAddr::new(0x9000_0000)), None, "unmapped VA is None");

@@ -19,12 +19,8 @@ pub trait MemoryAddr: Copy + Clone + Ord + Eq {
     fn align_down(self, align: usize) -> Self {
         Self::from_usize(align_down(self.as_usize(), align))
     }
-    fn align_up(self, align: usize) -> Self {
-        Self::from_usize(align_up(self.as_usize(), align))
-    }
-    fn align_offset(self, align: usize) -> usize {
-        align_offset(self.as_usize(), align)
-    }
+    fn align_up(self, align: usize) -> Self { Self::from_usize(align_up(self.as_usize(), align)) }
+    fn align_offset(self, align: usize) -> usize { align_offset(self.as_usize(), align) }
     fn is_aligned(self, align: usize) -> bool {
         debug_assert!(align.is_power_of_two(), "alignment must be power of 2");
         self.as_usize() & (align - 1) == 0
@@ -38,9 +34,7 @@ pub trait MemoryAddr: Copy + Clone + Ord + Eq {
         Self::from_usize(self.as_usize().wrapping_add_signed(off))
     }
     fn offset_from(self, base: Self) -> isize {
-        (self.as_usize() as isize)
-            .checked_sub(base.as_usize() as isize)
-            .expect("offset overflow")
+        (self.as_usize() as isize).checked_sub(base.as_usize() as isize).expect("offset overflow")
     }
 
     // Addition
@@ -99,9 +93,7 @@ impl fmt::Debug for VirtualAddr {
 /// spells out the VPN decomposition, or `.bits()` — and a caller that reaches for
 /// `.bits()` to print has just dropped the type for the rest of the expression.
 impl fmt::LowerHex for VirtualAddr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::LowerHex::fmt(&self.0, f)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::LowerHex::fmt(&self.0, f) }
 }
 
 impl MemoryAddr for VirtualAddr {
@@ -160,9 +152,7 @@ impl fmt::Debug for PhysicalAddr {
 
 /// See [`VirtualAddr`]'s impl: `{:#x}` without stripping the type.
 impl fmt::LowerHex for PhysicalAddr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::LowerHex::fmt(&self.0, f)
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::LowerHex::fmt(&self.0, f) }
 }
 
 impl MemoryAddr for PhysicalAddr {
@@ -180,9 +170,7 @@ impl PhysicalAddr {
     }
 
     /// The page-aligned physical address of the frame numbered `ppn`.
-    pub const fn from_ppn(ppn: usize) -> Self {
-        Self(ppn << PAGE_OFFSET_BITS)
-    }
+    pub const fn from_ppn(ppn: usize) -> Self { Self(ppn << PAGE_OFFSET_BITS) }
 
     pub const fn bits(self) -> usize { self.0 }
 
@@ -271,7 +259,11 @@ mod tests {
             assert_eq!(pa.ppn(), 0x80201);
             assert_eq!(pa.offset(), 0xABC);
             assert_eq!(pa.bits(), (0x80201 << 12) | 0xABC);
-            assert_eq!(PhysicalAddr::from_ppn(0x80201).bits(), 0x80201 << 12, "from_ppn is offset 0");
+            assert_eq!(
+                PhysicalAddr::from_ppn(0x80201).bits(),
+                0x80201 << 12,
+                "from_ppn is offset 0"
+            );
         }
 
         #[test]
