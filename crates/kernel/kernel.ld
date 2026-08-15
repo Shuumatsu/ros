@@ -24,9 +24,9 @@ tree (see `device_tree`), not a compile-time constant. */
    for all of physical memory, not just for the kernel image, so it is a pure
    constant and NOT skewed by _dram_base. That is what lets Rust express the same
    value as a `const` (memory::direct_map::VA_OFFSET) and translate at compile
-   time. It is the one value the linker and Rust cannot share directly; the boot
-   entry measures the real VMA-PMA skew and direct_map::verify() asserts the two
-   agree.
+   time. It is the one value the linker and Rust cannot share directly, so the boot
+   entry compares them — the VMA the linker wrote into the image against the address
+   the code is running at — and parks instead of jumping high if they disagree.
 
    `_page_size` is named rather than repeated: the eight places below that align or
    pad by a page then say *why*. Rust cannot read it (a small absolute linker symbol

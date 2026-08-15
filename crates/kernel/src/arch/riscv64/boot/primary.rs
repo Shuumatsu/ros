@@ -6,8 +6,8 @@ boot_fn!(
     /// Give Rust a stack, and enter it.
     ///
     /// Reached from `super::entry::enter_high` at a high virtual address, with `a0` the
-    /// hart id, `a1` the device tree and `a2` the measured VA offset — already the three
-    /// arguments [`crate::start::boot`] takes, in order.
+    /// hart id and `a1` the device tree — already the two arguments [`crate::start::boot`]
+    /// takes, in order.
     ///
     /// Nothing else: everything the boot hart still owes before it can trust a static —
     /// zeroing `.bss` above all — is Rust in [`crate::start::boot`], since once `sp` exists

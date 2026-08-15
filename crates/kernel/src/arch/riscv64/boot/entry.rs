@@ -11,7 +11,7 @@
 
 use paging::VirtualAddr;
 
-use crate::memory::{boot_table, layout};
+use crate::memory::{boot_table, direct_map, layout};
 
 /// Define an ISA entry point: pick the prologue this kind of hart continues into, then go
 /// high. Which prologue is the whole of the difference between them.
@@ -51,13 +51,13 @@ boot_fn!(
     /// continue into, chosen by the entry point above, so the two paths are named where
     /// they differ rather than multiplexed on a flag here.
     ///
-    /// Leaves `a0` and `a1` untouched, `a2` holding the measured skew between the kernel's
-    /// link-time addresses and the ones it is running at, `gp` and `tp` as Rust expects,
-    /// and `stvec` on the high alias of the park vector. Does *not* set `sp` — which stack
-    /// this hart gets is the prologue's business.
+    /// Leaves `a0` and `a1` untouched, `gp` and `tp` as Rust expects, and `stvec` on the
+    /// high alias of the park vector. Does *not* set `sp` — which stack this hart gets is
+    /// the prologue's business.
     fn enter_high in entry {
-        // A fault before this line goes back to firmware with nothing to say.
-        // Physical, because that is the only address space that exists yet.
+        // `stvec` holds whatever firmware left until this line, so a fault before it lands
+        // somewhere undefined. Physical, because that is the only address space that
+        // exists yet.
         "lla  t0, {park}",
         "csrw stvec, t0",
 
@@ -72,52 +72,64 @@ boot_fn!(
         "sfence.vma",
 
         // Translation is live and the next fetch still resolves through the identity half,
-        // which is the entire reason that half exists. Label `1:` is reached two ways:
-        // read out of the image, where the linker wrote its absolute high address, and
-        // PC-relatively, which yields the physical one. Jump to the first; their difference
-        // is the skew `direct_map::verify` later checks.
+        // which is the entire reason that half exists. Label `1:` is named twice: read out
+        // of the image, where the linker wrote its absolute high address, and
+        // PC-relatively, which yields the physical one.
+        //
+        // The two must differ by the offset the boot table was built with, or the high half
+        // aliases some other page and the jump leaves the kernel. `kernel.ld` and
+        // `direct_map` state that offset separately, and the loader chooses where the image
+        // landed, so this is where the three are reconciled — before the jump, while the
+        // identity half still makes parking possible. A hart stopped at the *physical* park
+        // vector failed here; one at the high alias took a real trap.
         "lla  t0, 2f",
         "ld   t1, 0(t0)",
         "lla  t0, 1f",
-        "sub  a2, t1, t0",
+        "li   t3, {va_offset}",
+        "add  t0, t0, t3",
+        "bne  t0, t1, {park}",
         "jr   t1",
+        // Aligned for the `ld` above.
         ".balign 8",
         "2:   .dword 1f",
         "1:",
 
-        // High. Restore what the Rust ABI assumes: `gp` for relaxed global access, and `tp`
-        // zeroed, since `cpu::current` reads a non-zero `tp` as a live control block.
+        // High. Establish what the Rust ABI assumes: `gp` for relaxed global access, and
+        // `tp` zeroed, since `cpu::current` reads a non-zero `tp` as a live control block.
         "la   gp, {global_pointer}",
         "mv   tp, zero",
         // Re-point the park vector high; the identity half goes with the boot table.
         "la   t0, {park}",
         "csrw stvec, t0",
 
-        // Into this hart's prologue, at its own high alias.
-        "add  t2, t2, a2",
+        // Into this hart's prologue, at its own high alias. `t3` still holds the offset.
+        "add  t2, t2, t3",
         "jr   t2",
     }
         park = sym trap_park,
         table = sym boot_table::TABLE,
         root_shift = const boot_table::SATP_ROOT_SHIFT,
         satp_template = const boot_table::SATP_TEMPLATE,
+        va_offset = const direct_map::VA_OFFSET,
         global_pointer = sym layout::GLOBAL_POINTER,
 );
 
 boot_fn!(
-    /// Where a fault goes before there is a trap subsystem to take it.
+    /// Where a hart stops when it cannot go on: a fault before there is a trap subsystem to
+    /// take it, or a failed comparison in [`enter_high`].
     ///
-    /// Parks rather than returns: `sepc`, `scause` and `stval` stay put for a debugger,
-    /// and a wedged hart is visible as one instead of silently resetting through
-    /// firmware. Touches no stack, because for most of [`enter_high`] there is none.
+    /// Parks rather than resumes: `sepc`, `scause` and `stval` stay put for a debugger, and
+    /// a wedged hart is visible as one. Touches no stack, because until a prologue runs
+    /// there is none.
     fn trap_park in trap {
         // `stvec` reads the low two bits as its mode, so this address must be a multiple
         // of four or the write means "vectored" — or, `stvec` being WARL, nothing at all.
-        // `.balign` gives the section that alignment, and `_trap_vector` names the address
+        // `.balign` puts the label on that boundary and gives the section the same
+        // alignment, so it survives placement; `_trap_vector` names the address
         // `enter_high` actually loads, which is what `kernel.ld` asserts on.
+        ".balign 4",
         ".globl _trap_vector",
         "_trap_vector:",
-        ".balign 4",
         "1:",
         "wfi",
         "j 1b",

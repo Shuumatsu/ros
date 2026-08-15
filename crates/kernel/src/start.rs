@@ -12,14 +12,13 @@ use crate::cpu;
 use crate::memory;
 
 /// First ordinary Rust code on the boot hart.
-pub(crate) unsafe extern "C" fn boot(hartid: usize, dtb: usize, va_offset: usize) -> ! {
+pub(crate) unsafe extern "C" fn boot(hartid: usize, dtb: usize) -> ! {
     // NOTHING may go above this line. `.bss` has no bytes in the image, so until
     // this returns every static holds whatever was in that RAM beforehand, and
     // `init_boot` on the next line writes to one.
     unsafe { memory::layout::clear_bss() };
 
     cpu::init_boot(hartid);
-    memory::direct_map::verify(va_offset);
 
     // The DTB from a1 fills the device table, which is where the console learns its UART
     // base. Zero-allocation, so it is safe before the heap exists.
