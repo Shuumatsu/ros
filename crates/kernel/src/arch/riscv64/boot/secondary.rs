@@ -4,7 +4,6 @@
 //! Together because they are one interface written twice — the `#[repr(C)]` struct, and
 //! the field offsets the assembly loads from it.
 
-use core::arch::naked_asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 const PUBLISHED: usize = 1;
@@ -60,10 +59,7 @@ const CPU_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, cpu);
 #[unsafe(naked)]
 #[unsafe(link_section = ".text.init.entry")]
 pub(super) unsafe extern "custom" fn prologue() {
-    naked_asm!(
-        ".option push",
-        ".option norvc",
-        ".option norelax",
+    boot_asm!({
         // Does not spin in practice — `publish` finishes before `hart_start` — but it is
         // the acquire half of that release store: SBI does not promise the start request
         // orders the boot hart's writes, and every field below is garbage if nothing does.
@@ -78,9 +74,10 @@ pub(super) unsafe extern "custom" fn prologue() {
         "ld    a1, {cpu}(a1)",
         "csrw  satp, t0",
         "sfence.vma",
+        // Before the `tail`, which expands through `t1`.
         "mv    sp, t1",
         "tail  {secondary}",
-        ".option pop",
+    }
         ready = const READY_OFFSET,
         satp = const SATP_OFFSET,
         stack_top = const STACK_TOP_OFFSET,

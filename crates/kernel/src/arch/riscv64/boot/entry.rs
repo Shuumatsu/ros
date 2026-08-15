@@ -9,51 +9,43 @@
 //! PC-relative, but a jump table, a vtable or a `&'static str` is an *absolute* link-time
 //! address, and those are unmapped until translation is on.
 
-use core::arch::naked_asm;
-
 use paging::VirtualAddr;
 
-use crate::memory::boot_table;
+use crate::memory::{boot_table, layout};
 
-unsafe extern "C" {
-    #[link_name = "__global_pointer$"]
-    static GLOBAL_POINTER: u8;
+/// Define an ISA entry point: pick the prologue this kind of hart continues into, then go
+/// high. Which prologue is the whole of the difference between them.
+macro_rules! isa_entry {
+    ($(#[$doc:meta])* $vis:vis fn $name:ident => $prologue:path) => {
+        $(#[$doc])*
+        #[unsafe(naked)]
+        #[unsafe(link_section = ".text.init.entry")]
+        $vis unsafe extern "custom" fn $name() {
+            boot_asm!({
+                // `lla` is unconditionally PC-relative, the only kind of address with a
+                // meaning before translation is on.
+                "lla  t2, {prologue}",
+                "tail {enter_high}",
+            }
+                prologue = sym $prologue,
+                enter_high = sym enter_high,
+            )
+        }
+    };
 }
 
-/// Where the boot hart lands, from `_start`'s branch in the Image header.
-#[unsafe(naked)]
-#[unsafe(link_section = ".text.init.entry")]
-pub(super) unsafe extern "custom" fn primary_entry() {
-    naked_asm!(
-        ".option push",
-        ".option norvc",
-        ".option norelax",
-        "lla t2, {prologue}",
-        "tail {enter_high}",
-        ".option pop",
-        prologue = sym super::primary::prologue,
-        enter_high = sym enter_high,
-    )
-}
+isa_entry!(
+    /// Where the boot hart lands, from `_start`'s branch in the Image header.
+    pub(super) fn primary_entry => super::primary::prologue
+);
 
-/// Where a hart started by [`crate::cpu::start_secondaries`] lands.
-///
-/// SBI is given the *physical* address of this, because a starting hart has no
-/// translation yet — see [`secondary_entry_address`].
-#[unsafe(naked)]
-#[unsafe(link_section = ".text.init.entry")]
-unsafe extern "custom" fn secondary_entry() {
-    naked_asm!(
-        ".option push",
-        ".option norvc",
-        ".option norelax",
-        "lla t2, {prologue}",
-        "tail {enter_high}",
-        ".option pop",
-        prologue = sym super::secondary::prologue,
-        enter_high = sym enter_high,
-    )
-}
+isa_entry!(
+    /// Where a hart started by [`crate::cpu::start_secondaries`] lands.
+    ///
+    /// SBI is given the *physical* address of this, because a starting hart has no
+    /// translation yet — see [`secondary_entry_address`].
+    fn secondary_entry => super::secondary::prologue
+);
 
 /// Install the boot page table and continue at the kernel's link-time addresses.
 ///
@@ -61,17 +53,13 @@ unsafe extern "custom" fn secondary_entry() {
 /// into, chosen by the entry point above, so the two paths are named where they differ
 /// rather than multiplexed on a flag here.
 ///
-/// Leaves `a0` and `a1` untouched, `a3` holding the measured VMA-to-LMA skew, and `gp`,
+/// Leaves `a0` and `a1` untouched, `a2` holding the measured VMA-to-LMA skew, and `gp`,
 /// `tp` and `stvec` as Rust expects. Does *not* set `sp` — which stack this hart gets is
 /// the prologue's business.
 #[unsafe(naked)]
 #[unsafe(link_section = ".text.init.entry")]
 unsafe extern "custom" fn enter_high() {
-    naked_asm!(
-        ".option push",
-        ".option norvc",
-        ".option norelax",
-
+    boot_asm!({
         // A fault before this line goes back to firmware with nothing to say.
         // Physical, because that is the only address space that exists yet.
         "lla  t0, {park}",
@@ -95,7 +83,7 @@ unsafe extern "custom" fn enter_high() {
         "lla  t0, 2f",
         "ld   t1, 0(t0)",
         "lla  t0, 1f",
-        "sub  a3, t1, t0",
+        "sub  a2, t1, t0",
         "jr   t1",
         ".balign 8",
         "2:   .dword 1f",
@@ -110,15 +98,14 @@ unsafe extern "custom" fn enter_high() {
         "csrw stvec, t0",
 
         // Into this hart's prologue, at its own high alias.
-        "add  t2, t2, a3",
+        "add  t2, t2, a2",
         "jr   t2",
-
-        ".option pop",
+    }
         park = sym trap_park,
         table = sym boot_table::TABLE,
         root_shift = const boot_table::SATP_ROOT_SHIFT,
         satp_template = const boot_table::SATP_TEMPLATE,
-        global_pointer = sym GLOBAL_POINTER,
+        global_pointer = sym layout::GLOBAL_POINTER,
     )
 }
 
@@ -130,7 +117,15 @@ unsafe extern "custom" fn enter_high() {
 #[unsafe(naked)]
 #[unsafe(link_section = ".text.init.trap")]
 unsafe extern "custom" fn trap_park() {
-    naked_asm!(".option push", ".option norvc", "1:", "wfi", "j 1b", ".option pop")
+    boot_asm!({
+        // `stvec` reads the low two bits as its mode, so this address must be a multiple
+        // of four or the write means "vectored" — or, `stvec` being WARL, nothing at all.
+        // This raises the section's own alignment, which is what the linker honours.
+        ".balign 4",
+        "1:",
+        "wfi",
+        "j 1b",
+    })
 }
 
 /// [`secondary_entry`] as the virtual address it is linked at.

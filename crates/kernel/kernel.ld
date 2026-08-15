@@ -2,10 +2,8 @@
 
 OUTPUT_ARCH( "riscv" )
 
-/*
-stores the address of _start as the "entry point"
-(or where CPU instructions should start executing.
-*/
+/* The ELF entry point. The flat Image is entered at offset zero instead; the ASSERTs at
+the bottom pin the two to the same instruction. */
 ENTRY( _start )
 
 /* Higher-half kernel: linked to *run* at high virtual addresses, but *loaded*
@@ -73,35 +71,17 @@ SECTIONS {
 
     .text : AT(ADDR(.text) - _va_offset) {
         PROVIDE(_text_start = .);
-        /*
-        We are going to layout all text sections here, starting with 
-        .text.init. The asterisk in front of the parentheses means to match
-        the .text.init section of ANY object file. Otherwise, we can specify
-        which object file should contain the .text.init section, for example,
-        boot.o(.text.init) would specifically put the .text.init section of
-        our bootloader here.
 
-        Because we might want to change the name of our files, we'll leave it
-        with a *.
+        /* The boot stage, in this order because the Image header must be the image's
+           first byte and the entry it branches to must be within a `j` of it. KEEP: the
+           loader, `sym` operands and `stvec` are what reach these, so the link sees no
+           reference to them. Each carries the alignment its own code asks for.
 
-        Inside the parentheses is the name of the section. I created my own
-        called .text.init to make 100% sure that the _start is put right at the
-        beginning. The linker will lay this out in the order it receives it:
-
-        .text.init first
-        all .text sections next
-        any .text.* sections last
-
-        .text.* means to match anything after .text. If we didn't already specify
-        .text.init, this would've matched here. The assembler and linker can place
-        things in "special" text sections, so we match any we might come across here.
-        */
+           The wildcard last, and it must stay: anything left unmatched is placed after
+           _text_end, outside every range kernel_table maps. */
         KEEP(*(.text.init.header))
-        . = ALIGN(4);
         KEEP(*(.text.init.entry))
-        . = ALIGN(4);
         KEEP(*(.text.init.trap))
-        *(.text.init)
         *(.text .text.*)
 
         PROVIDE(_text_end = .);

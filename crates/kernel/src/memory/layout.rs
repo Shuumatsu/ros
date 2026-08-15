@@ -1,20 +1,34 @@
-//! Kernel memory layout symbols from the linker script.
+//! The symbols `kernel.ld` defines, and the kernel's view of the layout they describe.
+//!
+//! Every name the linker script chooses lives here, `__global_pointer$` included.
 
 use paging::sv39::PAGE_SIZE;
 use paging::{MemoryAddr, VirtualAddr};
 
-/// Declares an extern linker symbol and creates an accessor function.
+/// Declares every symbol `kernel.ld` defines, in one place.
 ///
-/// The kernel is linked high, so every one of these is a *virtual* address and typed as
-/// one at the source. The raw symbols are re-exported because the boot entry needs some
-/// as `sym` operands; a second `extern` block would be a second place for the linker
-/// script's spelling to be wrong.
+/// One `extern` block, because a second would be a second place for the linker script's
+/// spelling to be wrong. The raw statics are `pub(crate)` because the boot entry needs
+/// some as `sym` operands.
+///
+/// `addresses` get an accessor as well: the kernel is linked high, so each is a *virtual*
+/// address and is typed as one at the source. `raw` is for the rest — a symbol the kernel
+/// only ever names, which stays untyped because arithmetic on it would mean nothing.
 macro_rules! linker_symbol {
-    ($($fn_name:ident => $sym_name:ident),* $(,)?) => {
+    (
+        addresses { $($fn_name:ident => $sym_name:ident),* $(,)? }
+        raw { $($(#[$raw_doc:meta])* $raw_name:ident $(as $link_name:literal)?),* $(,)? }
+    ) => {
         unsafe extern "C" {
             $(
                 #[doc = concat!("Raw `", stringify!($sym_name), "`. Prefer [`", stringify!($fn_name), "`].")]
                 pub(crate) static $sym_name: u8;
+            )*
+            $(
+                $(#[$raw_doc])*
+                $(#[link_name = $link_name])?
+                $(#[doc = concat!("Linked as `", $link_name, "`.")])?
+                pub(crate) static $raw_name: u8;
             )*
         }
         $(
@@ -27,23 +41,31 @@ macro_rules! linker_symbol {
 }
 
 linker_symbol!(
-    text_start         => _text_start,
-    text_end           => _text_end,
-    rodata_start       => _rodata_start,
-    rodata_end         => _rodata_end,
-    data_start         => _data_start,
-    data_end           => _data_end,
-    bss_start          => _bss_start,
-    bss_end            => _bss_end,
-    memory_start       => _memory_start,
-    boot_stack_start   => _boot_stack_start,
-    boot_stack_end     => _boot_stack_end,
-    free_ram_start     => _free_ram_start,
+    addresses {
+        text_start         => _text_start,
+        text_end           => _text_end,
+        rodata_start       => _rodata_start,
+        rodata_end         => _rodata_end,
+        data_start         => _data_start,
+        data_end           => _data_end,
+        bss_start          => _bss_start,
+        bss_end            => _bss_end,
+        memory_start       => _memory_start,
+        boot_stack_start   => _boot_stack_start,
+        boot_stack_end     => _boot_stack_end,
+        free_ram_start     => _free_ram_start,
+    }
+    raw {
+        /// The anchor `gp` holds, so that global access can be relaxed to `gp`-relative.
+        /// A register value; the boot entry names it only to load `gp` from it.
+        GLOBAL_POINTER as "__global_pointer$",
+    }
 );
 
-// Only *address* symbols. A small absolute linker symbol (a size like 4096) fails to
-// link this way — the reference is PC-relative — so sizes live in Rust and are derived
-// from the addresses above.
+// Symbols only, never *values*. A small absolute linker symbol (a size like 4096) fails to
+// link this way — the reference is PC-relative — so sizes live in Rust and are derived from
+// the addresses above. The two `kernel.ld` does define, `_text_offset` and `_image_size`,
+// are named in assembly instead; the Image header is their only reader.
 
 /// Zero `.bss`, putting the statics into the state Rust compiled against.
 ///
