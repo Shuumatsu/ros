@@ -32,6 +32,10 @@ pub mod machine;
 pub mod region;
 pub mod stack;
 
+use paging::MemoryAddr;
+
+use crate::utils::ByteSize;
+
 pub use direct_map::{phys_to_virt, virt_to_phys};
 pub use machine::MachineMemory;
 
@@ -47,7 +51,10 @@ pub use machine::MachineMemory;
 /// whoever probed the platform's to describe, `secondary_harts` is `cpu`'s to decide, and
 /// both of those already depend on this module. `start` knows all three.
 pub fn init(machine: MachineMemory<'_>, secondary_harts: impl Iterator<Item = usize>) {
-    // Before anything derives an address from the linker symbols or from the machine.
+    // Before any *mapping* is derived from the linker symbols or the machine. Addresses
+    // have been derived already — `device_tree` located the kernel's RAM bank by its load
+    // address, and the console reached the UART through the direct map — so these confirm
+    // what the earlier boot stages assumed rather than gate the first use.
     layout::report();
     layout::check();
     stack::check_layout();
@@ -57,12 +64,26 @@ pub fn init(machine: MachineMemory<'_>, secondary_harts: impl Iterator<Item = us
     // 1. Physical frames: [free_start, ram_end). `free_start` is the top of the kernel
     //    image (a high VA); the allocator vends *physical* addresses, so convert it back.
     let free_start = virt_to_phys(layout::free_ram_start());
+    let ram_end = machine.ram.end();
     assert!(
-        free_start < machine.ram_end,
-        "kernel image top {free_start:#x} meets/exceeds RAM top {:#x}; give the VM more RAM",
-        machine.ram_end
+        machine.ram.contains(free_start),
+        "the kernel image occupies {:#x}..{free_start:#x}, which is not inside the RAM bank at \
+         {:#x}..{ram_end:#x} the machine says it was loaded into",
+        virt_to_phys(layout::memory_start()),
+        machine.ram.base
     );
-    frame::init(free_start, machine.ram_end, machine.foreign);
+    // Everything below the image belongs to the previous boot stage, so the pool starts at
+    // the image top rather than at the bank base. Reported because "not ours" and "nobody
+    // looked" are the same number of bytes lost, and only one of them is intended.
+    let below = free_start.sub_addr(machine.ram.base);
+    println!(
+        "[memory] RAM bank {:#x}..{ram_end:#x} ({}); {} below the kernel image belongs to the \
+         previous boot stage and is not managed",
+        machine.ram.base,
+        ByteSize(machine.ram.size),
+        ByteSize(below)
+    );
+    frame::init(free_start, ram_end, machine.foreign);
     frame::report();
     frame::self_test();
 

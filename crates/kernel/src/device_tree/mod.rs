@@ -11,12 +11,14 @@
 //! platform constant; memory bring-up takes all of its share in one go, as
 //! [`machine_memory`].
 //!
-//! **Known gap:** a `reg` address is used as a CPU physical address directly, which is
-//! silently wrong under a parent bus whose `ranges` is not identity.
-//! `Fdt::translate_address` wants a path borrowed for the blob's lifetime while
-//! `Node::path()` returns an owned string, so composing them means reimplementing the
-//! `ranges` walk here. On QEMU virt `/soc` translates one-to-one, and `platform-bus` — the
-//! one node that does not — has no children.
+//! **What is deliberately not collected:** a bridge's own `ranges` describe apertures its
+//! children may sit in — the PCI host on QEMU virt publishes 1 GiB at `0x4000_0000` and
+//! 16 GiB above `0x4_0000_0000`. Those are not recorded as MMIO windows, because
+//! [`machine_memory`] is the list [`crate::memory::kernel_table`] maps in full, and
+//! seventeen gigabytes of aperture no driver has claimed is not a mapping worth making at
+//! boot. Whoever brings up PCI takes the aperture from the bridge node and maps what it
+//! uses. `ranges` *is* followed for translation, so a child's `reg` is recorded as the
+//! address the CPU issues.
 
 mod report;
 mod table;
@@ -28,8 +30,7 @@ use fdt_raw::{Fdt, Header};
 use paging::PhysicalAddr;
 
 use crate::memory::MachineMemory;
-use crate::memory::direct_map::DIRECT_MAP_END;
-use crate::utils::ByteSize;
+use crate::memory::direct_map;
 
 /// Parse the device tree at `dtb_ptr` and record the hardware the kernel needs.
 ///
@@ -60,31 +61,19 @@ pub unsafe fn init(dtb_ptr: usize) {
     let base = PhysicalAddr::new(dtb_ptr);
     // Two steps, because the blob carries its own length: the header has to be readable
     // before the rest can be measured.
-    require_reachable(base, size_of::<Header>());
+    direct_map::require_reach("the device tree header", base, size_of::<Header>());
     let blob = crate::memory::phys_to_virt(base).as_mut_ptr::<u8>();
     // SAFETY: forwarded from this function's contract — `dtb_ptr` addresses a valid
     // FDT that stays mapped and unmodified, and `blob` is its direct-map alias.
     let fdt = unsafe { Fdt::from_ptr(blob) }
         .unwrap_or_else(|error| panic!("[dtb] failed to parse FDT at {dtb_ptr:#x}: {error:?}"));
     let size = fdt.header().totalsize as usize;
-    require_reachable(base, size);
+    direct_map::require_reach("the device tree blob", base, size);
 
     // Which `/memory` bank is ours: the one holding our own load address.
     let kernel_pa = crate::memory::virt_to_phys(crate::memory::layout::text_start());
 
     table::TABLE.call_once(|| walk::discover(&fdt, base, size, kernel_pa));
-}
-
-/// Require the blob to lie inside the direct map's window, which is all the physical memory
-/// the kernel can name.
-fn require_reachable(base: PhysicalAddr, size: usize) {
-    let end = base.bits().saturating_add(size);
-    assert!(
-        end <= DIRECT_MAP_END.bits(),
-        "[dtb] the blob at {base:#x}..{end:#x} lies past the direct map's {} window; raise \
-         memory::direct_map::DIRECT_MAP_SPAN",
-        ByteSize(DIRECT_MAP_END.bits())
-    );
 }
 
 /// Everything [`crate::memory::init`] needs to know about physical memory, as one value.
@@ -99,7 +88,7 @@ fn require_reachable(base: PhysicalAddr, size: usize) {
 pub fn machine_memory() -> MachineMemory<'static> {
     let table = table::get().expect("device tree not parsed; call device_tree::init first");
     MachineMemory {
-        ram_end: table.ram.end,
+        ram: &table.ram,
         foreign: table.foreign.as_slice(),
         mmio: table.mmio.as_slice(),
     }

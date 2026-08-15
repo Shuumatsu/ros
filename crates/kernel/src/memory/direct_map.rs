@@ -84,6 +84,26 @@ pub const DIRECT_MAP_END: PhysicalAddr = PhysicalAddr::new(DIRECT_MAP_SPAN);
 /// with no "before the pool exists" state to carry.
 pub const DIRECT_MAP_END_VA: VirtualAddr = phys_to_virt(DIRECT_MAP_END);
 
+/// Require `[base, base + size)` to lie inside the window, naming it and the constant to
+/// raise if it does not.
+///
+/// The single check, for every caller that needs one — the device tree blob before it is
+/// read, every device window before one is mapped. A physical range the direct map cannot
+/// name is not an error [`phys_to_virt`] can report: it computes an address either way,
+/// one outside the window and inside whatever [`super::kernel_va`] hands out next.
+///
+/// Saturating, so a firmware-supplied size that would wrap cannot produce an end below the
+/// base and pass.
+pub fn require_reach(what: &str, base: PhysicalAddr, size: usize) {
+    let end = base.bits().saturating_add(size);
+    assert!(
+        end <= DIRECT_MAP_END.bits(),
+        "{what} at {base:#x}..{end:#x} lies past the direct map's {} window; raise \
+         memory::direct_map::DIRECT_MAP_SPAN",
+        ByteSize(DIRECT_MAP_SPAN)
+    );
+}
+
 /// Translate a physical address to its kernel virtual address (`VA = PA + OFFSET`).
 ///
 /// The types are the point of the signature: with bare `usize`s,

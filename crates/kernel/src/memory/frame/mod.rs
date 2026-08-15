@@ -2,9 +2,11 @@
 //! kernel image, vending page-aligned frames for the heap, page tables, user pages and DMA
 //! buffers. [`reserve`] holds what must never be vended.
 //!
-//! It comes up **first** because it needs no heap: its metadata is a bitmap taken from the
-//! front of the managed range and excluded from the frames vended, so the bookkeeping
-//! cannot be allocated away. The heap is then carved out of it.
+//! It comes up **first** because it needs no heap: its metadata is a bitmap kept in the
+//! pool itself and withheld from the frames vended, so the bookkeeping cannot be allocated
+//! away. Where in the pool is `reserve`'s decision, because writing the bitmap precedes
+//! every reservation and so cannot assume the front is free. The heap is then carved out
+//! of the pool.
 //!
 //! Frames come out **zeroed** — page tables assume clean PTEs, and a previous owner's
 //! bytes must not leak into a fresh mapping. The allocator core never touches frame
@@ -34,14 +36,15 @@ pub use self_test::run as self_test;
 /// already inside this lock would deadlock against itself.
 static FRAME_ALLOCATOR: IrqMutex<Option<FrameAllocator<'static>>> = IrqMutex::new(None);
 
-/// Frames this module took at [`init`], bitmap included — one value, so its two ends
-/// cannot be read at different times or disagree.
+/// Frames this module took at [`init`] — one value, so its two ends cannot be read at
+/// different times or disagree.
 static OWNED: Once<FrameRange> = Once::new();
 
-/// The physical span this module owns, **including** the metadata bitmap.
+/// The physical span this module owns, which [`crate::memory::kernel_table`] maps exactly.
 ///
-/// [`crate::memory::kernel_table`] maps exactly this. Not the allocator's `range()`, which
-/// excludes the bitmap — that needs mapping too, since this module writes it.
+/// The same range the allocator manages: the metadata bitmap is inside the pool and
+/// withheld from it like any other reservation, so there is no second extent to keep in
+/// step with this one.
 pub fn owned_range() -> (PhysicalAddr, PhysicalAddr) {
     let owned = OWNED.get().expect("frame::owned_range queried before frame::init");
     (PhysicalAddr::from_ppn(owned.start()), PhysicalAddr::from_ppn(owned.end()))
@@ -95,11 +98,10 @@ impl Frames {
 }
 
 /// Bring the allocator up over free physical RAM `[free_start, ram_end)`, withholding
-/// `foreign`.
+/// `foreign` and its own metadata.
 ///
-/// The bitmap is reserved from the front of the range and excluded from the
-/// managed frames. RAM beyond the direct map's window is dropped (loudly),
-/// because its frames would have no high-half alias.
+/// RAM beyond the direct map's window is dropped (loudly), because its frames would have
+/// no high-half alias.
 ///
 /// # Panics
 ///
@@ -127,35 +129,33 @@ pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr, foreign: &[PhysRang
 
     let start_ppn = free_start.align_up(PAGE_SIZE).ppn();
     let end_ppn = usable_end.align_down(PAGE_SIZE).ppn();
-    let full = FrameRange::new(start_ppn, end_ppn).expect("free RAM range empty after alignment");
+    let pool = FrameRange::new(start_ppn, end_ppn).expect("free RAM range empty after alignment");
 
-    // Sized for `full`, a superset, which always covers `managed`: a decomposition of
-    // `n` frames into `r` roots needs `2n - r` bits, and dropping the `b >= 1` bitmap
-    // frames from the front saves `2b` while adding at most `b` roots back.
-    let layout = metadata_layout(full).expect("frame metadata size exceeds usize");
+    let layout = metadata_layout(pool).expect("frame metadata size exceeds usize");
     let bitmap_words = layout.words();
     let bitmap_frames = (bitmap_words * core::mem::size_of::<usize>()).div_ceil(PAGE_SIZE);
 
-    let managed = FrameRange::new(start_ppn + bitmap_frames, end_ppn)
-        .expect("no RAM left to manage after reserving the frame bitmap");
-
-    let bitmap_va = phys_to_virt(PhysicalAddr::from_ppn(start_ppn));
-    // SAFETY: the bitmap frames are page-aligned, mapped, excluded from `managed`, and
-    // live as long as the kernel, so this `'static mut` borrow is sound and exclusive.
+    // Where, not just how big. Building the allocator zeroes these frames, and that write
+    // happens before a single reservation exists to protect anything from it, so the
+    // choice has to respect `foreign` on its own.
+    let metadata = reserve::place_metadata(pool, bitmap_frames, foreign);
+    let bitmap_va = phys_to_virt(PhysicalAddr::from_ppn(metadata.start()));
+    // SAFETY: the bitmap frames are page-aligned, mapped, withheld from the pool below
+    // before anything can be vended, and live as long as the kernel, so this `'static mut`
+    // borrow is sound and exclusive.
     let bitmap: &'static mut [usize] =
         unsafe { core::slice::from_raw_parts_mut(bitmap_va.as_mut_ptr(), bitmap_words) };
 
-    // SAFETY: `managed` covers RAM strictly above the kernel image and the bitmap —
-    // memory nothing else owns — and the boot table maps every frame in it.
+    // SAFETY: `pool` covers RAM strictly above the kernel image — memory nothing else
+    // owns — and the boot table maps every frame in it.
     let mut allocator = unsafe {
-        FrameAllocator::new(managed, bitmap).expect("frame allocator initialization failed")
+        FrameAllocator::new(pool, bitmap).expect("frame allocator initialization failed")
     };
     // Before publication, so nothing can be vended out of a carve-out in between.
-    reserve::foreign_memory(&mut allocator, managed, foreign);
+    reserve::everything_foreign(&mut allocator, pool, metadata, foreign);
     FRAME_ALLOCATOR.with(|slot| *slot = Some(allocator));
 
-    // The span taken, bitmap included, rather than `managed`; see `owned_range`.
-    OWNED.call_once(|| full);
+    OWNED.call_once(|| pool);
 }
 
 /// Print what the kernel owns, what is left, and what was withheld.

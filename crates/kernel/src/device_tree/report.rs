@@ -4,8 +4,6 @@
 //! discovery. Kept in its own file because it is the one part of this module that runs
 //! after the walk rather than as part of it, on the UART the walk itself found.
 
-use paging::MemoryAddr;
-
 use super::table;
 use crate::utils::ByteSize;
 
@@ -23,8 +21,8 @@ pub fn summary() {
     println!(
         "[dtb] ram:   {:#x}..{:#x} ({})",
         table.ram.base,
-        table.ram.end,
-        ByteSize(table.ram.end.sub_addr(table.ram.base))
+        table.ram.end(),
+        ByteSize(table.ram.size)
     );
 
     let device = |what: &str, dev: &table::Device| match dev.irq {
@@ -53,6 +51,9 @@ pub fn summary() {
         None => println!("[dtb] timebase: absent (bounded waits will be skipped)"),
     }
     if table.disabled > 0 {
-        println!("[dtb] skipped {} node(s) whose status is not okay", table.disabled);
+        println!(
+            "[dtb] skipped {} node(s): status not okay, or below one that is not",
+            table.disabled
+        );
     }
 }

@@ -7,13 +7,14 @@
 
 use heapless::Vec;
 
-use paging::PhysicalAddr;
-
+use crate::cpu::MAX_CPUS;
 use crate::memory::machine::{MAX_FOREIGN, MAX_MMIO, PhysRange};
 
-/// Hart ids recordable. Independent of how many the kernel has stacks for — the
-/// machine reports what exists, `memory::stack` decides how many we can serve.
-pub const MAX_HART_IDS: usize = 64;
+/// Hart ids recordable. The kernel can serve one hart per [`MAX_CPUS`] slot, so recording
+/// more would be describing machines it cannot run on; the walk says so where it finds
+/// them, rather than letting `cpu::start_secondaries` discover it after `memory::stack`
+/// has already allocated and mapped a stack for every one of them.
+pub const MAX_HART_IDS: usize = MAX_CPUS;
 
 /// A device the kernel knows by name, resolved from a single node.
 ///
@@ -29,24 +30,19 @@ pub struct Device {
     /// Length of that window. Never zero: a `reg` without a usable size contributes no
     /// window, and a node that contributes none resolves no device.
     pub size: usize,
-    /// `None` when the node declared no `interrupts`.
+    /// The interrupt this device raises, when the tree states it unambiguously — see
+    /// `super::walk`'s `irq_of`. `None` also means "the tree did not say plainly", not
+    /// only "the device has no interrupt".
     pub irq: Option<usize>,
-}
-
-/// Physical RAM backing the kernel.
-#[derive(Clone, Copy, Debug)]
-pub struct Ram {
-    pub base: PhysicalAddr,
-    /// Exclusive end — the authoritative RAM top.
-    pub end: PhysicalAddr,
 }
 
 /// Everything one pass over the tree turns up.
 pub struct DeviceTable {
     /// The blob itself: where it is and how big, so it can be reserved.
     pub blob: PhysRange,
-    /// The `/memory` bank containing the kernel.
-    pub ram: Ram,
+    /// The `/memory` bank containing the kernel, base and all: the authoritative extent of
+    /// the RAM this kernel manages.
+    pub ram: PhysRange,
     /// The primary console UART. Not optional: without it there is no console, and
     /// [`super::init`] panics rather than let the kernel limp on a guessed address.
     pub uart: Device,
@@ -54,14 +50,16 @@ pub struct DeviceTable {
     pub plic: Option<Device>,
     /// Core-local interruptor, if the tree described one.
     pub clint: Option<Device>,
-    /// Ticks per second of the `time` CSR, from `/cpus/timebase-frequency`.
+    /// Ticks per second of the `time` CSR, from `timebase-frequency`.
     pub timebase_hz: Option<usize>,
     /// Every MMIO window the tree describes — the single answer to "where is device
     /// memory", and a genuine walk rather than a list of the devices driven today, so a
     /// future driver finds its window here.
     ///
     /// A window says the *device* exists, not that S-mode may touch it: PMP is a separate
-    /// layer, and denies the CLINT on QEMU virt.
+    /// layer, and denies the CLINT on QEMU virt. Overlap between entries is expected;
+    /// `memory::machine::coalesce` owns removing it, because the page rounding that
+    /// creates most of it belongs to whoever maps these.
     pub mmio: Vec<PhysRange, MAX_MMIO>,
     /// Every RAM range that exists but is not the kernel's to hand out; the frame
     /// allocator would otherwise vend all of it.

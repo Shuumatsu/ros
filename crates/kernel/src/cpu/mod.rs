@@ -53,7 +53,11 @@ impl CpuSlot {
 }
 
 /// Upper bound on harts this kernel will run.
-const MAX_CPUS: usize = 64;
+///
+/// Also what `device_tree` records hart ids up to, so a machine with more of them is
+/// reported where they are found rather than after `memory::stack` has allocated and
+/// mapped a stack for each.
+pub const MAX_CPUS: usize = 64;
 
 /// Slot 0 belongs to the firmware-selected boot hart.
 static CPU_SLOTS: [CpuSlot; MAX_CPUS] = [const { CpuSlot::new() }; MAX_CPUS];

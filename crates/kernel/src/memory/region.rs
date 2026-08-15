@@ -21,9 +21,11 @@ use crate::utils::ByteSize;
 /// mode flag to branch on — [`install`](Self::install) just carries the constant
 /// difference across the range.
 #[derive(Clone, Copy)]
-pub struct Region {
-    /// What this region is, for diagnostics and the boot log.
-    pub name: &'static str,
+pub struct Region<'a> {
+    /// What this region is, for diagnostics and the boot log. Borrowed, because a device
+    /// window's name comes off the node that described it and lives in the device table
+    /// rather than in the binary.
+    pub name: &'a str,
     /// First virtual address.
     pub va: VirtualAddr,
     /// Physical address `va` maps to.
@@ -36,7 +38,7 @@ pub struct Region {
     pub flags: PteFlags,
 }
 
-impl Region {
+impl Region<'_> {
     /// Bytes mapped by one leaf of this region.
     pub fn page_size(&self) -> usize { page_size_at(self.level) }
 
@@ -166,7 +168,7 @@ impl Region {
 /// Mechanism, so it lives beside `install` rather than beside any one layout: a user
 /// address space needs the same check over a different list. `O(n²)`, once, over tens of
 /// entries.
-pub fn audit_disjoint(regions: &[Region]) {
+pub fn audit_disjoint(regions: &[Region<'_>]) {
     for (index, a) in regions.iter().enumerate() {
         if a.is_empty() {
             continue;
@@ -194,7 +196,7 @@ pub fn audit_disjoint(regions: &[Region]) {
 /// Adjacent regions sharing a name, page size and rights collapse into one `xN` line —
 /// stacks are one region each, so a big machine would otherwise bury everything else.
 /// All three must match or the printed total is a lie.
-pub fn report(regions: &[Region]) {
+pub fn report(regions: &[Region<'_>]) {
     let mut index = 0;
     while index < regions.len() {
         let region = &regions[index];

@@ -21,7 +21,7 @@ use spin::Once;
 
 use crate::memory::address_space::{AddressSpace, KernelMapper};
 use crate::memory::direct_map::SUPERPAGE;
-use crate::memory::machine::PhysRange;
+use crate::memory::machine::{self, PhysRange};
 use crate::memory::region::{self, Region};
 use crate::memory::{frame, kernel_va, layout, phys_to_virt, stack, virt_to_phys};
 use crate::sync::IrqMutex;
@@ -39,12 +39,15 @@ const READ_WRITE: PteFlags = PteFlags::READ_WRITE.union(PteFlags::ACCESS).union(
 // No MAX_REGIONS: the hart count and the MMIO window count are runtime facts, so the
 // bound could not be written. The heap is up by the time this runs.
 
-/// The largest page-table level that tiles `[base, base + len)` *exactly*.
+/// The largest page-table level that tiles `[base, base + len)` without reaching outside
+/// its own page.
 ///
-/// Exactly, because a superpage rounds outward: one that does not divide the window
-/// would map whatever sits next to the device.
+/// A leaf rounds outward, so a level that does not divide the window would map whatever
+/// sits next to the device. Level 0 is the floor rather than a further candidate: a
+/// sub-page window has no exact tiling at all, and rounding it out to the 4 KiB page it
+/// already sits in is the smallest thing a page table can express.
 fn largest_level_for(base: PhysicalAddr, len: usize) -> usize {
-    (0..LEVELS)
+    (1..LEVELS)
         .rev()
         .find(|&level| {
             let page = page_size_at(level);
@@ -55,13 +58,13 @@ fn largest_level_for(base: PhysicalAddr, len: usize) -> usize {
 
 /// A direct-map region: the physical side is *derived* from the virtual one, so the two
 /// cannot disagree.
-fn direct(
-    name: &'static str,
+fn direct<'a>(
+    name: &'a str,
     start: VirtualAddr,
     end: VirtualAddr,
     level: usize,
     flags: PteFlags,
-) -> Region {
+) -> Region<'a> {
     Region {
         name,
         va: start,
@@ -73,18 +76,23 @@ fn direct(
 }
 
 /// Compute the kernel's address-space layout.
-fn regions(mmio: &[PhysRange]) -> Vec<Region> {
+///
+/// `windows` is the coalesced device list rather than the machine's own, so it is passed
+/// in: it has to outlive the regions that borrow their names from it.
+fn regions<'a>(windows: &'a [PhysRange]) -> Vec<Region<'a>> {
     let mut regions = Vec::new();
-    let mut push = |region: Region| {
+    let mut push = |region: Region<'a>| {
         regions.push(region);
     };
 
     // Every window the machine describes, not just the devices driven today: that is what
     // lets a new driver work through `phys_to_virt` instead of its own base constant.
-    // `MachineMemory::check` has already rejected any that the direct map cannot reach.
-    for device in mmio {
+    // `MachineMemory::check` has already rejected any that the direct map cannot reach or
+    // that overlaps RAM. Each keeps its device-tree node name, so the map below says which
+    // device a mapping belongs to.
+    for device in windows {
         push(Region {
-            name: "mmio",
+            name: device.name(),
             va: phys_to_virt(device.base),
             pa: device.base,
             len: device.size,
@@ -154,7 +162,7 @@ fn regions(mmio: &[PhysRange]) -> Vec<Region> {
 /// Addresses up there are *chosen*, and the choice has one legitimate source; inventing
 /// one is then a boot panic instead of a collision found later by whoever gets mapped
 /// over. Both directions, because the boundary is derived in two modules.
-fn audit_kernel_va(regions: &[Region]) {
+fn audit_kernel_va(regions: &[Region<'_>]) {
     let free_start = kernel_va::START;
     for region in regions.iter().filter(|region| !region.is_empty()) {
         // The footprint, not the requested extent: the rounding is what gets mapped, so
@@ -201,7 +209,10 @@ pub fn init(mmio: &[PhysRange]) {
         "kernel_table::init called twice; the live table is already published"
     );
 
-    let regions = regions(mmio);
+    // Merged first: page rounding is this module's, so two windows sharing a page is this
+    // module's to absorb rather than `audit_disjoint`'s to reject.
+    let windows = machine::coalesce(mmio);
+    let regions = regions(&windows);
     let mut space = AddressSpace::new(KERNEL_ASID);
 
     space.edit(|mapper| {
