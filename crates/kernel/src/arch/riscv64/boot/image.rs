@@ -16,16 +16,15 @@ const VERSION: u32 = (VERSION_MAJOR << 16) | VERSION_MINOR;
 /// `magic2`, the field a loader matches to recognise an Image.
 const MAGIC2: u32 = u32::from_le_bytes(*b"RSC\x05");
 
-/// Offset zero of the image, and the ELF entry point: a branch past the header, then the
-/// 60 bytes the loader reads.
-///
-/// `_text_offset` and `_image_size` come from `kernel.ld` by name. Both are small absolute
-/// linker symbols, out of reach of a Rust `extern static` (see [`crate::memory::layout`]).
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".text.init.header")]
-pub(super) unsafe extern "custom" fn _start() {
-    boot_asm!({
+boot_fn!(
+    /// Offset zero of the image, and the ELF entry point: a branch past the header, then
+    /// the 60 bytes the loader reads.
+    ///
+    /// `_text_offset` and `_image_size` come from `kernel.ld` by name. Both are small
+    /// absolute linker symbols, out of reach of a Rust `extern static` (see
+    /// [`crate::memory::layout`]).
+    #[unsafe(no_mangle)]
+    pub(super) fn _start in header {
         "j {boot}",                     // 0x00 code0:       the only instruction here
         ".4byte 0",                     // 0x04 code1
         ".8byte _text_offset",          // 0x08 text_offset: load offset from the RAM base
@@ -46,5 +45,4 @@ pub(super) unsafe extern "custom" fn _start() {
         boot = sym super::entry::primary_entry,
         version = const VERSION,
         magic2 = const MAGIC2,
-    )
-}
+);

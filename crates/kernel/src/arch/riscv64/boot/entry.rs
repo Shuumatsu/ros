@@ -17,11 +17,9 @@ use crate::memory::{boot_table, layout};
 /// high. Which prologue is the whole of the difference between them.
 macro_rules! isa_entry {
     ($(#[$doc:meta])* $vis:vis fn $name:ident => $prologue:path) => {
-        $(#[$doc])*
-        #[unsafe(naked)]
-        #[unsafe(link_section = ".text.init.entry")]
-        $vis unsafe extern "custom" fn $name() {
-            boot_asm!({
+        boot_fn!(
+            $(#[$doc])*
+            $vis fn $name in entry {
                 // `lla` is unconditionally PC-relative, the only kind of address with a
                 // meaning before translation is on.
                 "lla  t2, {prologue}",
@@ -29,8 +27,7 @@ macro_rules! isa_entry {
             }
                 prologue = sym $prologue,
                 enter_high = sym enter_high,
-            )
-        }
+        );
     };
 }
 
@@ -47,27 +44,26 @@ isa_entry!(
     fn secondary_entry => super::secondary::prologue
 );
 
-/// Install the boot page table and continue at the kernel's link-time addresses.
-///
-/// Knows nothing about which kind of hart this is: `t2` carries the prologue to continue
-/// into, chosen by the entry point above, so the two paths are named where they differ
-/// rather than multiplexed on a flag here.
-///
-/// Leaves `a0` and `a1` untouched, `a2` holding the measured VMA-to-LMA skew, and `gp`,
-/// `tp` and `stvec` as Rust expects. Does *not* set `sp` — which stack this hart gets is
-/// the prologue's business.
-#[unsafe(naked)]
-#[unsafe(link_section = ".text.init.entry")]
-unsafe extern "custom" fn enter_high() {
-    boot_asm!({
+boot_fn!(
+    /// Install the boot page table and continue at the kernel's link-time addresses.
+    ///
+    /// Knows nothing about which kind of hart this is: `t2` carries the prologue to
+    /// continue into, chosen by the entry point above, so the two paths are named where
+    /// they differ rather than multiplexed on a flag here.
+    ///
+    /// Leaves `a0` and `a1` untouched, `a2` holding the measured skew between the kernel's
+    /// link-time addresses and the ones it is running at, `gp` and `tp` as Rust expects,
+    /// and `stvec` on the high alias of the park vector. Does *not* set `sp` — which stack
+    /// this hart gets is the prologue's business.
+    fn enter_high in entry {
         // A fault before this line goes back to firmware with nothing to say.
         // Physical, because that is the only address space that exists yet.
         "lla  t0, {park}",
         "csrw stvec, t0",
 
-        // satp = the boot table. Its address is a link-time fact, so the mode bits arrive
-        // as a const template and the root is folded in here; `boot_table` owns both
-        // halves and pins them to `Satp` at compile time.
+        // satp = the boot table, at the physical address a PC-relative load recovers. The
+        // mode bits arrive as a const template and the root is folded in here;
+        // `boot_table` owns both halves and pins them to `Satp` at compile time.
         "lla  t0, {table}",
         "srli t0, t0, {root_shift}",
         "li   t1, {satp_template}",
@@ -106,27 +102,27 @@ unsafe extern "custom" fn enter_high() {
         root_shift = const boot_table::SATP_ROOT_SHIFT,
         satp_template = const boot_table::SATP_TEMPLATE,
         global_pointer = sym layout::GLOBAL_POINTER,
-    )
-}
+);
 
-/// Where a fault goes before there is a trap subsystem to take it.
-///
-/// Parks rather than returns: `sepc`, `scause` and `stval` stay put for a debugger,
-/// and a wedged hart is visible as one instead of silently resetting through
-/// firmware. Touches no stack, because for most of [`enter_high`] there is none.
-#[unsafe(naked)]
-#[unsafe(link_section = ".text.init.trap")]
-unsafe extern "custom" fn trap_park() {
-    boot_asm!({
+boot_fn!(
+    /// Where a fault goes before there is a trap subsystem to take it.
+    ///
+    /// Parks rather than returns: `sepc`, `scause` and `stval` stay put for a debugger,
+    /// and a wedged hart is visible as one instead of silently resetting through
+    /// firmware. Touches no stack, because for most of [`enter_high`] there is none.
+    fn trap_park in trap {
         // `stvec` reads the low two bits as its mode, so this address must be a multiple
         // of four or the write means "vectored" — or, `stvec` being WARL, nothing at all.
-        // This raises the section's own alignment, which is what the linker honours.
+        // `.balign` gives the section that alignment, and `_trap_vector` names the address
+        // `enter_high` actually loads, which is what `kernel.ld` asserts on.
+        ".globl _trap_vector",
+        "_trap_vector:",
         ".balign 4",
         "1:",
         "wfi",
         "j 1b",
-    })
-}
+    }
+);
 
 /// [`secondary_entry`] as the virtual address it is linked at.
 ///

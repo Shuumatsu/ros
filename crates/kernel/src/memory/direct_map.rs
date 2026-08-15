@@ -106,9 +106,10 @@ pub const fn virt_to_phys(va: VirtualAddr) -> PhysicalAddr {
 /// Assert the direct map Rust believes in is the one we are running on, against the skew
 /// the boot entry measured at its high-half jump. Call once, before the conversions.
 ///
-/// The skew is VMA minus LMA, so two different mistakes arrive here: `kernel.ld`'s
-/// `_va_offset` and [`VA_OFFSET`] having diverged, or the loader having put the image
-/// somewhere other than the physical base it is linked for. Nothing here can tell them
+/// The skew is the kernel's link-time address minus the one it is running at, so two
+/// different mistakes arrive here: `kernel.ld`'s `_va_offset` and [`VA_OFFSET`] having
+/// diverged, or the loader having put the image somewhere other than the physical base it
+/// is linked for. Nothing here can tell them
 /// apart — `_phys_base` is a small absolute linker symbol, which Rust cannot read (see
 /// [`super::layout`]) — so the message names both and prints where we actually landed.
 pub fn verify(measured: usize) {

@@ -24,9 +24,10 @@ pub(crate) static TABLE: Table = Table::identity_and_offset(VA_OFFSET, DIRECT_MA
 
 /// The `satp` for [`TABLE`], in the two pieces assembly can assemble it from.
 ///
-/// [`TABLE`]'s address is a link-time fact, so the entry recovers it PC-relatively and
-/// folds it in with `srli`+`or` — a second encoding of [`Satp::sv39`], which assembly
-/// cannot call, so both constants live next to the assertion that pins them to it.
+/// `satp` needs [`TABLE`]'s physical address, and before translation is on a PC-relative
+/// load is the only way to name it, so the entry recovers it there and folds it in with
+/// `srli`+`or` — a second encoding of [`Satp::sv39`], which assembly cannot call, so both
+/// constants live next to the assertion that pins them to it.
 pub(crate) const SATP_TEMPLATE: usize = Satp::sv39(PhysicalAddr::new(0), 0).bits();
 /// Right-shift that turns a page-aligned root address into `satp.PPN`.
 pub(crate) const SATP_ROOT_SHIFT: usize = PAGE_OFFSET_BITS;

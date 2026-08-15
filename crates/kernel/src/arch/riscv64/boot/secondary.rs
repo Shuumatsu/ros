@@ -45,21 +45,19 @@ const SATP_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, satp);
 const STACK_TOP_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, stack_top);
 const CPU_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, cpu);
 
-/// Adopt the kernel page table, the stack the boot hart reserved and the [`Cpu`]
-/// it chose, then enter Rust.
-///
-/// Still assembly, because the stack is only mapped by the kernel table: `sp` cannot be
-/// set before the switch, and no Rust runs before `sp`.
-///
-/// Reached from `super::entry::enter_high` with `a0` the hart id and `a1` the `opaque`
-/// from `hart_start` — this hart's handoff, as a kernel VA, already reachable because the
-/// boot table maps the high half too.
-///
-/// [`Cpu`]: crate::cpu::Cpu
-#[unsafe(naked)]
-#[unsafe(link_section = ".text.init.entry")]
-pub(super) unsafe extern "custom" fn prologue() {
-    boot_asm!({
+boot_fn!(
+    /// Adopt the kernel page table, the stack the boot hart reserved and the [`Cpu`]
+    /// it chose, then enter Rust.
+    ///
+    /// Still assembly, because the stack is only mapped by the kernel table: `sp` cannot be
+    /// set before the switch, and no Rust runs before `sp`.
+    ///
+    /// Reached from `super::entry::enter_high` with `a0` the hart id and `a1` the `opaque`
+    /// from `hart_start` — this hart's handoff, as a kernel VA, already reachable because
+    /// the boot table maps the high half too.
+    ///
+    /// [`Cpu`]: crate::cpu::Cpu
+    pub(super) fn prologue in entry {
         // Does not spin in practice — `publish` finishes before `hart_start` — but it is
         // the acquire half of that release store: SBI does not promise the start request
         // orders the boot hart's writes, and every field below is garbage if nothing does.
@@ -76,6 +74,8 @@ pub(super) unsafe extern "custom" fn prologue() {
         "sfence.vma",
         // Before the `tail`, which expands through `t1`.
         "mv    sp, t1",
+        // The outermost frame on this stack, so zero is what stops a gdb unwind.
+        "mv    ra, zero",
         "tail  {secondary}",
     }
         ready = const READY_OFFSET,
@@ -83,5 +83,4 @@ pub(super) unsafe extern "custom" fn prologue() {
         stack_top = const STACK_TOP_OFFSET,
         cpu = const CPU_OFFSET,
         secondary = sym crate::start::secondary,
-    )
-}
+);
