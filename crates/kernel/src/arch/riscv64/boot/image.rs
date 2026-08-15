@@ -18,7 +18,7 @@ const MAGIC2: u32 = u32::from_le_bytes(*b"RSC\x05");
 
 boot_fn!(
     /// Offset zero of the image, and the ELF entry point: a branch past the header, then
-    /// the 60 bytes the loader reads.
+    /// the fields the loader reads.
     ///
     /// `_text_offset` and `_image_size` come from `kernel.ld` by name. Both are small
     /// absolute linker symbols, out of reach of a Rust `extern static` (see

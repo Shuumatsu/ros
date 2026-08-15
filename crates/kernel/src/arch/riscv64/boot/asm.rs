@@ -13,11 +13,12 @@
 /// built with the C extension (see `.cargo/config.toml`), so the assembler takes the short
 /// form unless told not to.
 ///
-/// `norelax` holds the linker to the same two facts. Relaxation shortens instructions,
-/// which the header's byte count cannot absorb, and it rewrites `la gp, __global_pointer$`
-/// into a `gp`-relative load of `gp` itself — the one access that resolves while `gp` still
-/// holds whatever firmware left in it. This target emits no `R_RISCV_RELAX`, so the option
-/// is what keeps that a property of the build rather than something the stage rests on.
+/// `norelax` keeps the linker from rewriting those instructions afterwards. Relaxation
+/// shortens them, which the header's byte count cannot absorb, and it turns
+/// `la gp, __global_pointer$` into a `gp`-relative load of `gp` itself — the one access
+/// that resolves while `gp` still holds whatever firmware left in it. This target emits no
+/// `R_RISCV_RELAX`, so the option is what keeps that a property of the build rather than
+/// something the stage rests on.
 macro_rules! boot_fn {
     (@define $section:literal, $(#[$attr:meta])* $vis:vis fn $name:ident
         { $($insn:literal),* $(,)? } $($operands:tt)*

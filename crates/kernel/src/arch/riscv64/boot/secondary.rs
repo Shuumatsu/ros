@@ -1,8 +1,8 @@
 //! Secondary-hart startup: the state the boot hart publishes, and the prologue that
 //! consumes it.
 //!
-//! Together because they are one interface written twice — the `#[repr(C)]` struct, and
-//! the field offsets the assembly loads from it.
+//! Together because the prologue's loads are `offset_of!` of the `#[repr(C)]` struct: one
+//! definition, and the offsets derived from it.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -65,8 +65,7 @@ boot_fn!(
         "ld    t0, {ready}(a1)",
         "beqz  t0, 1b",
         "fence r, rw",
-        // Read out before the switch. `a1` is about to be reused for the argument,
-        // and the table it points through is about to be replaced.
+        // Read out while `a1` is still the handoff: it is about to become the argument.
         "ld    t0, {satp}(a1)",
         "ld    t1, {stack_top}(a1)",
         "ld    a1, {cpu}(a1)",

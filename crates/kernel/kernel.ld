@@ -66,9 +66,9 @@ SECTIONS {
         PROVIDE(_text_start = .);
 
         /* The boot stage, in this order because the Image header must be the image's
-           first byte and the entry it branches to must be within a `j` of it. KEEP: the
-           loader, `sym` operands and `stvec` are what reach these, so the link sees no
-           reference to them. Each carries the alignment its own code asks for.
+           first byte and the entry it branches to must be within a `j` of it. KEEP states
+           that the stage is required whatever --gc-sections concludes about it. Each
+           carries the alignment its own code asks for.
 
            The wildcard last, and it must stay: anything left unmatched is placed after
            _text_end, outside every range kernel_table maps. */
