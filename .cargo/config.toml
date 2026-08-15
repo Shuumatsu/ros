@@ -15,11 +15,15 @@ kbuild = "build -p kernel --target riscv64imac-unknown-none-elf"
 
 [target.riscv64imac-unknown-none-elf]
 # https://doc.rust-lang.org/nightly/rustc/platform-support.html
-# Target: RISC-V 64-bit, I+M+A+C extensions, bare metal, no OS
+# Target: RISC-V 64-bit, I+M+A+C extensions, bare metal, no OS.
+#
+# Compressed instructions are on, so instruction widths vary: boot assembly that counts
+# bytes says `.option norvc` itself (see `arch::riscv64::boot::asm`). Turning RVC off takes
+# `-Ctarget-feature=-c,-zca`, since this target implies `zca` and `zca` is what emits the
+# compressed integer forms.
 rustflags = [
     '-Clink-arg=-Tcrates/kernel/kernel.ld',  # Use custom linker script
     '--cfg=riscv64',                # Define cfg flag for conditional compilation
-    '-Ctarget-feature=-c',          # Disable compressed instructions (RVC)
 ]
 # Boot the kernel as a flat RISC-V Image (objcopy'd from the ELF) under OpenSBI.
 # scripts/run.sh does the objcopy + QEMU launch and holds the QEMU options;
