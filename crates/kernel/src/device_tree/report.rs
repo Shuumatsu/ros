@@ -1,16 +1,16 @@
 //! Printing the resolved device map.
 //!
 //! Reads only the stored table — no re-parse — so printing is fully decoupled from
-//! discovery. Kept in its own file because reporting is the one part of this module
-//! that must run *after* the console exists, while everything else must run before.
+//! discovery. Kept in its own file because it is the one part of this module that runs
+//! after the walk rather than as part of it, on the UART the walk itself found.
 
 use paging::MemoryAddr;
 
 use super::table;
 use crate::utils::ByteSize;
 
-/// Print the resolved device map. Call once the console is up, i.e. after
-/// [`super::init`] (which is what backs the console with the real UART).
+/// Print the resolved device map. Call after [`super::init`], which is what backs the
+/// console with the real UART.
 pub fn summary() {
     let Some(table) = table::get() else {
         println!("[dtb] not parsed");

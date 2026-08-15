@@ -26,27 +26,34 @@ enum RegKind {
     /// RAM carved out by the previous boot stage — present in memory, but not the
     /// kernel's to hand out.
     ReservedRam,
-    /// `/cpus/cpu@N`: the `reg` is a **hart id**, not an address at all.
+    /// A hart: the `reg` is a **hart id**, not an address at all.
     HartId,
     /// The RAM itself.
     Ram,
+    /// A node under `/cpus` that is not a hart. A `reg` there is neither RAM nor a window
+    /// the kernel maps, so it is left alone rather than guessed at.
+    Ignored,
 }
 
-/// Classify a node by its path — the single place this distinction is made.
+/// Classify a node by what its `reg` describes — the single place this distinction is made.
+///
+/// `device_type` is the spec's discriminator for the two kinds of node whose `reg` is not a
+/// device window, and QEMU, U-Boot and OpenSBI all emit it. Anything else carrying a `reg`
+/// is a device.
 ///
 /// `/reserved-memory/…` are firmware carve-outs, which OpenSBI adds for itself and its PMP
-/// then denies to S-mode, so they must reach the frame allocator and never the page table.
-/// They are absent from QEMU's own tree and appear only in the one OpenSBI hands on, so
-/// `-machine dumpdtb` does not show them.
-fn classify(name: &str, path: &str) -> RegKind {
-    if path.starts_with("/reserved-memory") {
-        RegKind::ReservedRam
-    } else if path.starts_with("/cpus") && name.starts_with("cpu@") {
-        RegKind::HartId
-    } else if name.starts_with("memory") || path.starts_with("/cpus") {
-        RegKind::Ram
-    } else {
-        RegKind::Mmio
+/// then denies to S-mode, so they must reach the frame allocator. They are absent from
+/// QEMU's own tree and appear only in the one OpenSBI hands on, so `-machine dumpdtb` does
+/// not show them.
+fn classify(node: &Node<'_>, path: &str) -> RegKind {
+    if path.starts_with("/reserved-memory/") {
+        return RegKind::ReservedRam;
+    }
+    match node.find_property_str("device_type") {
+        Some("memory") => RegKind::Ram,
+        Some("cpu") => RegKind::HartId,
+        _ if path.starts_with("/cpus/") => RegKind::Ignored,
+        _ => RegKind::Mmio,
     }
 }
 
@@ -65,16 +72,6 @@ fn is_disabled(node: &Node<'_>) -> bool {
 /// Read `interrupts`' first cell.
 fn irq_of(node: &Node<'_>) -> Option<usize> {
     node.find_property("interrupts")?.as_u32_iter().next().map(|v| v as usize)
-}
-
-/// Read this node's first `reg` entry as a device window.
-fn device_of(node: &Node<'_>) -> Option<Device> {
-    let reg = node.reg()?.next()?;
-    Some(Device {
-        base: reg.address as usize,
-        size: reg.size.unwrap_or(0) as usize,
-        irq: irq_of(node),
-    })
 }
 
 /// Record a foreign range, warning if the list is full rather than dropping it
@@ -157,13 +154,30 @@ pub fn discover(
             continue;
         }
 
-        let kind = classify(name, &path);
+        let kind = classify(&node, &path);
+        if matches!(kind, RegKind::Ignored) {
+            continue;
+        }
+
+        let Some(regs) = node.reg() else { continue };
+
+        // A `reg` the parser cannot decode yields no entries at all, which is otherwise
+        // indistinguishable from a node without one — and a carve-out dropped in silence is
+        // memory the allocator hands out. One- and two-cell addresses and sizes are what it
+        // reads; the three cells a PCI bus declares for its children are what land here.
+        if regs.clone().next().is_none() {
+            println!(
+                "[dtb] WARNING: cannot decode {name}'s reg; check its parent's #address-cells \
+                 and #size-cells"
+            );
+            continue;
+        }
 
         if matches!(kind, RegKind::Ram) {
             // Only the bank backing the kernel is ours to describe; others are reported
             // rather than dropped, since "one bank" and "the only bank" differ by however
             // much RAM the allocator never hears about.
-            for reg in node.reg().into_iter().flatten() {
+            for reg in regs {
                 let base = phys(reg.address);
                 let end = phys(reg.address.saturating_add(reg.size.unwrap_or(0)));
                 if (base..end).contains(&kernel_pa) {
@@ -178,8 +192,6 @@ pub fn discover(
             continue;
         }
 
-        let Some(regs) = node.reg() else { continue };
-
         // A hart id is an address-shaped value with no size, so it is taken before
         // the size check that every real range must pass.
         if matches!(kind, RegKind::HartId) {
@@ -193,18 +205,8 @@ pub fn discover(
             continue;
         }
 
-        // Well-known devices resolve from the node we are already standing on, so
-        // `reg` and `interrupts` cannot come from different nodes.
-        let compatible = |list: &[&str]| node.compatibles().any(|c| list.contains(&c));
-        if uart.is_none() && compatible(UART) {
-            uart = device_of(&node);
-        } else if plic.is_none() && compatible(PLIC) {
-            plic = device_of(&node);
-        } else if clint.is_none() && compatible(CLINT) {
-            clint = device_of(&node);
-        }
-
         // A node may describe several ranges — QEMU virt's `flash` has two.
+        let mut window = None;
         for reg in regs {
             // Loud, not a bare `continue`: a reserved range dropped in silence is memory
             // the allocator hands out. A missing size usually means `#size-cells = <0>`.
@@ -224,11 +226,26 @@ pub fn discover(
             // The two lists have different capacities, so they are different types
             // and cannot share one push site; only the diagnostic is shared.
             let overflowed = match kind {
-                RegKind::Mmio => mmio.push(entry).err().map(|_| ("MMIO window", MAX_MMIO)),
+                RegKind::Mmio => {
+                    let recorded =
+                        Device { base: entry.base.bits(), size: entry.size, irq: irq_of(&node) };
+                    match mmio.push(entry) {
+                        // The first window this node really contributes. Kept only once the
+                        // list has it, so a device resolved below cannot name an address
+                        // `kernel_table` never maps.
+                        Ok(()) => {
+                            window = window.or(Some(recorded));
+                            None
+                        }
+                        Err(_) => Some(("MMIO window", MAX_MMIO)),
+                    }
+                }
                 RegKind::ReservedRam => {
                     foreign.push(entry).err().map(|_| ("foreign RAM range", MAX_FOREIGN))
                 }
-                RegKind::HartId | RegKind::Ram => unreachable!("handled above"),
+                RegKind::HartId | RegKind::Ram | RegKind::Ignored => {
+                    unreachable!("handled above")
+                }
             };
             if let Some((what, cap)) = overflowed {
                 println!(
@@ -236,6 +253,18 @@ pub fn discover(
                      unaccounted for"
                 );
             }
+        }
+
+        // Well-known devices resolve from the node we are already standing on, so `reg` and
+        // `interrupts` cannot come from different nodes.
+        let Some(device) = window else { continue };
+        let compatible = |list: &[&str]| node.compatibles().any(|c| list.contains(&c));
+        if uart.is_none() && compatible(UART) {
+            uart = Some(device);
+        } else if plic.is_none() && compatible(PLIC) {
+            plic = Some(device);
+        } else if clint.is_none() && compatible(CLINT) {
+            clint = Some(device);
         }
     }
 
@@ -261,7 +290,7 @@ pub fn discover(
 /// The initrd's base and length, if the previous stage loaded one.
 ///
 /// `fdt_raw`'s `Chosen` does not expose it, so the two properties are read directly.
-/// They are `#address-cells`-sized, so 8 bytes here and 4 on a 32-bit tree.
+/// Firmware writes them as one cell or two, so both widths are accepted.
 fn initrd_range(chosen: &Node<'_>) -> Option<(PhysicalAddr, usize)> {
     let cell = |key: &str| {
         chosen

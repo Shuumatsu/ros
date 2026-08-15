@@ -21,6 +21,7 @@ gap nobody found.
 | `PteFlags::GLOBAL` unset | A TLB optimisation whose correctness depends on address spaces that do not exist yet. |
 | `Frames` has no `Drop` | Releasing needs the allocator lock, so a dropped token leaks. `#[must_use]` and `leak()` make the intent explicit instead. |
 | one RAM bank | Only the `/memory` bank containing the kernel is managed. Others are reported, not dropped silently. |
+| `/reserved-memory`'s `no-map` | A carve-out is withheld from the frame allocator, not excluded from the direct map, so one landing inside the frame pool is mapped although the property forbids it. On QEMU virt both of OpenSBI's sit below the kernel image, outside the pool. |
 
 ## Bounded by construction
 

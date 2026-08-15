@@ -1,9 +1,10 @@
 //! Flattened Device Tree (FDT / DTB) discovery.
 //!
-//! Firmware hands the boot hart the blob's physical address in `a1`; we parse it here
-//! with the zero-allocation [`fdt_raw`] crate. No heap needed, so this runs before
-//! `memory::init` — in fact before anything prints, since the console learns the UART
-//! base from here.
+//! Firmware hands the boot hart the blob's physical address in `a1`; we parse it here with
+//! the zero-allocation [`fdt_raw`] crate, which is what lets this run before the heap and
+//! before `memory::init`. It also runs before anything else prints: the console starts on
+//! the SBI console and binds the real UART the moment this yields its base, so walking the
+//! tree first is what puts every line on the real port.
 //!
 //! One walk, one table: [`walk`] traverses, [`table`] keeps the single copy, [`report`]
 //! prints. Everything the kernel needs comes from the accessors below, never from a
@@ -11,10 +12,11 @@
 //! [`machine_memory`].
 //!
 //! **Known gap:** a `reg` address is used as a CPU physical address directly, which is
-//! silently wrong where `/soc` declares a non-identity `ranges`. `Fdt::translate_address`
-//! borrows the blob while `Node::path()` returns an owned string, so composing them means
-//! reimplementing the `ranges` walk here. QEMU virt is identity, so it does not surface
-//! there.
+//! silently wrong under a parent bus whose `ranges` is not identity.
+//! `Fdt::translate_address` wants a path borrowed for the blob's lifetime while
+//! `Node::path()` returns an owned string, so composing them means reimplementing the
+//! `ranges` walk here. On QEMU virt `/soc` translates one-to-one, and `platform-bus` — the
+//! one node that does not — has no children.
 
 mod report;
 mod table;
@@ -22,41 +24,67 @@ mod walk;
 
 pub use report::summary;
 
-use fdt_raw::Fdt;
+use fdt_raw::{Fdt, Header};
 use paging::PhysicalAddr;
 
 use crate::memory::MachineMemory;
+use crate::memory::direct_map::DIRECT_MAP_END;
+use crate::utils::ByteSize;
 
 /// Parse the device tree at `dtb_ptr` and record the hardware the kernel needs.
 ///
-/// Must run before the first print, since the console's UART base comes from here; does
-/// not print itself — that is [`summary`]. A usable tree is part of the boot contract, so
-/// a null pointer, an unparseable blob, a `/memory` without the kernel in it or a missing
-/// UART all panic rather than limp on wrong addresses.
+/// Runs before the console has a UART of its own, since that base comes from here; what it
+/// reports on the way goes out through SBI. A usable tree is part of the boot contract, so
+/// a null pointer, a blob the direct map cannot reach, an unparseable blob, a `/memory`
+/// without the kernel in it or a missing UART all panic rather than limp on wrong addresses.
 ///
 /// # Safety
 /// `dtb_ptr` must be a valid, readable FDT blob (as passed in `a1`) that stays mapped and
-/// unmodified — it is borrowed in place.
+/// unmodified for the duration of this call — it is borrowed in place. Nothing outlives the
+/// call: [`table`] keeps copies.
 pub unsafe fn init(dtb_ptr: usize) {
+    assert!(
+        table::get().is_none(),
+        "device_tree::init called twice; the table is already published"
+    );
     if dtb_ptr == 0 {
         panic!(
             "[dtb] no device tree pointer in a1 — previous boot stage violated the boot contract"
         );
     }
 
-    // `a1` is *physical*, so reach the blob through the direct map: both tables map it
-    // there, while the raw address needs an identity mapping that no longer exists.
-    let blob = crate::memory::phys_to_virt(PhysicalAddr::new(dtb_ptr)).as_mut_ptr::<u8>();
+    // `a1` is physical, and the direct map is how this kernel turns a physical address into a
+    // pointer: `phys_to_virt` is a compile-time add and holds under the boot table and the
+    // kernel table alike. Its window is bounded, so the blob has to be inside it — beyond the
+    // end nothing is mapped, and the read below would park this hart instead of reporting.
+    let base = PhysicalAddr::new(dtb_ptr);
+    // Two steps, because the blob carries its own length: the header has to be readable
+    // before the rest can be measured.
+    require_reachable(base, size_of::<Header>());
+    let blob = crate::memory::phys_to_virt(base).as_mut_ptr::<u8>();
     // SAFETY: forwarded from this function's contract — `dtb_ptr` addresses a valid
     // FDT that stays mapped and unmodified, and `blob` is its direct-map alias.
     let fdt = unsafe { Fdt::from_ptr(blob) }
         .unwrap_or_else(|error| panic!("[dtb] failed to parse FDT at {dtb_ptr:#x}: {error:?}"));
+    let size = fdt.header().totalsize as usize;
+    require_reachable(base, size);
 
     // Which `/memory` bank is ours: the one holding our own load address.
     let kernel_pa = crate::memory::virt_to_phys(crate::memory::layout::text_start());
-    let size = fdt.header().totalsize as usize;
 
-    table::TABLE.call_once(|| walk::discover(&fdt, PhysicalAddr::new(dtb_ptr), size, kernel_pa));
+    table::TABLE.call_once(|| walk::discover(&fdt, base, size, kernel_pa));
+}
+
+/// Require the blob to lie inside the direct map's window, which is all the physical memory
+/// the kernel can name.
+fn require_reachable(base: PhysicalAddr, size: usize) {
+    let end = base.bits().saturating_add(size);
+    assert!(
+        end <= DIRECT_MAP_END.bits(),
+        "[dtb] the blob at {base:#x}..{end:#x} lies past the direct map's {} window; raise \
+         memory::direct_map::DIRECT_MAP_SPAN",
+        ByteSize(DIRECT_MAP_END.bits())
+    );
 }
 
 /// Everything [`crate::memory::init`] needs to know about physical memory, as one value.
