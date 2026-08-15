@@ -1,3 +1,9 @@
+//! A RISC-V kernel, linked and run in the Sv39 high half.
+//!
+//! The crate root holds only what has no other home: the language items every `no_std`
+//! binary must define. Where execution begins is [`start`]; what each subsystem owns is
+//! its own module doc.
+
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
@@ -15,7 +21,6 @@ mod start;
 mod sync;
 mod utils;
 
-// the -> ! means that this function won't return
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     if let Some(p) = info.location() {
@@ -29,10 +34,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// Last stop on the fatal path. `no_mangle` because the symbol must be exactly
 /// `abort` — compiler-generated code refers to it by that name.
 ///
-/// No `eh_personality` is defined anywhere in this crate, and none is needed: both
-/// profiles set `panic = "abort"` and the target spec for
-/// `riscv64imac-unknown-none-elf` says `"panic-strategy": "abort"`, so nothing
-/// unwinds.
+/// Nothing unwinds: both profiles set `panic = "abort"` and the target spec for
+/// `riscv64imac-unknown-none-elf` says `"panic-strategy": "abort"`, which is why the
+/// crate defines no `eh_personality`.
 #[unsafe(no_mangle)]
 extern "C" fn abort() -> ! {
     // No hart id in the message: `_emergency_print` already prefixes every line.

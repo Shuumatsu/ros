@@ -10,9 +10,9 @@ pub unsafe fn init() {
     unsafe {
         // Delegation (`mideleg`) is the SBI firmware's job in M-mode. Bring up
         // the supervisor timer: arm the first tick via SBI, enable the S-timer
-        // source, then unmask supervisor interrupts globally. Now that the
-        // handler re-arms `set_timer` (which clears the pending bit), the Sstc
-        // "always pending at stimecmp=0" trap that bit us in Phase 0 is gone.
+        // source, then unmask supervisor interrupts globally. Arming before
+        // unmasking is what keeps Sstc quiet: at `stimecmp = 0` a timer interrupt
+        // is permanently pending, and the handler clears it only by re-arming.
         clint::timer::init();
         sie::set_stimer();
         sstatus::set_sie();

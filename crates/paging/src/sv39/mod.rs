@@ -55,7 +55,7 @@ pub const ENTRIES_PER_PAGE: usize = 1 << VPN_BITS;
 /// along exactly this line.
 pub const ROOT_ENTRIES_PER_HALF: usize = ENTRIES_PER_PAGE / 2;
 
-/// Total width of a physical page number (PPN[2:0]).
+/// Total width of a physical page number (PPN\[2:0\]).
 pub const PPN_BITS: usize = 44;
 /// Width of each `PPN[i]` field. `PPN[2]` is wider to reach the 56-bit
 /// physical address space; `VPN[i]` fields are always [`VPN_BITS`] wide.

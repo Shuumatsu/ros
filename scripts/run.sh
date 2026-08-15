@@ -2,11 +2,11 @@
 # Cargo runner for the kernel.
 #
 # Objcopies the freshly-built ELF into a flat RISC-V `Image` and boots it under
-# OpenSBI. We boot the Image, NOT the ELF: once the kernel is linked at high
-# virtual addresses (Phase 2) the ELF entry point is an unmapped high VA, while
-# the flat Image is loaded at its physical `text_offset` and entered at `code0`
-# (which relocates itself). Booting the Image also exercises the real Linux
-# RISC-V Image boot protocol (header parsed by QEMU/the loader).
+# OpenSBI. The Image is what gets booted: the kernel is linked at high virtual
+# addresses, so its ELF entry point is an unmapped high VA, while the flat Image is
+# loaded at its physical `text_offset` and entered at `code0`, which installs the
+# boot page table itself. That also exercises the real Linux RISC-V Image boot
+# protocol, header parsing included.
 #
 # Cargo invokes this as: run.sh <path-to-kernel-elf>
 set -euo pipefail

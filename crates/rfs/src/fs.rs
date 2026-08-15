@@ -9,8 +9,8 @@
 //! ## Concurrency
 //! Each block touched is individually locked through the cache, so single block
 //! accesses are safe. Compound operations (a `write_at` that grows a file across
-//! several blocks and indirect blocks) are **not** atomic; the kernel serializes
-//! filesystem access with one outer lock. rfs does not try to be cleverer.
+//! several blocks and indirect blocks) are **not** atomic; serializing those is the
+//! caller's, and the kernel does it with one outer lock.
 
 use alloc::sync::Arc;
 

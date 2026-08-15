@@ -1,9 +1,9 @@
 //! Ergonomic, path- and cursor-based access on top of the inode primitives.
 //!
-//! [`Fs`]'s core methods work in terms of `(inode, offset)`. This layer adds the
-//! conveniences a caller actually wants: create / open / remove by path, and a
-//! [`File`] handle that carries a cursor so you can `read` / `write` / `seek`
-//! like `std::fs::File`, without threading offsets by hand.
+//! [`Fs`]'s core methods work in terms of `(inode, offset)`. This layer adds what a
+//! caller wants instead: create / open / remove by path, and a [`File`] handle that
+//! carries a cursor, so `read` / `write` / `seek` work as they do on
+//! `std::fs::File` and no caller threads offsets by hand.
 
 use alloc::vec::Vec;
 

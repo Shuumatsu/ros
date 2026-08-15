@@ -1,3 +1,13 @@
+//! The two Rust entry points, and the bring-up order across subsystems.
+//!
+//! One function per kind of hart, because they arrive owing different things: the boot
+//! hart owes `.bss`, the device tree, memory and the other harts; a secondary arrives on
+//! a finished page table and owes only its own identity.
+//!
+//! The order in [`boot`] is this module's single contribution. No subsystem below knows
+//! it, and each is handed what it needs rather than looking it up, which is what keeps
+//! `device_tree`, `cpu` and `memory` free of dependencies on each other.
+
 use crate::cpu;
 use crate::memory;
 

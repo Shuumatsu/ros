@@ -11,8 +11,7 @@
 //! has to be reserved (inode 0 stays an ordinary inode number), readers walk the
 //! entries without filtering, and `dir_is_empty` is `size == 0` — O(1), no scan.
 //! The only thing given up is entry order, which carries no meaning: `readdir`
-//! is not ordered. Contrast a page table, where slot *index* is the address and
-//! entries therefore cannot be moved to close a gap.
+//! is not ordered.
 //!
 //! Path resolution (`DESIGN.md` §6) is then just: start at the root inode and,
 //! for each `/`-separated component, look it up in the current directory. There

@@ -89,9 +89,9 @@ impl fmt::Debug for VirtualAddr {
 
 /// Formats as the bare address, so `{:#x}` works and width flags are honoured.
 ///
-/// Not a nicety. Without it the only way to print an address is `{:?}`, which
-/// spells out the VPN decomposition, or `.bits()` — and a caller that reaches for
-/// `.bits()` to print has just dropped the type for the rest of the expression.
+/// The alternatives are `{:?}`, which spells out the VPN decomposition, and
+/// `.bits()` — and a caller that reaches for `.bits()` to print has just dropped
+/// the type for the rest of the expression.
 impl fmt::LowerHex for VirtualAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::LowerHex::fmt(&self.0, f) }
 }
@@ -120,14 +120,14 @@ impl VirtualAddr {
 
     pub const fn offset(self) -> usize { field(self.0, 0, PAGE_OFFSET_BITS) }
 
-    /// True if bits [63:38] are a correct sign extension of bit 38, i.e. the
+    /// True if bits \[63:38\] are a correct sign extension of bit 38, i.e. the
     /// address is in the form the hardware accepts.
     pub const fn is_canonical(self) -> bool {
         let top = (self.0 as i64) >> (VA_BITS - 1);
         top == 0 || top == -1
     }
 
-    /// Sign-extend bit 38 across bits [63:39] to produce the canonical form.
+    /// Sign-extend bit 38 across bits \[63:39\] to produce the canonical form.
     pub const fn canonicalize(self) -> Self {
         let shift = (usize::BITS as usize) - VA_BITS;
         Self((((self.0 << shift) as i64) >> shift) as usize)

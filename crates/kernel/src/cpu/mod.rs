@@ -1,3 +1,17 @@
+//! Which harts exist, which one is running this code, and bringing the rest up.
+//!
+//! Hart identity lives here rather than in the ISA layer: `tp` points at this hart's
+//! [`Cpu`], and reading a field out of it is this module's business.
+//!
+//! Two numbering schemes, deliberately distinct. A *hart id* is the platform's, sparse
+//! and firmware-chosen; a *cpu index* is dense, `0..cpus`, assigned here, and the only
+//! one that subscripts anything. Slot 0 is the boot hart.
+//!
+//! [`start_secondaries`] tells a starting hart two things and lets it derive nothing:
+//! the stackless entry to begin at, and one release-published handoff carrying the page
+//! table, stack top and prepared [`Cpu`]. Everything it needs is therefore chosen by a
+//! hart that already has a heap and a page table.
+
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use paging::MemoryAddr;
@@ -11,12 +25,11 @@ use crate::println;
 /// A pointer rather than a bare id, as Linux does: `tp` is the one register that is
 /// per-hart for free, and spending it on an integer already handed to us in `a0` would
 /// leave every future piece of per-hart state needing a home and a lookup.
-///
 #[repr(C)]
 pub struct Cpu {
     /// Physical hart id from the SBI boot protocol. Sparse — never an array index.
     hartid: AtomicUsize,
-    /// Dense logical index, `0..cpus`. This is the array subscript; `hartid` is not.
+    /// Dense logical index, `0..cpus`: the array subscript.
     index: AtomicUsize,
 }
 
@@ -135,10 +148,6 @@ pub fn secondary_hart_ids() -> impl Iterator<Item = usize> {
 ///
 /// Call once, from the boot hart, **after** [`crate::memory::init`]: each hart is handed a
 /// stack that only the kernel page table maps, so both must exist first.
-///
-/// A hart is told two things and derives nothing: the stackless entry to start at, and an
-/// `opaque` pointing at one release-published handoff with the page table, stack top and
-/// prepared [`Cpu`].
 pub fn start_secondaries() {
     let entry = virt_to_phys(boot::secondary_entry_address());
     let satp = kernel_table::satp()
@@ -226,8 +235,8 @@ fn await_secondaries(requested: usize) {
         core::hint::spin_loop();
     }
 
-    // Not a panic. Losing a secondary is bad but not fatal to the boot hart, and a
-    // kernel that can still report the loss is more useful than one that stops.
+    // Reported rather than fatal: losing a secondary leaves the boot hart able to run,
+    // and a kernel that can still say what went missing beats one that stops.
     let online = ONLINE.load(Ordering::Acquire);
     println!(
         "[smp] WARNING: {} of {requested} secondaries never reached the kernel after \
@@ -248,7 +257,7 @@ fn now() -> u64 {
 /// Report what this hart is. The image layout is [`crate::memory::layout::report`]'s.
 pub fn print_info() {
     match boot_hart() {
-        Some(hart) => println!("boot hart: {hart} (chosen by the firmware, not assumed)"),
+        Some(hart) => println!("boot hart: {hart} (chosen by the firmware)"),
         None => println!("boot hart: unrecorded"),
     }
 }

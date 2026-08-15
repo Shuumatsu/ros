@@ -13,7 +13,8 @@
 //! **Known gap:** a `reg` address is used as a CPU physical address directly, which is
 //! silently wrong where `/soc` declares a non-identity `ranges`. `Fdt::translate_address`
 //! borrows the blob while `Node::path()` returns an owned string, so composing them means
-//! reimplementing the `ranges` walk here. QEMU virt is identity, so it has never bitten.
+//! reimplementing the `ranges` walk here. QEMU virt is identity, so it does not surface
+//! there.
 
 mod report;
 mod table;

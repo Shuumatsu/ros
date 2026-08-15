@@ -5,9 +5,9 @@
 //!
 //! Subcommands:
 //! ```text
-//!   mkfs create <image> <size-MiB> [source-dir]   format; optionally pack a dir
-//!   mkfs ls     <image> [path]                     list the tree under path (/ )
-//!   mkfs cat    <image> <path>                      write a file's bytes to stdout
+//!   mkfs create <image> <size-MiB> [source-dir]  format; optionally pack a dir
+//!   mkfs ls     <image> [path]                   list the tree under path (default /)
+//!   mkfs cat    <image> <path>                   write a file's bytes to stdout
 //! ```
 //!
 //! Run with `cargo run -p mkfs -- <args>`.

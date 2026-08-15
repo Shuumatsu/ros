@@ -71,7 +71,7 @@ pub fn stats() -> Option<Stats> {
     })
 }
 
-/// A physical frame allocation handed out by [`alloc`] / [`alloc_contiguous`].
+/// A physical frame allocation handed out by [`alloc()`] / [`alloc_contiguous`].
 ///
 /// Move-only, so [`free`] consumes it and no allocation can be freed twice in safe code.
 /// There is no `Drop` — releasing needs the allocator lock — so a dropped token silently
@@ -213,7 +213,7 @@ pub unsafe fn free(frames: Frames) {
 ///
 /// # Safety
 ///
-/// The frame must have come from [`alloc`], i.e. been allocated *singly*: this
+/// The frame must have come from [`alloc()`], i.e. been allocated *singly*: this
 /// frees one frame, so calling it on the base of an [`alloc_contiguous`] run
 /// leaks the rest. It must no longer be reachable through any live mapping,
 /// pointer or DMA operation, and must not already have been freed. A double free

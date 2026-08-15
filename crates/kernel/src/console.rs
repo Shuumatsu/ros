@@ -1,3 +1,13 @@
+//! Kernel output: `print!`/`println!`, and the two sinks behind them.
+//!
+//! Two paths, because the ordinary one has a prerequisite the fatal one cannot assume.
+//! [`_print`] takes a lock and writes to the device-tree UART; [`_emergency_print`] takes
+//! nothing and writes a byte at a time through SBI, so it still works when this hart
+//! already holds the lock or the UART's own mapping is what broke.
+//!
+//! No address is hardcoded. Until the device tree yields a UART base, both paths are the
+//! SBI console, which is what lets the earliest code print at all.
+
 use core::fmt::{self, Write};
 use paging::PhysicalAddr;
 use uart_16550::MmioSerialPort;
@@ -119,8 +129,7 @@ macro_rules! println {
 //
 //     c[hartod 0] [te: 5,r asep_pc: 0xffhaffndlefr]f scausc0e c80o20de2afc:
 //
-// The alarming name is the fix, not the comment: the predecessor `kprintln!` read as a
-// drop-in for `println!` and got misused twice.
+// The name is deliberately alarming, so that reaching for it takes a decision.
 #[macro_export]
 macro_rules! emergency_print {
     ($($arg:tt)*) => { $crate::console::_emergency_print(format_args!($($arg)*)) };

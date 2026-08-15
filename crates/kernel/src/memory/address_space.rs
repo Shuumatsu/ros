@@ -78,8 +78,7 @@ impl AddressSpace {
     ///
     /// Fenced unconditionally rather than only when this space is live, because "is any hart
     /// running this tree" is not a question the calling hart can answer — and for the same
-    /// reason this is not enough for a tree live on *another* hart. See
-    /// [`tlb`](crate::arch::riscv64::tlb).
+    /// reason this is not enough for a tree live on *another* hart. See [`tlb`].
     pub fn edit<R>(&mut self, f: impl FnOnce(&mut KernelMapper<'_>) -> R) -> R {
         let result = f(&mut self.mapper());
         tlb::flush_all();

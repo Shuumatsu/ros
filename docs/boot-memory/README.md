@@ -31,7 +31,7 @@ No module owns this list: each stage knows only its successor. Paths are relativ
 |---|---|---|
 | Image entry | `arch/riscv64/boot/image.rs` | the 64-byte RISC-V Image header, branching to the entry |
 | ISA entry | `arch/riscv64/boot/entry.rs::primary_entry` | the prologue to continue into, in `t2` |
-| high transition | `arch/riscv64/boot/entry.rs::enter_high` | boot table live, PC high, `gp`/`tp`/`stvec` as Rust expects, measured VMA↔LMA skew in `a3` |
+| high transition | `arch/riscv64/boot/entry.rs::enter_high` | boot table live, PC high, `gp`/`tp`/`stvec` as Rust expects, measured VMA↔LMA skew in `a2` |
 | prologue | `arch/riscv64/boot/primary.rs::prologue` | `sp` on the linker's boot stack |
 | first Rust | `start.rs::boot` | `.bss` zeroed, skew verified, device tree parsed, then memory, then secondaries |
 | memory | `memory/mod.rs::init` | frames, heap, stacks, kernel page table — in that order, for reasons its doc gives |

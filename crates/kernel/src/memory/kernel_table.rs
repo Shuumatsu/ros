@@ -2,10 +2,9 @@
 //! per-section rights, W^X and no identity half.
 //!
 //! Only the *policy* — which regions exist and what rights they get. Installing and
-//! auditing is [`super::region`]'s, the tree itself
-//! [`AddressSpace`](super::address_space::AddressSpace)'s, and every fact here comes from
-//! its owner: [`layout`], the [`MachineMemory`](super::machine::MachineMemory) handed to
-//! [`super::init`], [`frame::owned_range`], [`kernel_va`].
+//! auditing is [`super::region`]'s, the tree itself [`AddressSpace`]'s, and every fact
+//! here comes from its owner: [`layout`], the [`MachineMemory`](super::machine::MachineMemory)
+//! handed to [`super::init`], [`frame::owned_range`], [`kernel_va`].
 //!
 //! [`regions`] is computed once and then installed, audited and reported, so there is no
 //! second list to drift. The audit precedes the switch because a mis-mapped `.text` faults
@@ -230,8 +229,8 @@ pub fn init(mmio: &[PhysRange]) {
     unsafe { space.activate() };
 
     KERNEL.call_once(|| IrqMutex::new(space));
-    // Not "boot table retired": every hart started from here on still enters through it,
-    // because a starting hart has no translation of its own to arrive with.
+    // This hart only. The boot table stays live: every hart started from here on enters
+    // through it, because a starting hart has no translation of its own to arrive with.
     println!("[memory] kernel page table live on this hart (satp {:#x})", satp.bits());
 }
 

@@ -418,8 +418,8 @@ mod tests {
 
     const RWX: PteFlags = PteFlags::READ_WRITE_EXECUTE;
 
-    /// `map_range` is now the level-0 case of `map_range_at_level`, so the two must
-    /// agree exactly — otherwise collapsing them changed behaviour.
+    /// `map_range` is the level-0 case of `map_range_at_level`, so the two must agree
+    /// exactly, rounding included.
     #[test]
     fn map_range_is_the_level_zero_case_of_map_range_at_level() {
         let base = VirtualAddr::new(7 << 21);

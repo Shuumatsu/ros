@@ -88,7 +88,7 @@ pub const DIRECT_MAP_END_VA: VirtualAddr = phys_to_virt(DIRECT_MAP_END);
 /// Translate a physical address to its kernel virtual address (`VA = PA + OFFSET`).
 ///
 /// The types are the point of the signature: with bare `usize`s,
-/// `phys_to_virt(phys_to_virt(pa))` was a legal expression.
+/// `phys_to_virt(phys_to_virt(pa))` is a legal expression.
 #[inline]
 pub const fn phys_to_virt(pa: PhysicalAddr) -> VirtualAddr {
     VirtualAddr::new(pa.bits().wrapping_add(VA_OFFSET))

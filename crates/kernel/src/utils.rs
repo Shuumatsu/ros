@@ -1,3 +1,9 @@
+//! Small helpers with no subsystem of their own.
+//!
+//! Both exist because the boot log is read by a human: [`ByteSize`] renders a byte count
+//! the way a page multiple should read, and [`truncated`] fits a firmware-supplied name
+//! into fixed storage without panicking on it.
+
 use core::fmt;
 
 use heapless::String;

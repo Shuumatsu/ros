@@ -1,3 +1,11 @@
+//! The buddy allocator itself: the root decomposition, the bitmap encoding of its
+//! trees, and every operation over them.
+//!
+//! One frame range becomes a list of aligned power-of-two roots, each a buddy tree
+//! sharing the caller's bitmap at its own bit offset. A set bit marks a node that is
+//! a whole free block; everything else is derived from a node index, which only
+//! `block_at` and the tail of [`FrameAllocator::allocate`] may compute.
+
 use core::num::NonZeroUsize;
 
 use heapless::Vec;
@@ -74,8 +82,8 @@ pub enum MetadataError {
 pub enum InitError {
     /// The required metadata size cannot be represented.
     //
-    // `#[error("{0}")]` (not `transparent`) so `source()` resolves to the inner
-    // `MetadataError` via `#[from]`, matching the previous hand-written chain.
+    // `#[error("{0}")]` with `#[from]`, so this displays like the inner
+    // `MetadataError` and also exposes it as `source()`.
     #[error("{0}")]
     Metadata(#[from] MetadataError),
     /// The supplied word slice is smaller than [`metadata_layout`] requires.
@@ -337,12 +345,12 @@ impl<'a> FrameAllocator<'a> {
     /// 2. `order` must be the order the block was **allocated** with, and `start`
     ///    its first frame. Nothing here can check that, and nothing can: the
     ///    bitmap records the extent of *free* blocks, never of allocated ones. Too
-    ///    large an `order` frees frames that are still in use; too small an one
+    ///    large an `order` frees frames that are still in use; too small an `order`
     ///    leaks the remainder. Every other misuse below is reported as an error —
     ///    this one is undetectable, which is the whole reason the token-based
     ///    [`deallocate`](Self::deallocate) is the default.
     ///
-    /// Note that double frees *are* caught, as
+    /// Double frees *are* caught, as
     /// [`DeallocationError::AlreadyFree`]: the ancestor scan in
     /// [`deallocate`](Self::deallocate) finds either the block's own bit or the
     /// coalesced ancestor that swallowed it.

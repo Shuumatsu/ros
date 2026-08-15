@@ -1,5 +1,8 @@
 # easy-fs 结构笔记
 
+参考实现 easy-fs 的结构笔记，数字均为 easy-fs 的参数。本 crate 自己的设计见
+`DESIGN.md`，实际常量见 `src/layout.rs`；两者在下文标注处有意不同。
+
 硬盘被抽象为一段连续地址空间（字节数组），文件系统在其上划分为 5 个区。
 
 分两层理解：
@@ -106,11 +109,13 @@ inode 数据索引的设计由三个独立因素决定，不可混为一谈。
 - 每个 reader（`dir_lookup` / `dir_list`）必须跳过空槽。
 - 目录 `size` 不缩、块不释放；`create` 须先扫空槽复用，否则反复增删下目录无限膨胀。
 
-### 策略二：末位交换 + 缩容——不留空洞（推荐）
-删第 k 项时，把最后一项搬进第 k 槽，再 `decrease_size` 缩掉 32 字节（空出整块则归还 data bitmap）。
+### 策略二：末位交换 + 缩容——不留空洞
+删第 k 项时，把最后一项搬进第 k 槽，再缩掉 32 字节（空出整块则归还 data bitmap）。
 - 永不留空洞，无需哨兵，reader 可无脑遍历 `size/32` 项且全部有效。
 - 唯一代价：不保序。但 POSIX `readdir` 不保证顺序，无语义损失。
-- 需实现 `decrease_size`（`increase_size` 的逆：算新块数、尾块还 bitmap、改 size）；文件截断亦需此函数。
+- 需要 `increase_size` 的逆操作（算新块数、尾块还 bitmap、改 size）；文件截断亦需此函数。
+
+rfs 取策略二，逆操作即 `Fs::set_len`。
 
 ### 对照分页
 留空洞 = 页表项保留 valid 位（sparse）；末位交换 = 目录可压实，因为**条目顺序无语义**（页表项顺序有语义，不能压实）。此为目录与页表的关键差异。
@@ -178,7 +183,9 @@ remove(dir, name) -> bool              // unlink / rmdir
 - **归还所有 data block**：`clear_size` 把该 inode 的 direct/indirect 数据块全部还给 data bitmap。**这是空间大头，漏了就永久泄漏。**
 - 从 inode bitmap 释放 inode id。
 
-### 硬链接：先决定要不要
-- **不要**（默认）：无 `nlink` 概念，remove 无条件执行上面两步释放。
-- **要**：DiskInode 需加 `nlink: u32`，remove 改为递减、归零才释放。代价：**128 字节已排满，加 4 字节须砍一个 direct（28→27）**。
+### 硬链接
+- **不支持**：无 `nlink` 概念，remove 无条件执行上面两步释放。easy-fs 如此。
+- **支持**：DiskInode 加 `nlink: u32`，remove 改为递减、归零才释放。代价：128 字节已排满，加字段须从 direct 里让出位置。
 - 另有 in-memory **open-count**（打开句柄数）与 `nlink` 无关，仅内存、不落盘，用于"unlink 后延迟到最后 close 才真删"的 POSIX 语义。
+
+rfs 支持硬链接（`Fs::link`），`nlink` 与 `_reserved` 各占 4 字节，direct 因此为 26 项。

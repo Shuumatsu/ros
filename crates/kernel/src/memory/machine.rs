@@ -25,7 +25,7 @@ pub const MAX_MMIO: usize = 48;
 
 /// Foreign RAM ranges describable: firmware carve-outs, an initrd, a device-tree blob.
 ///
-/// Also the size of [`super::frame::reserve`]'s record of what it withheld, since every
+/// Also the size of `super::frame::reserve`'s record of what it withheld, since every
 /// range here may produce one. Stated once so the two cannot disagree about how many the
 /// kernel can survive.
 pub const MAX_FOREIGN: usize = 24;
@@ -69,7 +69,7 @@ pub struct MachineMemory<'a> {
     /// top, and the only bank this kernel manages.
     pub ram_end: PhysicalAddr,
     /// RAM that exists but is not the kernel's to hand out. Overlap between entries is
-    /// expected; [`super::frame::reserve`] owns making them disjoint.
+    /// expected; `super::frame::reserve` owns making them disjoint.
     pub foreign: &'a [PhysRange],
     /// Every device window the platform describes, driven today or not.
     pub mmio: &'a [PhysRange],

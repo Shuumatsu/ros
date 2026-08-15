@@ -4,7 +4,7 @@ use crate::memory::layout;
 
 /// Give Rust a stack, and enter it.
 ///
-/// Reached from [`super::entry::enter_high`] at a high virtual address, with `a0` the hart
+/// Reached from `super::entry::enter_high` at a high virtual address, with `a0` the hart
 /// id, `a1` the device tree and `a2` the measured VMA-to-LMA skew — already the three
 /// arguments [`crate::start::boot`] takes, in order.
 ///

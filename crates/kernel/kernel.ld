@@ -13,8 +13,8 @@ differ by a fixed offset: VA = PA + _va_offset. Each section sets its LMA with
 AT(ADDR(.x) - _va_offset) below; the architecture boot entry installs the page
 table and jumps high before ordinary Rust runs.
 
-Still NO MEMORY region / LENGTH: the RAM top is a runtime fact from the device
-tree, not a compile-time constant (see device_tree.rs). */
+There is no MEMORY region / LENGTH: the RAM top is a runtime fact from the device
+tree (see `device_tree`), not a compile-time constant. */
 /* SINGLE SOURCE OF TRUTH for the kernel's memory layout. Four genuine inputs —
    one architectural (`_page_size`) and three platform facts; everything else is
    derived, so there are no composite magic numbers to keep in sync.
@@ -41,29 +41,22 @@ _text_offset    = 0x200000;                 /* SBI reserves the first 2 MiB */
 _phys_base    = _dram_base + _text_offset;      /* 0x80200000: where we load */
 _memory_start = _phys_base + _va_offset;        /* 0xffffffc080200000: virtual base */
 
-/*
-PHDRS is short for "program headers", which we specify three here:
-    text - CPU instructions (executable sections)
-    data - Global, initialized variables
-    bss  - Global, uninitialized variables (cleared by memory::layout::clear_bss)
+/* Three program headers, one per kind of content:
+       text - CPU instructions and read-only data
+       data - initialized globals
+       bss  - uninitialized globals (cleared by memory::layout::clear_bss)
 
-The command PT_LOAD tells the linker that these sections will be loaded
-from the file into memory.
-*/
+   PT_LOAD marks each as a segment the loader brings into memory. */
 PHDRS {
     text PT_LOAD;
     data PT_LOAD;
     bss PT_LOAD;
 }
 
-/*
-organize the memory based on which section it is in. 
-in C++ and Rust, 
-    - CPU instructions go into text, 
-    - global constants go into rodata, 
-    - global initialized variables go into data,
-    - global uninitialized variables go into bss.
-*/
+/* The image, section by section, in load order. Rust emits CPU instructions into
+   .text, global constants into .rodata, initialized globals into .data and
+   uninitialized ones into .bss; each gets a page-aligned range here so
+   memory::kernel_table can give it its own rights. */
 SECTIONS {
     /* VMA starts at the high virtual base; each section's LMA is AT(VMA - offset)
        = its physical load address. */
@@ -91,10 +84,8 @@ SECTIONS {
         . = ALIGN(_page_size);
         PROVIDE(_rodata_start = .);
 
-        /*
-        srodata and rodata are essentially the same thing. However, compilers usually use the
-        srodata sections for shorter, quicker loading sections. 
-        */
+        /* .srodata holds the small read-only data the compiler wants reachable by a
+           short `gp`-relative load, so it goes first, nearest __global_pointer$. */
         *(.srodata .srodata.*)
         . = ALIGN(16);
         *(.rodata .rodata.*)
@@ -108,7 +99,7 @@ SECTIONS {
         *(.eh_frame .eh_frame.*)
         *(.eh_frame_hdr)
 
-        /* in case rodata section is empty, ensure it occupys at least one page */
+        /* in case rodata section is empty, ensure it occupies at least one page */
         . = . + _page_size;
 
         PROVIDE(_rodata_end = .);
@@ -123,7 +114,7 @@ SECTIONS {
         . = ALIGN(16);
         *(.data .data.*)
 
-        /* in case data section is empty, ensure it occupys at least one page */
+        /* in case data section is empty, ensure it occupies at least one page */
         . = . + _page_size;
 
         PROVIDE(_data_end = .);
@@ -137,7 +128,7 @@ SECTIONS {
         . = ALIGN(16);
         *(.bss .bss.*)
 
-        /* in case bss section is empty, ensure it occupys at least one page */
+        /* in case bss section is empty, ensure it occupies at least one page */
         . = . + _page_size;
 
         /* memory::layout::clear_bss zeroes this span one `usize` at a time, stopping
@@ -148,12 +139,11 @@ SECTIONS {
     } :bss
 
 
-    /* The BOOT HART's kernel stack, and only that one. Secondary harts get theirs
-       from the frame allocator at runtime, because by the time one starts there is
-       an allocator to ask — and because the number of harts is a property of the
-       machine, not of this file. There is deliberately no per-hart array here any
-       more; memory::stack's module docs own that story, including why indexing one
-       by hart id was wrong.
+    /* The BOOT HART's kernel stack, and only that one — hence no array and no index.
+       Secondary harts get theirs from the frame allocator at runtime, because by the
+       time one starts there is an allocator to ask, and because how many harts exist
+       is a property of the machine rather than of this file. `memory::stack`'s module
+       docs own the rest, including why nothing is keyed by hart id.
 
        NO SIZE APPEARS HERE, only placement. `memory::stack` declares the area as a
        single `.boot_stack` static and this section takes the size from it, so the
@@ -213,9 +203,8 @@ ASSERT((_boot_stack_end & 15) == 0, "boot stack top must be 16-byte aligned")
 
 /* Effective image size for the RISC-V Image header: everything the loader must
    reserve for the kernel — loaded image, BSS, boot stack and its trailing guard.
-   Secondary hart
-   stacks are absent on purpose: they come from the frame allocator, out of RAM
-   the loader has already been told about. This is an absolute symbol (a constant
-   difference), so the Image header emits its value, not an
+   Secondary hart stacks are absent on purpose: they come from the frame allocator,
+   out of RAM the loader has already been told about. This is an absolute symbol (a
+   constant difference), so the Image header emits its value rather than an
    address. */
 _image_size = _free_ram_start - _memory_start;

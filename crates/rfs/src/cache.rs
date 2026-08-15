@@ -9,9 +9,9 @@
 //!  * A dirty block reaches the disk only when it is evicted, when
 //!    [`BlockCacheManager::sync_all`] is called, or when the block is dropped.
 //!
-//! So until you sync, the copy in RAM is the truth and the disk is stale.
-//! Forgetting to sync loses data — that is the deal write-back makes in exchange
-//! for coalescing repeated writes to the same block.
+//! So until a sync, the copy in RAM is the truth and the disk is stale. That is what
+//! write-back trades for coalescing repeated writes to the same block: a caller that
+//! never syncs loses data.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -52,8 +52,8 @@ impl BlockCache {
 
     /// View the `T` stored at `offset` and pass it to `f`. `T: Pod` guarantees
     /// every bit pattern is a valid `T`, so reinterpreting on-disk bytes is
-    /// sound — which is exactly why `DiskInode::type_` is a raw `u32`, not an
-    /// enum (a corrupt block would otherwise be an invalid discriminant, UB).
+    /// sound; it is also what every on-disk record is shaped to satisfy (see
+    /// [`crate::layout`]).
     pub fn read<T: Pod, V>(&self, offset: usize, f: impl FnOnce(&T) -> V) -> V {
         let end = offset + core::mem::size_of::<T>();
         assert!(end <= BLOCK_SIZE, "typed read at offset {offset} overflows block");
@@ -88,8 +88,8 @@ impl Drop for BlockCache {
 ///
 /// Shared as `Arc<BlockCacheManager>`: methods take `&self` and lock internally,
 /// so bitmaps, inodes and directories all reach blocks through one handle.
-/// Blocks are keyed by id; two managers over different devices never share
-/// entries (unlike a global cache would), which keeps host tests isolated.
+/// Blocks are keyed by id within one manager, so two managers over different
+/// devices share no entries, which keeps host tests isolated.
 pub struct BlockCacheManager {
     device: Arc<dyn BlockDevice>,
     resident: Mutex<VecDeque<(usize, Arc<Mutex<BlockCache>>)>>,

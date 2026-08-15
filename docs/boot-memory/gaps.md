@@ -33,9 +33,9 @@ gap nobody found.
 ## Known-wrong
 
 `device_tree` uses a `reg` address as a CPU physical address directly, which is silently
-wrong on a board whose `/soc` declares a non-identity `ranges`. QEMU virt is identity, so it
-has never bitten. Its module doc explains why composing `Fdt::translate_address` with
-`Node::path` is not straightforward.
+wrong on a board whose `/soc` declares a non-identity `ranges`. Its module doc owns the
+detail, including why composing `Fdt::translate_address` with `Node::path` is not
+straightforward.
 
 ## Testing
 
@@ -43,7 +43,7 @@ has never bitten. Its module doc explains why composing `Fdt::translate_address`
 `no_std`, `no_main` and forced to the RISC-V target, so everything in `memory` — the region
 layout, the audits, the ordering — is exercised only by booting.
 
-That is a real hole, not a preference. Verifying that `region::audit_disjoint` rejects two
-sub-page regions in one page required temporarily injecting a bad pair and reading the panic
-off a QEMU boot. Closing it means moving whatever is pure geometry out of the kernel crate
-and behind a host-testable boundary, the way `paging` already is.
+That is a real hole. Confirming any one of those audits means injecting the fault it exists
+to catch and reading the panic off a QEMU boot, which `verify.md` gives as a procedure.
+Closing the hole means moving whatever is pure geometry out of the kernel crate and behind a
+host-testable boundary, the way `paging` already is.

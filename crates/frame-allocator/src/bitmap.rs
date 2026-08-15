@@ -1,6 +1,15 @@
+//! The caller-supplied bit array, and the only code that turns a bit index into a
+//! word and a shift.
+//!
+//! Word-at-a-time scanning is why this is a type rather than raw slice arithmetic at
+//! the use sites: `find_first_set` searches a bit range that starts and ends
+//! mid-word, and masking those two ends is the whole of the difficulty.
+
 /// Bits per machine word; the single source of truth for the whole crate.
 pub(crate) const WORD_BITS: usize = usize::BITS as usize;
 
+/// A fixed-length bit array over words the caller owns. `bit_len` is the meaningful
+/// prefix; whatever follows it in the last word is never read.
 pub(crate) struct Bitmap<'a> {
     words: &'a mut [usize],
     bit_len: usize,

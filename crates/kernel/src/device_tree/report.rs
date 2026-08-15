@@ -47,7 +47,7 @@ pub fn summary() {
         table.mmio.len(),
         table.foreign.len()
     );
-    println!("[dtb] harts: {:?} (ids as reported, not a count)", table.hart_ids);
+    println!("[dtb] harts: {:?} (ids as reported)", table.hart_ids);
     match table.timebase_hz {
         Some(hz) => println!("[dtb] timebase: {hz} Hz"),
         None => println!("[dtb] timebase: absent (bounded waits will be skipped)"),

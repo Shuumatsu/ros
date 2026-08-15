@@ -1,8 +1,8 @@
 //! Platform-agnostic RISC-V paging structures.
 //!
 //! This crate provides pure data structures and operations for RISC-V
-//! paging (Sv39, with future support for Sv48/Sv57). All code is testable
-//! on the host machine without hardware dependencies.
+//! paging. All code is testable on the host machine without hardware
+//! dependencies.
 //!
 //! # No allocator, no addressing model
 //!

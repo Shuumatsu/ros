@@ -62,9 +62,8 @@ fn error_messages_and_source_chain_are_stable() {
         "metadata error message changed"
     );
 
-    // `InitError::Metadata` must forward Display to the inner error *and* expose
-    // it as the source: the `#[error("{0}")]` + `#[from]` contract. `transparent`
-    // would drop the source, so guard it explicitly.
+    // `InitError::Metadata` must forward Display to the inner error *and* expose it
+    // as the source, which is the contract its attributes carry.
     let wrapped = InitError::from(metadata_error);
     assert_eq!(
         wrapped.to_string(),

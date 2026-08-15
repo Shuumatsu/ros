@@ -61,7 +61,7 @@ pub unsafe fn init() {
         // 直接模式（Driect） MODE = 0 ，触发任何中断异常 时都把 PC 设置为 BASE
         // 向量模式（Vectored） MODE = 1 ，对第 i 种中断 ，跳转到 BASE + i * 4；对所有异常，仍跳转到 BASE
         // 我们采用第一种模式，先进入统一的处理函数，之后再根据中断 / 异常种类进行不同处理。
-        println!("[interrupts::init] set stec register: trap_entry {:#x}, mode Direct", addr);
+        println!("[interrupts::init] set stvec register: trap_entry {:#x}, mode Direct", addr);
         stvec::write(stvec::Stvec::new(addr, stvec::TrapMode::Direct));
 
         // 当中断发生时，cpu 跳转到中断处理函数。sscratch 存储了函数将要用到的 sp
@@ -79,12 +79,11 @@ unsafe extern "C" fn trap_handler(tf: &mut TrapFrame) {
 
     let cause: Trap<Interrupt, Exception> = scause.cause().try_into().expect("unknown trap cause");
     match cause {
-        // Neither arm logs. Both used to, through the lock-free writer, and both were
-        // doing it on *routine* paths: every timer tick on one, and — after the first
-        // attempt at this fix — every system call on the other, since `UserEnvCall`
-        // goes through here. Whatever is worth saying belongs to the handler that
-        // knows the trap is not routine, so `epc` is threaded down to the one place
-        // that does: the catch-all in `exceptions::handler`.
+        // Neither arm logs. Every trap reaches here, timer ticks and system calls
+        // included, so a print on this line is a print on a routine path. Whatever is
+        // worth saying belongs to the handler that knows the trap is not routine, so
+        // `epc` is threaded down to the one place that does: the catch-all in
+        // `exceptions::handler`.
         Trap::Exception(e) => exceptions::handler(e, tf, epc),
         Trap::Interrupt(intr) => unsafe { interrupts::handler(intr, tf) },
     }

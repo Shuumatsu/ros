@@ -1,3 +1,9 @@
+//! The managed frame range, and its decomposition into aligned buddy roots.
+//!
+//! A range with arbitrary ends is not one buddy tree. `RootIter` splits it into the
+//! largest aligned power-of-two blocks it is made of, which is what lets the
+//! allocator manage RAM whose bounds the machine chose rather than a power of two.
+
 use core::cmp::min;
 
 /// A non-empty, half-open range of numeric frame identifiers.
@@ -49,6 +55,7 @@ impl RangeError {
     pub const fn end(self) -> usize { self.end }
 }
 
+/// One aligned power-of-two block of the managed range: the root of a buddy tree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RootBlock {
     pub(crate) start: usize,
@@ -59,6 +66,7 @@ impl RootBlock {
     pub(crate) const fn frame_count(self) -> usize { 1usize << self.order }
 }
 
+/// Walks a [`FrameRange`] as the roots it decomposes into, low to high.
 pub(crate) struct RootIter {
     current: usize,
     end: usize,
@@ -72,8 +80,13 @@ impl Iterator for RootIter {
             return None;
         }
 
+        // A root is bounded twice: by what is left of the range, and by the
+        // alignment of where it starts — a block of `2^k` frames must begin at a
+        // multiple of `2^k`, so the trailing zeros of the cursor cap the order.
         let remaining = self.end - self.current;
         let largest_fitting = highest_power_of_two(remaining);
+        // Frame 0 is aligned to every power of two, and `trailing_zeros` reports the
+        // full word width there, so take the size bound alone.
         let alignment = if self.current == 0 {
             largest_fitting
         } else {

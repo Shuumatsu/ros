@@ -51,7 +51,7 @@ const CPU_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, cpu);
 /// Still assembly, because the stack is only mapped by the kernel table: `sp` cannot be
 /// set before the switch, and no Rust runs before `sp`.
 ///
-/// Reached from [`super::entry::enter_high`] with `a0` the hart id and `a1` the `opaque`
+/// Reached from `super::entry::enter_high` with `a0` the hart id and `a1` the `opaque`
 /// from `hart_start` — this hart's handoff, as a kernel VA, already reachable because the
 /// boot table maps the high half too.
 ///
