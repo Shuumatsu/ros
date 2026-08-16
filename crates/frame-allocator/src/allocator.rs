@@ -197,9 +197,16 @@ impl<'a> FrameAllocator<'a> {
     /// # Safety
     ///
     /// The caller must have exclusive ownership of every frame in `range`.
-    /// None may be allocated, managed by another allocator, or contain the
-    /// supplied metadata storage. That ownership must remain exclusive until
-    /// this allocator is destroyed or all frames are transferred deliberately.
+    /// None may be allocated or managed by another allocator, and that
+    /// ownership must remain exclusive until this allocator is destroyed or
+    /// all frames are transferred deliberately.
+    ///
+    /// `metadata` may live inside `range`, which is what lets a kernel keep its
+    /// bookkeeping in the memory it manages. The condition is that the frames
+    /// holding it reach [`reserve`](Self::reserve) before the first
+    /// [`allocate`](Self::allocate): construction writes them before any
+    /// reservation can be expressed, so their previous contents are gone either
+    /// way, but they must never also be vended.
     pub unsafe fn new(range: FrameRange, metadata: &'a mut [usize]) -> Result<Self, InitError> {
         let (roots, layout) = decompose(range)?;
         if metadata.len() < layout.words {

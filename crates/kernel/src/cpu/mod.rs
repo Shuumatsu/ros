@@ -133,10 +133,14 @@ pub fn boot_hart() -> Option<usize> {
     BOOT_READY.load(Ordering::Acquire).then(|| CPU_SLOTS[0].cpu.hartid())
 }
 
-/// Every hart the machine reports except the boot hart.
+/// Every hart the machine reports except the boot hart, capped at the cpu slots left.
 ///
 /// Defined against [`boot_hart`], not against whoever is asking, so the answer does not
 /// depend on which hart calls it. Iterated, never ranged over: ids need not be `0..n`.
+///
+/// Slot 0 is the boot hart's, so the rest of the machine gets `MAX_CPUS - 1`. Capped here
+/// rather than at [`start_secondaries`], which runs once [`crate::memory::stack`] has
+/// already allocated and mapped a stack for every hart this yields.
 ///
 /// Consumed once, by [`crate::memory::init`], which stores the hart-to-stack pairing;
 /// [`start_secondaries`] reads that back rather than walking this again.
@@ -144,8 +148,18 @@ pub fn boot_hart() -> Option<usize> {
 /// # Panics
 /// Before [`init_boot`], when "except the boot hart" has no meaning yet.
 pub fn secondary_hart_ids() -> impl Iterator<Item = usize> {
+    const SLOTS: usize = MAX_CPUS - 1;
+
     let boot = boot_hart().expect("secondary_hart_ids called before the boot hart was recorded");
-    crate::device_tree::hart_ids().iter().copied().filter(move |&hart| hart != boot)
+    let reported = crate::device_tree::hart_ids();
+    let wanted = reported.iter().filter(|&&hart| hart != boot).count();
+    if wanted > SLOTS {
+        println!(
+            "[smp] WARNING: the machine reports {wanted} harts besides the boot hart and this \
+             kernel has {SLOTS} cpu slots; the rest are left stopped"
+        );
+    }
+    reported.iter().copied().filter(move |&hart| hart != boot).take(SLOTS)
 }
 
 /// Bring up every hart [`crate::memory::init`] reserved a stack for.
@@ -160,7 +174,7 @@ pub fn start_secondaries() {
     // Slot 0 belongs to the boot hart, so secondaries start at 1.
     let mut requested = 0;
     for (index, &stack::Secondary { hart, stack }) in (1..).zip(stack::secondaries()) {
-        assert!(index < MAX_CPUS, "machine reports more than {MAX_CPUS} harts; raise MAX_CPUS");
+        assert!(index < MAX_CPUS, "cpu slot {index} is out of range; secondary_hart_ids caps it");
         let slot = &CPU_SLOTS[index];
         // Ask first: "already started" and "no such hart" are different problems, and
         // hart_start's error code does not distinguish them.

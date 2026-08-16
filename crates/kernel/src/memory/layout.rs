@@ -53,7 +53,7 @@ linker_symbol!(
         memory_start       => _memory_start,
         boot_stack_start   => _boot_stack_start,
         boot_stack_end     => _boot_stack_end,
-        free_ram_start     => _free_ram_start,
+        kernel_top         => _kernel_top,
     }
     raw {
         /// The anchor `gp` holds, so that global access can be relaxed to `gp`-relative.
@@ -98,11 +98,11 @@ pub unsafe fn clear_bss() {
 /// what the linker built: the gap above the boot stack is one page exactly when the two
 /// agree. A mismatch otherwise surfaces as guard pages drifted out of position.
 pub fn check() {
-    let guard = free_ram_start().sub_addr(boot_stack_end());
+    let guard = kernel_top().sub_addr(boot_stack_end());
     assert_eq!(
         guard, PAGE_SIZE,
-        "kernel.ld padded {guard:#x} bytes between the boot stack and free RAM, but Rust's \
-         PAGE_SIZE is {PAGE_SIZE:#x}; the linker's _page_size and PAGE_SIZE disagree"
+        "kernel.ld padded {guard:#x} bytes above the boot stack, but Rust's PAGE_SIZE is \
+         {PAGE_SIZE:#x}; the linker's _page_size and PAGE_SIZE disagree"
     );
 
     // Every separately mapped section must start on a page, or its region overlaps its
@@ -113,7 +113,7 @@ pub fn check() {
         ("_data_start", data_start()),
         ("_bss_start", bss_start()),
         ("_boot_stack_start", boot_stack_start()),
-        ("_free_ram_start", free_ram_start()),
+        ("_kernel_top", kernel_top()),
     ] {
         assert!(addr.is_aligned(PAGE_SIZE), "{name} = {addr:#x} is not page aligned");
     }
@@ -129,7 +129,7 @@ pub fn report() {
     println!("    data:         {:#x}..{:#x}", data_start(), data_end());
     println!("    bss:          {:#x}..{:#x}", bss_start(), bss_end());
     println!("    boot stack:   {:#x}..{:#x}", boot_stack_start(), boot_stack_end());
-    // Where the image stops and the frame allocator's territory begins. Not a heap
-    // address: the kernel heap is frames taken from the pool (see `super::heap`).
-    println!("    free RAM:     {:#x}..", free_ram_start());
+    // The top of the span withheld from the frame allocator, one guard page above the
+    // boot stack. RAM on both sides of the image is the allocator's.
+    println!("    kernel top:   {:#x}", kernel_top());
 }

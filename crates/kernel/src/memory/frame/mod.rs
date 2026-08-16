@@ -1,6 +1,6 @@
-//! Physical frame allocator: an allocation-free buddy allocator over the RAM above the
-//! kernel image, vending page-aligned frames for the heap, page tables, user pages and DMA
-//! buffers. [`reserve`] holds what must never be vended.
+//! Physical frame allocator: an allocation-free buddy allocator over the machine's RAM
+//! bank, vending page-aligned frames for the heap, page tables, user pages and DMA
+//! buffers. [`reserve`] holds what must never be vended, the kernel image included.
 //!
 //! It comes up **first** because it needs no heap: its metadata is a bitmap kept in the
 //! pool itself and withheld from the frames vended, so the bookkeeping cannot be allocated
@@ -42,9 +42,9 @@ static OWNED: Once<FrameRange> = Once::new();
 
 /// The physical span this module owns, which [`crate::memory::kernel_table`] maps exactly.
 ///
-/// The same range the allocator manages: the metadata bitmap is inside the pool and
-/// withheld from it like any other reservation, so there is no second extent to keep in
-/// step with this one.
+/// The same range the allocator manages: every carve-out, the metadata bitmap and the
+/// kernel image included, is withheld from inside it rather than excluded from its bounds,
+/// so there is no second extent to keep in step with this one.
 pub fn owned_range() -> (PhysicalAddr, PhysicalAddr) {
     let owned = OWNED.get().expect("frame::owned_range queried before frame::init");
     (PhysicalAddr::from_ppn(owned.start()), PhysicalAddr::from_ppn(owned.end()))
@@ -97,11 +97,13 @@ impl Frames {
     pub fn leak(self) -> PhysicalAddr { self.base() }
 }
 
-/// Bring the allocator up over free physical RAM `[free_start, ram_end)`, withholding
-/// `foreign` and its own metadata.
+/// Bring the allocator up over the whole of `ram`, withholding the kernel `image`, the
+/// machine's `foreign` ranges and the allocator's own metadata.
 ///
-/// RAM beyond the direct map's window is dropped (loudly), because its frames would have
-/// no high-half alias.
+/// The pool is the bank, not the RAM above the image: what is not the kernel's to vend is
+/// withheld from inside it, which is the only account of it there is. RAM beyond the
+/// direct map's window is dropped (loudly), because its frames would have no high-half
+/// alias.
 ///
 /// # Panics
 ///
@@ -109,15 +111,11 @@ impl Frames {
 /// own: it would silently keep the first range while [`FRAME_ALLOCATOR`] took the second
 /// allocator — two answers to which frames the kernel owns — and the bitmap below is
 /// taken as a `&'static mut`, which a second call would alias.
-pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr, foreign: &[PhysRange]) {
+pub fn init(ram: &PhysRange, image: PhysRange, foreign: &[PhysRange]) {
     assert!(OWNED.get().is_none(), "frame::init called twice; the pool is already published");
 
     let direct_map_end = crate::memory::direct_map::DIRECT_MAP_END;
-    assert!(
-        free_start < direct_map_end,
-        "kernel image top {free_start:#x} lies outside the direct map's window, which ends at \
-         {direct_map_end:#x}"
-    );
+    let ram_end = ram.end();
     let usable_end = ram_end.min(direct_map_end);
     if ram_end > direct_map_end {
         println!(
@@ -127,9 +125,17 @@ pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr, foreign: &[PhysRang
         );
     }
 
-    let start_ppn = free_start.align_up(PAGE_SIZE).ppn();
+    let start_ppn = ram.base.align_up(PAGE_SIZE).ppn();
     let end_ppn = usable_end.align_down(PAGE_SIZE).ppn();
-    let pool = FrameRange::new(start_ppn, end_ppn).expect("free RAM range empty after alignment");
+    let pool = FrameRange::new(start_ppn, end_ppn).expect("RAM bank empty after alignment");
+
+    // One list, because the same set has to be respected twice: once to place the bitmap
+    // clear of it, and once to withhold it. Two lists would let those two disagree.
+    let mut carveouts: heapless::Vec<PhysRange, { reserve::MAX_CARVEOUTS }> = heapless::Vec::new();
+    carveouts.push(image).expect("MAX_CARVEOUTS leaves a slot for the kernel image");
+    carveouts
+        .extend_from_slice(foreign)
+        .expect("MachineMemory::check bounds the machine's list at MAX_FOREIGN");
 
     let layout = metadata_layout(pool).expect("frame metadata size exceeds usize");
     let bitmap_words = layout.words();
@@ -137,8 +143,8 @@ pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr, foreign: &[PhysRang
 
     // Where, not just how big. Building the allocator zeroes these frames, and that write
     // happens before a single reservation exists to protect anything from it, so the
-    // choice has to respect `foreign` on its own.
-    let metadata = reserve::place_metadata(pool, bitmap_frames, foreign);
+    // choice has to respect every carve-out on its own.
+    let metadata = reserve::place_metadata(pool, bitmap_frames, &carveouts);
     let bitmap_va = phys_to_virt(PhysicalAddr::from_ppn(metadata.start()));
     // SAFETY: the bitmap frames are page-aligned, mapped, withheld from the pool below
     // before anything can be vended, and live as long as the kernel, so this `'static mut`
@@ -146,13 +152,16 @@ pub fn init(free_start: PhysicalAddr, ram_end: PhysicalAddr, foreign: &[PhysRang
     let bitmap: &'static mut [usize] =
         unsafe { core::slice::from_raw_parts_mut(bitmap_va.as_mut_ptr(), bitmap_words) };
 
-    // SAFETY: `pool` covers RAM strictly above the kernel image — memory nothing else
-    // owns — and the boot table maps every frame in it.
+    // SAFETY: the boot table maps every frame in `pool`, and nothing else owns one: the
+    // kernel image, the firmware's carve-outs and the blob are all withheld below before
+    // anything can be vended. The bitmap lies inside `pool`, which `FrameAllocator::new`
+    // permits on the condition met here — it is the first range `withhold_all` takes, and
+    // the allocator is not published until that has run.
     let mut allocator = unsafe {
         FrameAllocator::new(pool, bitmap).expect("frame allocator initialization failed")
     };
     // Before publication, so nothing can be vended out of a carve-out in between.
-    reserve::everything_foreign(&mut allocator, pool, metadata, foreign);
+    reserve::withhold_all(&mut allocator, pool, metadata, &carveouts);
     FRAME_ALLOCATOR.with(|slot| *slot = Some(allocator));
 
     OWNED.call_once(|| pool);

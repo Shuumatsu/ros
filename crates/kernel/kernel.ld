@@ -165,23 +165,22 @@ SECTIONS {
     } :bss
 
 
-    /* Free RAM starts right after the boot stack: everything from here to the RAM
-    top belongs to the frame allocator, which is where the kernel heap, page tables
-    and user pages all come from. Its END is not a linker symbol — the RAM top is a
-    runtime fact from the device tree (see memory::init), not a compile-time LENGTH.
+    /* The top of everything the kernel occupies, guard page included. NOT the bottom
+    of free RAM: the frame allocator manages the whole RAM bank and withholds what is
+    spoken for by address, this span among it (see memory::init), so what lies below
+    _memory_start is free RAM as much as what lies above here is.
 
     Both symbols below come from the location counter, NOT from _boot_stack_end.
     Writing `_boot_stack_end + _page_size` would restate "the image ends at the boot
     stack" as arithmetic, and the linker does place sections this script omits. A
-    NOBITS orphan ranked after .boot_stack (it and .bss are both NOBITS+WA) would
-    put _free_ram_start inside it — and memory::init hands
-    virt_to_phys(_free_ram_start) to frame::init as the bottom of free RAM, so the
-    allocator would vend frames over live kernel data. `.` cannot drift from where
-    the linker actually is. */
+    NOBITS orphan ranked after .boot_stack (it and .bss are both NOBITS+WA) would put
+    _kernel_top inside it — and memory::init withholds only up to _kernel_top, so the
+    allocator would vend frames over live kernel data. `.` cannot drift from where the
+    linker actually is. */
     . = ALIGN(_page_size);
     _image_end = .;
     . = . + _page_size;              /* guard page above the boot stack */
-    PROVIDE(_free_ram_start = .);
+    PROVIDE(_kernel_top = .);
 }
 
 /* No section may appear after .boot_stack, and none between the five named above.
@@ -208,4 +207,4 @@ ASSERT((_boot_stack_end & 15) == 0, "boot stack top must be 16-byte aligned")
    out of RAM the loader has already been told about. This is an absolute symbol (a
    constant difference), so the Image header emits its value rather than an
    address. */
-_image_size = _free_ram_start - _memory_start;
+_image_size = _kernel_top - _memory_start;

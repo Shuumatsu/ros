@@ -39,6 +39,8 @@ use crate::utils::ByteSize;
 pub use direct_map::{phys_to_virt, virt_to_phys};
 pub use machine::MachineMemory;
 
+use machine::PhysRange;
+
 /// Bring the memory subsystem up. **Boot hart only** — a secondary's architecture entry
 /// installs the finished page table and stack before it reaches Rust.
 ///
@@ -61,29 +63,33 @@ pub fn init(machine: MachineMemory<'_>, secondary_harts: impl Iterator<Item = us
     direct_map::report();
     machine.check();
 
-    // 1. Physical frames: [free_start, ram_end). `free_start` is the top of the kernel
-    //    image (a high VA); the allocator vends *physical* addresses, so convert it back.
-    let free_start = virt_to_phys(layout::free_ram_start());
-    let ram_end = machine.ram.end();
-    assert!(
-        machine.ram.contains(free_start),
-        "the kernel image occupies {:#x}..{free_start:#x}, which is not inside the RAM bank at \
-         {:#x}..{ram_end:#x} the machine says it was loaded into",
+    // 1. Physical frames: the whole RAM bank, with what is spoken for withheld from inside
+    //    it. The machine describes all of that but one range — the image the kernel is
+    //    running out of — which is this module's to add. Starting the pool above the image
+    //    instead would be a second answer to "not ours" and the weaker one, since it says
+    //    nothing about where the firmware's own memory ends.
+    let image = PhysRange::new(
+        "kernel image",
         virt_to_phys(layout::memory_start()),
-        machine.ram.base
+        layout::kernel_top().sub_addr(layout::memory_start()),
     );
-    // Everything below the image belongs to the previous boot stage, so the pool starts at
-    // the image top rather than at the bank base. Reported because "not ours" and "nobody
-    // looked" are the same number of bytes lost, and only one of them is intended.
-    let below = free_start.sub_addr(machine.ram.base);
-    println!(
-        "[memory] RAM bank {:#x}..{ram_end:#x} ({}); {} below the kernel image belongs to the \
-         previous boot stage and is not managed",
+    assert!(
+        machine.ram.base <= image.base && image.end() <= machine.ram.end(),
+        "the kernel image occupies {:#x}..{:#x}, which is not inside the RAM bank at \
+         {:#x}..{:#x} the machine says it was loaded into",
+        image.base,
+        image.end(),
         machine.ram.base,
-        ByteSize(machine.ram.size),
-        ByteSize(below)
+        machine.ram.end()
     );
-    frame::init(free_start, ram_end, machine.foreign);
+    println!(
+        "[memory] RAM bank {:#x}..{:#x} ({}); the kernel image and everything the machine \
+         reserved are withheld from it, and nothing else is",
+        machine.ram.base,
+        machine.ram.end(),
+        ByteSize(machine.ram.size)
+    );
+    frame::init(machine.ram, image, machine.foreign);
     frame::report();
     frame::self_test();
 

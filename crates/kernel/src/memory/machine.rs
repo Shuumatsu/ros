@@ -149,20 +149,36 @@ impl MachineMemory<'_> {
     /// Reject a machine this kernel cannot describe, before anything derives an address
     /// from it.
     ///
-    /// Three ways a description is unusable, all fatal because each one ends in a mapping
-    /// that is individually valid and points at the wrong memory:
+    /// Ways a description is unusable, all fatal because each one ends in a mapping that is
+    /// individually valid and points at the wrong memory:
     ///
     /// - a device window past the direct map, which some future driver would take from
     ///   `phys_to_virt` and find unmapped — or worse, colliding with what
     ///   [`super::kernel_va`] hands out;
     /// - a device window overlapping the RAM bank, which is either register space the
     ///   frame allocator would vend or RAM a driver would write registers into;
-    /// - an empty RAM bank.
+    /// - an empty RAM bank;
+    /// - more entries in either list than the fixed storage downstream holds. The lists
+    ///   arrive as slices, so their bound is not a property of the type; checked here so
+    ///   the `heapless` capacities [`super::frame`] copies them into are provable rather
+    ///   than hopeful.
     ///
     /// RAM *above* the direct map is not fatal: [`super::frame::init`] drops it loudly,
     /// which costs memory and nothing else.
     pub fn check(&self) {
         assert!(self.ram.size > 0, "the machine reports a RAM bank of no size at all");
+        assert!(
+            self.mmio.len() <= MAX_MMIO,
+            "the machine describes {} device windows, more than the {MAX_MMIO} this kernel \
+             can hold",
+            self.mmio.len()
+        );
+        assert!(
+            self.foreign.len() <= MAX_FOREIGN,
+            "the machine describes {} foreign RAM ranges, more than the {MAX_FOREIGN} this \
+             kernel can hold",
+            self.foreign.len()
+        );
         // The base only: RAM past the window's end is dropped rather than rejected, but a
         // bank starting past it leaves the kernel with no addressable memory at all.
         direct_map::require_reach("the base of the kernel's RAM bank", self.ram.base, 1);

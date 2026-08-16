@@ -119,41 +119,46 @@ fn regions<'a>(windows: &'a [PhysRange]) -> Vec<Region<'a>> {
         });
     }
 
-    // The direct map covers exactly what the allocator owns — asked for, not re-derived.
+    // The direct map covers exactly what the allocator owns — asked for, not re-derived —
+    // less the kernel image, whose sections above already map that span with rights of
+    // their own. The pool is the whole RAM bank, so the image sits inside it rather than
+    // above it, and the map is the two spans on either side.
     let (pool_start, pool_end) = frame::owned_range();
     let pool_start_va = phys_to_virt(pool_start);
     let pool_end_va = phys_to_virt(pool_end);
-    assert_eq!(
-        pool_start_va,
-        layout::free_ram_start(),
-        "the frame pool must begin at the top of the kernel image for the two to tile"
-    );
-
-    // The image sits in one superpage-aligned slot, mapped at 4 KiB so its sections can
-    // carry different rights; the bulk beyond gets superpages. They must not overlap, or
-    // the finer mappings hit `SuperpageInPath`.
+    let image_start = layout::memory_start();
+    let image_end = layout::kernel_top();
     assert!(
-        layout::text_start().is_aligned(SUPERPAGE),
-        "the kernel image must start superpage-aligned, or its slot would overlap the bulk direct map"
+        pool_start_va <= image_start && image_end <= pool_end_va,
+        "the kernel image at {image_start:#x}..{image_end:#x} is not inside the frame pool at \
+         {pool_start_va:#x}..{pool_end_va:#x}, so the two tilings below would leave a hole"
     );
-    // Both boundaries are clamped into the pool, so the three regions below tile
-    // `[pool_start_va, pool_end_va)` and no more. Unclamped, a machine whose RAM ends
-    // inside the image's slot maps the head past the pool, onto physical memory that need
-    // not exist — and nothing catches it: such a region overlaps nothing and sits below
-    // `kernel_va::START`.
-    let slot_end = pool_start_va.align_up(SUPERPAGE).min(pool_end_va);
-    let bulk_end = pool_end_va.align_down(SUPERPAGE).max(slot_end);
-
-    // Rest of the image's slot: the frame bitmap and the first frames vended.
-    push(direct("frame pool head", pool_start_va, slot_end, 0, READ_WRITE));
-    // Never executable: page tables, user pages and DMA buffers live here.
-    push(direct("direct map", slot_end, bulk_end, 1, READ_WRITE));
-    // The sub-superpage remainder at the top, rather than rounding past owned RAM.
-    push(direct("direct map tail", bulk_end, pool_end_va, 0, READ_WRITE));
+    tile_direct_map(&mut push, pool_start_va, image_start);
+    tile_direct_map(&mut push, image_end, pool_end_va);
 
     region::audit_disjoint(&regions);
     audit_kernel_va(&regions);
     regions
+}
+
+/// Tile `[start, end)` of the direct map: 4 KiB pages up to the first [`SUPERPAGE`]
+/// boundary, superpages through the last one, 4 KiB pages for the remainder. Any of the
+/// three may come out empty.
+///
+/// Three regions rather than one, because a superpage leaf rounds outward: a single
+/// superpage region over a span whose ends are not superpage-aligned reaches outside it,
+/// onto the kernel image at the wrong rights or onto physical memory that need not exist.
+///
+/// Never executable: page tables, user pages and DMA buffers live here.
+fn tile_direct_map<'a>(push: &mut impl FnMut(Region<'a>), start: VirtualAddr, end: VirtualAddr) {
+    if end <= start {
+        return;
+    }
+    let head_end = start.align_up(SUPERPAGE).min(end);
+    let bulk_end = end.align_down(SUPERPAGE).max(head_end);
+    push(direct("direct map", start, head_end, 0, READ_WRITE));
+    push(direct("direct map", head_end, bulk_end, 1, READ_WRITE));
+    push(direct("direct map", bulk_end, end, 0, READ_WRITE));
 }
 
 /// Require every mapping above the direct map to have come from [`kernel_va`], and

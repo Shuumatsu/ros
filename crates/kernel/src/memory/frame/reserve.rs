@@ -20,8 +20,13 @@ use crate::memory::machine::{MAX_FOREIGN, PhysRange};
 use crate::sync::IrqMutex;
 use crate::utils::ByteSize;
 
-/// Reservations recordable: every foreign range, plus the allocator's own metadata.
-const MAX_RESERVATIONS: usize = MAX_FOREIGN + 1;
+/// Carve-outs the pool can hold: every foreign range the machine describes, plus the
+/// kernel image, which no machine describes and [`super::init`] contributes.
+pub const MAX_CARVEOUTS: usize = MAX_FOREIGN + 1;
+
+/// Reservations recordable: every carve-out, plus the allocator's own metadata. Stated
+/// against [`MAX_CARVEOUTS`] so the record cannot be shorter than what it records.
+const MAX_RESERVATIONS: usize = MAX_CARVEOUTS + 1;
 
 /// What the allocator's metadata is called wherever it is reported.
 const METADATA: &str = "frame bitmap";
@@ -58,38 +63,36 @@ fn frame_span(range: &PhysRange) -> (usize, usize) {
 }
 
 /// Choose where the allocator's metadata bitmap goes: the lowest run of `frames` frames in
-/// `pool` that no foreign range claims.
+/// `pool` that no carve-out claims.
 ///
 /// The bitmap is *written* — zeroed — the moment the allocator is built, which is before
-/// any reservation can exist to protect anything from it. Placing it at the front of the
-/// pool unconditionally therefore destroys whatever the firmware left there, and an initrd
-/// or a carve-out immediately above the kernel image is an entirely ordinary thing for a
-/// previous boot stage to have produced.
+/// any reservation can exist to protect anything from it. The pool starts at the base of
+/// the RAM bank, so its first frames are the firmware's own, and its lowest free run is
+/// wherever the previous boot stage stopped.
 ///
 /// The lowest such run, so the metadata stays out of the way of large contiguous
-/// allocations, and so a machine with no carve-outs above the kernel gets the same layout
-/// it always had.
+/// allocations.
 ///
 /// # Panics
 ///
-/// If the pool has no room for the bitmap outside the foreign ranges — the kernel cannot
+/// If the pool has no room for the bitmap outside the carve-outs — the kernel cannot
 /// manage memory it has nowhere to keep the bookkeeping for.
-pub fn place_metadata(pool: FrameRange, frames: usize, foreign: &[PhysRange]) -> FrameRange {
+pub fn place_metadata(pool: FrameRange, frames: usize, carveouts: &[PhysRange]) -> FrameRange {
     let mut start = pool.start();
-    // Each pass either settles or steps `start` past the end of one foreign range, and a
-    // range once stepped over is never stepped over again, so the list length bounds the
-    // number of restarts.
-    for _ in 0..=foreign.len() {
+    // Each pass either settles or steps `start` past the end of one carve-out, and a range
+    // once stepped over is never stepped over again, so the list length bounds the number
+    // of restarts.
+    for _ in 0..=carveouts.len() {
         let end = start.saturating_add(frames);
         assert!(
             end <= pool.end(),
             "no room in the {} frame pool for a {frames}-frame allocator bitmap outside the \
-             {} ranges the machine reserved",
+             {} ranges withheld from it",
             pool.len(),
-            foreign.len()
+            carveouts.len()
         );
 
-        match foreign.iter().find(|range| {
+        match carveouts.iter().find(|range| {
             let (first, last) = frame_span(range);
             first < end && start < last
         }) {
@@ -97,10 +100,10 @@ pub fn place_metadata(pool: FrameRange, frames: usize, foreign: &[PhysRange]) ->
             None => return FrameRange::new(start, end).expect("a bitmap spans at least one frame"),
         }
     }
-    unreachable!("stepping past every foreign range leaves nothing left to conflict with")
+    unreachable!("stepping past every carve-out leaves nothing left to conflict with")
 }
 
-/// Withhold `foreign` from the pool, recording it under its own name.
+/// Withhold `carveout` from the pool, recording it under its own name.
 ///
 /// Rounded **outward**: a partially covered frame is still a frame that must not be
 /// handed out. Only the overlap with the pool is withheld; a range that misses it
@@ -110,11 +113,11 @@ fn withhold(
     allocator: &mut FrameAllocator<'static>,
     pool: FrameRange,
     withheld: &mut Vec<FrameRange, MAX_RESERVATIONS>,
-    foreign: &PhysRange,
+    carveout: &PhysRange,
 ) {
-    let (start, end) = (foreign.base, foreign.end());
-    let name = foreign.name();
-    let (wanted_first, wanted_last) = frame_span(foreign);
+    let (start, end) = (carveout.base, carveout.end());
+    let name = carveout.name();
+    let (wanted_first, wanted_last) = frame_span(carveout);
     let first = wanted_first.max(pool.start());
     let last = wanted_last.min(pool.end());
 
@@ -123,9 +126,9 @@ fn withhold(
         return;
     };
     if first > wanted_first || last < wanted_last {
-        // Loud, because this is what a carve-out straddling the top of the kernel image
-        // looks like, and the record below would otherwise report the clipped range as if
-        // it were the whole of it.
+        // Loud, because this is what a carve-out straddling the edge of the RAM bank looks
+        // like — the top of it, once the direct map's window has clipped the pool — and the
+        // record below would otherwise report the clipped range as if it were the whole.
         println!(
             "[memory] WARNING: reserve: only {:#x}..{:#x} of {name} at {start:#x}..{end:#x} \
              lies in the pool; the rest is not the allocator's to withhold",
@@ -152,15 +155,7 @@ fn withhold(
         });
         newly += 1;
     }
-    if withheld.push(range).is_err() {
-        // Only the overlap bookkeeping is lost, not the reservation itself. A later
-        // range overlapping this one would then hit the allocator's rejection and
-        // panic, so this has to be loud.
-        println!(
-            "[memory] WARNING: more than {MAX_RESERVATIONS} reservations; overlap detection \
-             is now incomplete"
-        );
-    }
+    withheld.push(range).expect("one reservation per carve-out, plus the metadata");
 
     // Against `newly`, not the extent: that makes an overlap legal without making a
     // silent no-op legal, and a no-op would leave the memory vendable.
@@ -179,15 +174,14 @@ fn withhold(
         ),
         newly_withheld: newly,
     };
-    if RESERVATIONS.with(|reservations| reservations.push(record)).is_err() {
-        // The frames are withheld either way; only the record is lost. Say so, since
-        // the list is what the boot log and any future reclaim rely on.
-        println!("[memory] WARNING: more than {MAX_RESERVATIONS} reservations; {name} unrecorded");
-    }
+    RESERVATIONS
+        .with(|reservations| reservations.push(record))
+        .expect("one reservation per carve-out, plus the metadata");
 }
 
 /// Withhold everything in `pool` that is not the kernel's to vend: the allocator's own
-/// `metadata`, then the device-tree blob, firmware carve-outs and an initrd.
+/// `metadata`, then the kernel image, the device-tree blob, firmware carve-outs and an
+/// initrd.
 ///
 /// Metadata first, since it is the one range already known to conflict with nothing —
 /// [`place_metadata`] chose it that way — so a later carve-out overlapping it is
@@ -195,17 +189,12 @@ fn withhold(
 ///
 /// Takes the allocator by reference rather than reaching for the global one: this runs
 /// before publication, so no frame can be vended in between.
-pub fn everything_foreign(
+pub fn withhold_all(
     allocator: &mut FrameAllocator<'static>,
     pool: FrameRange,
     metadata: FrameRange,
-    foreign: &[PhysRange],
+    carveouts: &[PhysRange],
 ) {
-    assert!(
-        !foreign.is_empty(),
-        "the machine reports no foreign RAM at all, not even a device-tree blob; \
-         something described it wrong"
-    );
     // The frame ranges withheld so far, so a later carve-out overlapping an earlier one
     // is recognised rather than rejected. Local: it only makes the sequence of calls
     // order-independent.
@@ -215,7 +204,7 @@ pub fn everything_foreign(
     let size = PhysicalAddr::from_ppn(metadata.end()).sub_addr(base);
     withhold(allocator, pool, &mut withheld, &PhysRange::new(METADATA, base, size));
 
-    for range in foreign {
+    for range in carveouts {
         withhold(allocator, pool, &mut withheld, range);
     }
 }
