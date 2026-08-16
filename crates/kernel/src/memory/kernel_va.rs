@@ -14,10 +14,11 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use paging::sv39::PAGE_SIZE;
+use paging::sv39::{PAGE_SIZE, SUPERPAGE};
+use paging::utils::GIGABYTE;
 use paging::{MemoryAddr, VirtualAddr};
 
-use crate::memory::direct_map::{DIRECT_MAP_END_VA, GIGAPAGE, SUPERPAGE};
+use crate::memory::direct_map::DIRECT_MAP_END_VA;
 use crate::utils::ByteSize;
 
 /// First virtual address this module hands out: one past the direct map's window.
@@ -99,6 +100,9 @@ pub fn is_reserved(va: VirtualAddr, len: usize) -> bool {
     va >= START && va.checked_add(len).is_some_and(|end| end <= watermark())
 }
 
+/// Free space below which [`report`] warns.
+const LOW_WATER: usize = GIGABYTE;
+
 /// Print what is taken and what is left.
 pub fn report() {
     // An interval, not a byte count: the remainder is hundreds of gigabytes and
@@ -110,7 +114,7 @@ pub fn report() {
         ByteSize(watermark().sub_addr(START)),
         end()
     );
-    if remaining() < GIGAPAGE {
-        println!("[memory] WARNING: less than {} of kernel VA space left", ByteSize(GIGAPAGE));
+    if remaining() < LOW_WATER {
+        println!("[memory] WARNING: less than {} of kernel VA space left", ByteSize(LOW_WATER));
     }
 }

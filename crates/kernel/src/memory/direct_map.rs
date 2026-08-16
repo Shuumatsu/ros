@@ -1,19 +1,19 @@
 //! The kernel's direct-map geometry, and the address conversion it defines.
 //!
 //! `VA = PA + VA_OFFSET` holds throughout [`DIRECT_MAP_END`] with no RAM base subtracted
-//! out, which buys two things: [`phys_to_virt`] is a compile-time add, and it is valid
-//! for *every* physical address including MMIO. Skew the offset by the RAM base and
-//! `phys_to_virt` of a device address is not even canonical — the linear form is what
-//! makes dropping the identity map possible.
+//! out, which buys two things: [`phys_to_virt`] is a compile-time add, and it reaches RAM
+//! and MMIO alike. Skew the offset by the RAM base and `phys_to_virt` of a device address
+//! is not even canonical — the linear form is what makes dropping the identity map
+//! possible.
 //!
 //! # How the high half is divided
 //!
 //! Sv39 gives the kernel one canonical half, and that half is all it will ever have:
 //!
 //! ```text
-//! VA_OFFSET               DIRECT_MAP_END_VA                          usize::MAX
-//! |<---- DIRECT_MAP_SPAN ---->|<------- kernel_va, less a guard ------>|
-//! |  PA 0..DIRECT_MAP_END     |  addresses the kernel chooses          |
+//! VA_OFFSET                 DIRECT_MAP_END_VA                usize::MAX
+//! |<------- DIRECT_MAP_SPAN ------->|<--- kernel_va, less a guard --->|
+//! |  PA 0..DIRECT_MAP_END           |  addresses the kernel chooses   |
 //! ```
 //!
 //! The split is the point. [`phys_to_virt`] is total over its window, so every address in
@@ -27,9 +27,7 @@
 //! out. Physical memory or a device window beyond it cannot be aliased at all, so
 //! [`super::frame`] drops such RAM and [`super::machine::MachineMemory::check`] rejects
 //! such a device.
-//!
-//! The conversions live next to the constant they are made of; [`super`] re-exports them.
-use paging::sv39::{ROOT_ENTRIES_PER_HALF, ROOT_LEVEL, page_size_at};
+use paging::sv39::{GIGAPAGE, ROOT_ENTRIES_PER_HALF};
 use paging::{PhysicalAddr, VirtualAddr};
 
 use crate::utils::ByteSize;
@@ -40,13 +38,6 @@ use crate::utils::ByteSize;
 /// `const`; the boot entry reconciles the two before it jumps high. A bare `usize` because
 /// it is a *difference* between the address spaces, not an address in either.
 pub const VA_OFFSET: usize = 0xffff_ffc0_0000_0000;
-
-/// Bytes mapped by one root-level leaf.
-pub const GIGAPAGE: usize = page_size_at(ROOT_LEVEL);
-
-/// Bytes mapped by one middle-level leaf: the grain the bulk direct map is tiled in, and
-/// so the alignment anything placing itself beside it must respect.
-pub const SUPERPAGE: usize = page_size_at(1);
 
 /// Bytes of virtual address space in the high half — everything the kernel gets.
 const HIGH_HALF: usize = ROOT_ENTRIES_PER_HALF * GIGAPAGE;
@@ -87,10 +78,9 @@ pub const DIRECT_MAP_END_VA: VirtualAddr = phys_to_virt(DIRECT_MAP_END);
 /// Require `[base, base + size)` to lie inside the window, naming it and the constant to
 /// raise if it does not.
 ///
-/// The single check, for every caller that needs one — the device tree blob before it is
-/// read, every device window before one is mapped. A physical range the direct map cannot
-/// name is not an error [`phys_to_virt`] can report: it computes an address either way,
-/// one outside the window and inside whatever [`super::kernel_va`] hands out next.
+/// The single reach check. A physical range the direct map cannot name is not an error
+/// [`phys_to_virt`] can report: it computes an address either way, one outside the window
+/// and inside whatever [`super::kernel_va`] hands out next.
 ///
 /// Saturating, so a firmware-supplied size that would wrap cannot produce an end below the
 /// base and pass.

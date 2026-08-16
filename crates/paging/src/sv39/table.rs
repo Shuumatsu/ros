@@ -12,8 +12,7 @@ use core::mem::{align_of, size_of};
 
 use super::addr::{PhysicalAddr, VirtualAddr};
 use super::entry::{Entry, PteFlags};
-use super::page_size_at;
-use super::{ENTRIES_PER_PAGE, PAGE_SIZE, ROOT_ENTRIES_PER_HALF, ROOT_LEVEL};
+use super::{ENTRIES_PER_PAGE, GIGAPAGE, PAGE_SIZE, ROOT_ENTRIES_PER_HALF, ROOT_LEVEL};
 
 /// A single Sv39 page table: 512 entries filling exactly one 4 KiB frame.
 ///
@@ -50,7 +49,6 @@ impl Table {
     /// If `vaddr` or `paddr` is not 1 GiB aligned, or `flags` is not a legal
     /// leaf. In a `const` context these are compile-time errors.
     pub const fn map_gigapage(&mut self, vaddr: VirtualAddr, paddr: PhysicalAddr, flags: PteFlags) {
-        const GIGAPAGE: usize = page_size_at(ROOT_LEVEL);
         assert!(flags.is_leaf(), "a gigapage mapping needs at least one of R/W/X");
         assert!(flags.is_legal_leaf(), "write-without-read is a reserved PTE encoding");
         assert!(
@@ -95,7 +93,6 @@ impl Table {
         offset_span: usize,
         flags: PteFlags,
     ) -> Self {
-        const GIGAPAGE: usize = page_size_at(ROOT_LEVEL);
         assert!(va_offset % GIGAPAGE == 0, "the high half must begin on a gigapage boundary");
         assert!(
             VirtualAddr::new(va_offset).vpn(ROOT_LEVEL) == ROOT_ENTRIES_PER_HALF,
@@ -137,7 +134,6 @@ mod tests {
 
     /// Bottom of the Sv39 high half, where a higher-half kernel lives.
     const HIGH_BASE: usize = 0xffff_ffc0_0000_0000;
-    const GIGAPAGE: usize = 1 << 30;
     /// A direct-map window narrower than the half holding it, as a real kernel's is:
     /// half of it, leaving the other half for addresses the kernel chooses.
     const SPAN: usize = (ROOT_ENTRIES_PER_HALF / 2) * GIGAPAGE;

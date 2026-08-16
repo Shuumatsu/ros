@@ -28,7 +28,7 @@ pub use frames::FrameSource;
 pub use mapper::{MapError, Mapper, Unmapped};
 pub use table::Table;
 
-use crate::utils::{KILOBYTE, MEGABYTE};
+use crate::utils::{GIGABYTE, KILOBYTE, MEGABYTE};
 
 /// Bits of byte offset within a base page.
 pub const PAGE_OFFSET_BITS: usize = 12;
@@ -69,9 +69,15 @@ pub const fn page_size_at(level: usize) -> usize {
     1 << (PAGE_OFFSET_BITS + VPN_BITS * level)
 }
 
+/// Bytes mapped by one middle-level leaf.
+pub const SUPERPAGE: usize = page_size_at(1);
+/// Bytes mapped by one root-level leaf.
+pub const GIGAPAGE: usize = page_size_at(ROOT_LEVEL);
+
 const_assert_eq!(ENTRIES_PER_PAGE, 512);
 const_assert_eq!(ENTRIES_PER_PAGE * ENTRY_SIZE, PAGE_SIZE);
 const_assert_eq!(page_size_at(0), PAGE_SIZE);
-const_assert_eq!(page_size_at(1), 2 * MEGABYTE);
+const_assert_eq!(SUPERPAGE, 2 * MEGABYTE);
+const_assert_eq!(GIGAPAGE, GIGABYTE);
 // The 39 virtual bits are exactly the offset plus one VPN field per level.
 const_assert_eq!(PAGE_OFFSET_BITS + VPN_BITS * LEVELS, 39);

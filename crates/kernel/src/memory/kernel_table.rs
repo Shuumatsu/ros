@@ -15,13 +15,12 @@
 
 use alloc::vec::Vec;
 
-use paging::sv39::{LEVELS, page_size_at};
+use paging::sv39::{LEVELS, SUPERPAGE, page_size_at};
 use paging::{MemoryAddr, PhysicalAddr, PteFlags, VirtualAddr};
 use spin::Once;
 
 use crate::arch::riscv64;
 use crate::memory::address_space::{AddressSpace, KernelMapper};
-use crate::memory::direct_map::SUPERPAGE;
 use crate::memory::machine::{self, PhysRange};
 use crate::memory::region::{self, Region};
 use crate::memory::{frame, kernel_va, layout, phys_to_virt, stack, virt_to_phys};
