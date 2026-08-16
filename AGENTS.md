@@ -13,7 +13,7 @@
 
 - git history does not make sense. focus on current codes
 - be simple on git commit messages
-- write comments in a conservative and restrained manner
+- do not drop comments everywhere. If comments are not necessary, do not write them. write comments in a conservative and restrained manner
 - write git commits in a single line
 
 ---
