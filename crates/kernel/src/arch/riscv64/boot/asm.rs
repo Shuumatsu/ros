@@ -3,8 +3,10 @@
 
 /// Define a boot-stage naked function: instructions in braces, `asm!` operands after.
 ///
-/// `in header` / `in entry` / `in trap` picks the section. `kernel.ld` orders the stage by
-/// those three names, and this is the only place each one is spelled.
+/// `in header` / `in entry` / `in trap` picks the section, and this is the only place a
+/// boot-stage function names one. `kernel.ld` names the same three to order the stage; its
+/// `ASSERT(_start == _memory_start)` is what fails if the two ever disagree about the
+/// header, which is the one whose placement the Image protocol fixes.
 ///
 /// Two assembler options apply to every block.
 ///

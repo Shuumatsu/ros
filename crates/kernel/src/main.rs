@@ -20,6 +20,7 @@ mod drivers;
 mod memory;
 mod start;
 mod sync;
+mod time;
 mod utils;
 
 #[panic_handler]

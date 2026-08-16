@@ -19,6 +19,7 @@ use paging::sv39::{LEVELS, page_size_at};
 use paging::{MemoryAddr, PhysicalAddr, PteFlags, VirtualAddr};
 use spin::Once;
 
+use crate::arch::riscv64;
 use crate::memory::address_space::{AddressSpace, KernelMapper};
 use crate::memory::direct_map::SUPERPAGE;
 use crate::memory::machine::{self, PhysRange};
@@ -292,15 +293,8 @@ fn audit_holes(mapper: &KernelMapper<'_>) {
 /// Require the addresses the switch depends on to survive it, read from the *running*
 /// machine rather than assumed.
 fn audit_live_context(mapper: &KernelMapper<'_>) {
-    let pc: usize;
-    let sp: usize;
-    // SAFETY: two reads of the current PC and stack pointer into locals.
-    unsafe {
-        core::arch::asm!("auipc {}, 0", out(reg) pc, options(nomem, nostack));
-        core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack));
-    }
-    check_live(mapper, "instruction stream", VirtualAddr::new(pc), PteFlags::EXECUTE);
-    check_live(mapper, "stack pointer", VirtualAddr::new(sp), PteFlags::WRITE);
+    check_live(mapper, "instruction stream", riscv64::pc(), PteFlags::EXECUTE);
+    check_live(mapper, "stack pointer", riscv64::sp(), PteFlags::WRITE);
 }
 
 /// Require a currently-live address to survive the switch with `needed` rights.

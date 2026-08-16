@@ -43,7 +43,7 @@ pub fn watermark() -> VirtualAddr { VirtualAddr::new(NEXT.load(Ordering::Relaxed
 pub const fn end() -> VirtualAddr { VirtualAddr::new(usize::MAX - (SUPERPAGE - 1)) }
 
 /// Bytes of kernel virtual address space still available.
-pub fn remaining() -> usize { end().sub_addr(watermark()) }
+fn remaining() -> usize { end().sub_addr(watermark()) }
 
 /// Take `len` bytes of kernel virtual address space, based at a multiple of `align`.
 ///

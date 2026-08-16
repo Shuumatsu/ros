@@ -40,7 +40,7 @@ pub struct Region<'a> {
 
 impl Region<'_> {
     /// Bytes mapped by one leaf of this region.
-    pub fn page_size(&self) -> usize { page_size_at(self.level) }
+    fn page_size(&self) -> usize { page_size_at(self.level) }
 
     /// The virtual range this region really occupies once installed: `[va, va + len)`
     /// rounded outward to whole pages.

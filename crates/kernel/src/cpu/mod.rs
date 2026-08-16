@@ -19,6 +19,7 @@ use paging::MemoryAddr;
 use crate::arch::riscv64::{boot, sbi};
 use crate::memory::{kernel_table, stack, virt_to_phys};
 use crate::println;
+use crate::time;
 
 /// Per-hart control block. `tp` points at this hart's.
 ///
@@ -69,7 +70,7 @@ static BOOT_READY: AtomicBool = AtomicBool::new(false);
 /// leaves garbage there, indistinguishable from a live block. Only the console should
 /// ask: it prints from inside the window before [`init_boot`], where panicking for want
 /// of a hart id would lose the message worth having. Everything else uses [`current`].
-pub fn try_current() -> Option<&'static Cpu> {
+fn try_current() -> Option<&'static Cpu> {
     let tp: usize;
     // SAFETY: reading a register.
     unsafe { core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack)) };
@@ -224,10 +225,9 @@ pub fn start_secondaries() {
 ///
 /// Bounded by a duration, not a spin count: a count measures the *host's* speed, and one
 /// generous on real hardware can exceed a minute under TCG, making the timeout
-/// indistinguishable from the hang it reports. `rdtime` plus
-/// `/cpus/timebase-frequency` makes it a real second anywhere, and needs no timer
-/// interrupt — only a CSR read — so it does not depend on the parked trap subsystem.
-/// Without the frequency there is no clock, so the wait is skipped and said to be.
+/// indistinguishable from the hang it reports. Where a second comes from is
+/// [`crate::time`]'s; without a clock the wait is skipped and said to be, since a hart's
+/// arrival is logged individually either way.
 fn await_secondaries(requested: usize) {
     /// Long enough that a slow emulated hart is not slandered, short enough that a
     /// genuinely dead one does not look like a hang.
@@ -237,20 +237,15 @@ fn await_secondaries(requested: usize) {
         return;
     }
 
-    let Some(hz) = crate::device_tree::timebase_hz() else {
+    let Some(deadline) = time::deadline(TIMEOUT_SECS) else {
         println!(
             "[smp] no /cpus/timebase-frequency; not waiting for the {requested} secondaries \
              (their arrival is still logged individually)"
         );
         return;
     };
-
-    let deadline = now() + TIMEOUT_SECS * hz as u64;
-    while now() < deadline {
-        if ONLINE.load(Ordering::Acquire) >= requested {
-            return;
-        }
-        core::hint::spin_loop();
+    if time::spin_until(deadline, || ONLINE.load(Ordering::Acquire) >= requested) {
+        return;
     }
 
     // Reported rather than fatal: losing a secondary leaves the boot hart able to run,
@@ -261,15 +256,6 @@ fn await_secondaries(requested: usize) {
          {TIMEOUT_SECS}s; inspect sepc/scause/stval",
         requested - online
     );
-}
-
-/// The `time` CSR: a free-running counter, readable in S-mode.
-#[inline]
-fn now() -> u64 {
-    let t: u64;
-    // SAFETY: `rdtime` is a plain CSR read with no side effects.
-    unsafe { core::arch::asm!("rdtime {}", out(reg) t, options(nomem, nostack)) };
-    t
 }
 
 /// Report what this hart is. The image layout is [`crate::memory::layout::report`]'s.

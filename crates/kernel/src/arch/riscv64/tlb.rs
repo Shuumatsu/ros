@@ -1,5 +1,6 @@
-//! Address-translation maintenance: the only place `sfence.vma` is issued from Rust, and
-//! the only place `satp` is written.
+//! Address-translation maintenance: where `satp` is written and `sfence.vma` issued once
+//! ordinary Rust is running. The boot stage writes both itself, of necessity — the first
+//! table is what makes the kernel's linked addresses resolve at all.
 //!
 //! Installing a leaf is half of a mapping. Sv39 permits a hart to cache the *absence* of a
 //! translation as readily as its presence, so until a fence retires that entry the hardware

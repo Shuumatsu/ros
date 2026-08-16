@@ -26,13 +26,13 @@ use spin::Once;
 use crate::memory::{frame, kernel_va, layout, virt_to_phys};
 
 /// Unmapped page below each stack, to catch overflow.
-pub const GUARD_SIZE: usize = PAGE_SIZE;
+const GUARD_SIZE: usize = PAGE_SIZE;
 
 /// Usable stack bytes.
-pub const SIZE: usize = 64 * 1024;
+const SIZE: usize = 64 * 1024;
 
-/// Address-space bytes one stack consumes: its guard page, then the stack. Private —
-/// callers want [`Stack`], which hands out the individual addresses.
+/// Address-space bytes one stack consumes: its guard page, then the stack. Callers want
+/// [`Stack`], which hands out the individual addresses.
 const STRIDE: usize = GUARD_SIZE + SIZE;
 const _: () = assert!(STRIDE % 16 == 0, "kernel stack top must be 16-byte aligned");
 
