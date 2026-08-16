@@ -16,6 +16,7 @@ mod cpu;
 #[macro_use]
 mod console;
 mod device_tree;
+mod drivers;
 mod memory;
 mod start;
 mod sync;

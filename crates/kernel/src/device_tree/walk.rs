@@ -13,20 +13,21 @@ use heapless::String;
 use paging::PhysicalAddr;
 
 use super::table::{Device, DeviceTable, MAX_HART_IDS};
+use crate::drivers::uart16550;
 use crate::memory::machine::{MAX_FOREIGN, MAX_MMIO, NAME_LEN, PhysRange};
-use crate::utils::truncated;
-
-/// `compatible` strings for the devices the kernel resolves by name.
-const UART: &[&str] = &["ns16550a", "ns16550"];
-const PLIC: &[&str] = &["riscv,plic0", "sifive,plic-1.0.0"];
-const CLINT: &[&str] = &["riscv,clint0", "sifive,clint0"];
+use crate::utils::{ByteSize, truncated};
 
 /// Longest node path kept, for the bus stack and the console lookup. Paths are compared
 /// by prefix, so a tree with one longer than this would have to be pathological before the
 /// truncation could confuse two nodes — `/soc/virtio_mmio@10008000` is 26 characters.
 const PATH_LEN: usize = 128;
 
-/// Parent buses tracked at once, which is the tree's depth rather than its width.
+/// Deepest node this walk accepts, which is the tree's depth rather than its width.
+///
+/// `fdt_raw` tracks a node's path and its inherited cell counts in stacks of this depth
+/// whose pushes fail silently while the matching pops do not, so from here down a node
+/// reports another node's path — and this walk classifies by path. The bus stack below
+/// holds a node and its ancestors, so the same bound covers it and the push cannot fail.
 const MAX_DEPTH: usize = 16;
 
 /// UART nodes remembered while looking for the one `/chosen` names.
@@ -94,7 +95,14 @@ fn is_below(ancestor: &str, path: &str) -> bool {
 }
 
 /// Take `count` big-endian cells as one number, or `None` if the property runs out.
+///
+/// One or two cells only, both being firmware input: zero consumes nothing and still
+/// yields a value, which a `ranges` walk would spin on forever, and three is an address
+/// wider than the 64 bits carried here.
 fn take_cells(cells: &mut impl Iterator<Item = u32>, count: usize) -> Option<u64> {
+    if !(1..=2).contains(&count) {
+        return None;
+    }
     (0..count).try_fold(0u64, |value, _| Some((value << 32) | u64::from(cells.next()?)))
 }
 
@@ -146,8 +154,10 @@ impl Bridge<'_> {
 
         // An empty `ranges` maps its children one-to-one. A non-empty one that matched
         // nothing does not map this address at all, and saying so is the point: the
-        // untranslated value would name some unrelated physical page.
-        (entries == 0).then_some(address)
+        // untranslated value would name some unrelated physical page. The property is
+        // asked rather than the entry count, which also reads zero when the cell counts
+        // are unreadable or the property is truncated.
+        (entries == 0 && ranges.is_empty()).then_some(address)
     }
 }
 
@@ -201,18 +211,21 @@ fn timebase_of(node: &Node<'_>) -> Option<usize> {
         .map(|hz| hz as usize)
 }
 
-/// Record a foreign range, warning if the list is full rather than dropping it
-/// quietly — an unrecorded carve-out is memory the allocator will hand out.
+/// Record a foreign range, or refuse the machine.
 ///
-/// The one way into that list, so every source of one is bounded and reported alike.
+/// The one way into that list, so every source of one is bounded alike. Fatal rather than
+/// reported: a range that does not fit is a range the frame allocator hands out, and a
+/// warning is no defence against that.
 fn push_foreign(foreign: &mut heapless::Vec<PhysRange, MAX_FOREIGN>, entry: PhysRange) {
-    if let Err(dropped) = foreign.push(entry) {
-        println!(
-            "[dtb] WARNING: more than {MAX_FOREIGN} foreign RAM ranges; {} at {:#x} is unreserved",
+    foreign.push(entry).unwrap_or_else(|dropped| {
+        panic!(
+            "[dtb] the machine describes more than {MAX_FOREIGN} foreign RAM ranges; '{}' at \
+             {:#x} would go unreserved and be vended as free memory — raise \
+             memory::machine::MAX_FOREIGN",
             dropped.name(),
             dropped.base
-        );
-    }
+        )
+    });
 }
 
 /// A `reg` cell as a physical address. The tree reports raw integers; this is the one place
@@ -242,8 +255,6 @@ pub fn discover<'a>(
     let mut ram: Option<PhysRange> = None;
     let mut uarts: heapless::Vec<UartNode, MAX_UARTS> = heapless::Vec::new();
     let mut console: Option<String<PATH_LEN>> = None;
-    let mut plic = None;
-    let mut clint = None;
     let mut timebase_hz = None;
     let mut disabled = 0;
     let mut harts_dropped = false;
@@ -279,6 +290,13 @@ pub fn discover<'a>(
         let name = node.name();
         let path = node.path();
 
+        // Before the path is read, since that is what stops being trustworthy.
+        assert!(
+            node.level() < MAX_DEPTH,
+            "[dtb] node '{name}' sits at depth {}, and a path is only tracked {MAX_DEPTH} deep",
+            node.level()
+        );
+
         // Everything below a disabled node is disabled with it: a bus the firmware says is
         // not ours does not become ours one child at a time.
         if let Some(prefix) = &skipping {
@@ -312,16 +330,11 @@ pub fn discover<'a>(
             parent_cells: bridges.last().map_or(root_address_cells, |parent| parent.child_cells),
             size_cells: node.size_cells as usize,
         };
-        // Everything but this node, so a `reg` is not translated through its own bus. A
-        // node too deep to push is not on the stack, so nothing is dropped for it either.
-        let pushed = bridges.push(bridge).is_ok();
-        if !pushed {
-            println!(
-                "[dtb] WARNING: tree deeper than {MAX_DEPTH}; anything below {name} may have an \
-                 untranslated reg"
-            );
-        }
-        let ancestors = &bridges[..bridges.len() - usize::from(pushed)];
+        let Ok(()) = bridges.push(bridge) else {
+            unreachable!("the depth assert above bounds a node and its ancestors to MAX_DEPTH")
+        };
+        // Everything but this node, so a `reg` is not translated through its own bus.
+        let ancestors = &bridges[..bridges.len() - 1];
 
         // `/chosen` and `/cpus` carry properties rather than a `reg`, so they are
         // read here rather than by a targeted lookup of their own.
@@ -392,10 +405,11 @@ pub fn discover<'a>(
                     ram = Some(bank);
                 } else {
                     println!(
-                        "[dtb] note: /memory bank {:#x}..{:#x} does not contain the kernel and \
-                         is not managed",
+                        "[dtb] WARNING: /memory bank {:#x}..{:#x} ({}) does not contain the \
+                         kernel; this kernel manages one bank, so that RAM is lost",
                         bank.base,
-                        bank.end()
+                        bank.end(),
+                        ByteSize(bank.size)
                     );
                 }
             }
@@ -420,15 +434,18 @@ pub fn discover<'a>(
             match kind {
                 RegKind::Mmio => {
                     let recorded =
-                        Device { base: entry.base.bits(), size: entry.size, irq: irq_of(&node) };
+                        Device { base: entry.base, size: entry.size, irq: irq_of(&node) };
                     match mmio.push(entry) {
                         // The first window this node really contributes. Kept only once the
                         // list has it, so a device resolved below cannot name an address
                         // `kernel_table` never maps.
                         Ok(()) => window = window.or(Some(recorded)),
-                        Err(_) => println!(
-                            "[dtb] WARNING: more than {MAX_MMIO} MMIO windows; {name} and any \
-                             after it are unaccounted for"
+                        Err(dropped) => panic!(
+                            "[dtb] the machine describes more than {MAX_MMIO} device windows; \
+                             '{}' at {:#x} would never be mapped — raise \
+                             memory::machine::MAX_MMIO",
+                            dropped.name(),
+                            dropped.base
                         ),
                     }
                 }
@@ -439,11 +456,10 @@ pub fn discover<'a>(
             }
         }
 
-        // Well-known devices resolve from the node we are already standing on, so `reg` and
+        // A driver's device resolves from the node we are already standing on, so `reg` and
         // `interrupts` cannot come from different nodes.
         let Some(device) = window else { continue };
-        let compatible = |list: &[&str]| node.compatibles().any(|c| list.contains(&c));
-        if compatible(UART) {
+        if node.compatibles().any(|c| uart16550::COMPATIBLE.contains(&c)) {
             let candidate = UartNode { path: truncated(&path), device };
             if uarts.push(candidate).is_err() {
                 println!(
@@ -451,10 +467,6 @@ pub fn discover<'a>(
                      candidate"
                 );
             }
-        } else if plic.is_none() && compatible(PLIC) {
-            plic = Some(device);
-        } else if clint.is_none() && compatible(CLINT) {
-            clint = Some(device);
         }
     }
 
@@ -462,14 +474,12 @@ pub fn discover<'a>(
         panic!("[dtb] /memory has no region containing the kernel at {kernel_pa:#x}")
     });
     let uart = resolve_console(fdt, &uarts, console.as_deref())
-        .expect("[dtb] no ns16550-compatible UART node — cannot bring up the console");
+        .expect("[dtb] no UART node this kernel has a driver for — no console is possible");
 
     DeviceTable {
         blob: blob_region,
         ram,
         uart,
-        plic,
-        clint,
         timebase_hz,
         mmio,
         foreign,

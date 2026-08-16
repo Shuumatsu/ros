@@ -2,10 +2,11 @@
 //!
 //! One table, not per-device statics: a UART base kept both in its own static and in the
 //! MMIO window list could disagree, and since `kernel_table` maps only the list, the
-//! console would end up holding an address nothing mapped. A well-known device below
+//! console would end up holding an address nothing mapped. A device resolved below
 //! therefore carries a window the same walk already put in that list.
 
 use heapless::Vec;
+use paging::PhysicalAddr;
 
 use crate::cpu::MAX_CPUS;
 use crate::memory::machine::{MAX_FOREIGN, MAX_MMIO, PhysRange};
@@ -26,7 +27,7 @@ pub struct Device {
     /// First address of the node's first usable `reg` window, which is also an entry in
     /// [`DeviceTable::mmio`] — so a driver reaching it through `phys_to_virt` finds it
     /// mapped.
-    pub base: usize,
+    pub base: PhysicalAddr,
     /// Length of that window. Never zero: a `reg` without a usable size contributes no
     /// window, and a node that contributes none resolves no device.
     pub size: usize,
@@ -46,10 +47,6 @@ pub struct DeviceTable {
     /// The primary console UART. Not optional: without it there is no console, and
     /// [`super::init`] panics rather than let the kernel limp on a guessed address.
     pub uart: Device,
-    /// Platform-level interrupt controller, if the tree described one.
-    pub plic: Option<Device>,
-    /// Core-local interruptor, if the tree described one.
-    pub clint: Option<Device>,
     /// Ticks per second of the `time` CSR, from `timebase-frequency`.
     pub timebase_hz: Option<usize>,
     /// Every MMIO window the tree describes — the single answer to "where is device

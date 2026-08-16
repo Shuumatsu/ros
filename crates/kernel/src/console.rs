@@ -9,11 +9,11 @@
 //! SBI console, which is what lets the earliest code print at all.
 
 use core::fmt::{self, Write};
-use paging::PhysicalAddr;
 use uart_16550::MmioSerialPort;
 
 use crate::cpu;
 use crate::device_tree;
+use crate::drivers::uart16550;
 use crate::sync::IrqMutex;
 
 /// The primary MMIO UART, bound to the device-tree base on the first print after the DTB
@@ -25,19 +25,13 @@ static UART: IrqMutex<Option<MmioSerialPort>> = IrqMutex::new(None);
 
 /// Write `s` to the DTB-discovered MMIO UART if we have it, else the SBI console.
 fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
-    if port.is_none() {
-        if let Some(base) = device_tree::uart_base() {
-            // Through the direct map, not the raw physical base: this port is cached in
-            // a `static` that outlives the boot table, and because the map is linear the
-            // alias is canonical and mapped under both tables.
-            let uart = crate::memory::phys_to_virt(PhysicalAddr::new(base));
-            // SAFETY: `uart` is the direct-map alias of the DTB-reported UART
-            // window, mapped R+W, and this is the only `MmioSerialPort` built for
-            // it — the `UART` mutex keeps that exclusive.
-            let mut serial = unsafe { MmioSerialPort::new(uart.bits()) };
-            serial.init();
-            *port = Some(serial);
-        }
+    if port.is_none()
+        && let Some(base) = device_tree::uart_base()
+    {
+        // SAFETY: `base` is the window of a node the tree matched against this driver's own
+        // `compatible` list, mapped R+W, and this is the only port built for it — the `UART`
+        // mutex keeps that exclusive.
+        *port = Some(unsafe { uart16550::bind(base) });
     }
     match port {
         Some(serial) => {

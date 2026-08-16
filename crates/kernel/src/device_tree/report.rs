@@ -25,16 +25,10 @@ pub fn summary() {
         ByteSize(table.ram.size)
     );
 
-    let device = |what: &str, dev: &table::Device| match dev.irq {
-        Some(irq) => println!("[dtb] {what}: {:#x} (size {:#x}, irq {irq})", dev.base, dev.size),
-        None => println!("[dtb] {what}: {:#x} (size {:#x})", dev.base, dev.size),
-    };
-    device("uart ", &table.uart);
-    if let Some(plic) = &table.plic {
-        device("plic ", plic);
-    }
-    if let Some(clint) = &table.clint {
-        device("clint", clint);
+    let uart = &table.uart;
+    match uart.irq {
+        Some(irq) => println!("[dtb] uart:  {:#x} (size {:#x}, irq {irq})", uart.base, uart.size),
+        None => println!("[dtb] uart:  {:#x} (size {:#x})", uart.base, uart.size),
     }
 
     // Unconditional, and outside every device's `if`. These counts say how much of

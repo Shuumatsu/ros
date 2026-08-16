@@ -11,14 +11,24 @@
 //! platform constant; memory bring-up takes all of its share in one go, as
 //! [`machine_memory`].
 //!
-//! **What is deliberately not collected:** a bridge's own `ranges` describe apertures its
-//! children may sit in — the PCI host on QEMU virt publishes 1 GiB at `0x4000_0000` and
-//! 16 GiB above `0x4_0000_0000`. Those are not recorded as MMIO windows, because
-//! [`machine_memory`] is the list [`crate::memory::kernel_table`] maps in full, and
-//! seventeen gigabytes of aperture no driver has claimed is not a mapping worth making at
-//! boot. Whoever brings up PCI takes the aperture from the bridge node and maps what it
-//! uses. `ranges` *is* followed for translation, so a child's `reg` is recorded as the
-//! address the CPU issues.
+//! **What is deliberately not collected:** a bridge's own `ranges` describe an aperture its
+//! children may sit in, not a window any device occupies — the PCI host on QEMU virt
+//! publishes 1 GiB at `0x4000_0000` and 16 GiB above `0x4_0000_0000`, address space for
+//! devices the tree does not describe at all. [`machine_memory`] is the list
+//! [`crate::memory::kernel_table`] maps in full, and what belongs in it is the register
+//! windows a `reg` names. Whoever brings up PCI takes the aperture from the bridge node and
+//! maps the parts it assigns. `ranges` *is* followed for translation, so a child's `reg` is
+//! recorded as the address the CPU issues.
+//!
+//! No interrupt controller is resolved by name either. Timer and IPI go through SBI, and
+//! under this boot model the CLINT's registers are M-mode's, so a driver holding that base
+//! would be holding one it must not use. A PLIC is S-mode's to program, and resolving it
+//! comes with the driver that claims it. Both windows stay in the MMIO list like any other,
+//! since that list says what the machine has rather than what S-mode may touch.
+//!
+//! A node is matched by name only on behalf of a driver, and the names are the driver's own:
+//! [`crate::drivers`] holds every `compatible` string [`walk`] compares against, so a chip
+//! this kernel learns to drive is one module's worth of change.
 
 mod report;
 mod table;
@@ -59,21 +69,34 @@ pub unsafe fn init(dtb_ptr: usize) {
     // kernel table alike. Its window is bounded, so the blob has to be inside it — beyond the
     // end nothing is mapped, and the read below would park this hart instead of reporting.
     let base = PhysicalAddr::new(dtb_ptr);
-    // Two steps, because the blob carries its own length: the header has to be readable
-    // before the rest can be measured.
+    // Header first, and on its own: the blob carries its own length, so the header is what
+    // says how far the rest reaches, and nothing may borrow the rest until that reach has
+    // been checked. `Fdt::from_ptr` builds a slice over the whole blob, so it comes after
+    // the second check rather than before it.
     direct_map::require_reach("the device tree header", base, size_of::<Header>());
     let blob = crate::memory::phys_to_virt(base).as_mut_ptr::<u8>();
-    // SAFETY: forwarded from this function's contract — `dtb_ptr` addresses a valid
-    // FDT that stays mapped and unmodified, and `blob` is its direct-map alias.
+    // SAFETY: forwarded from this function's contract — `dtb_ptr` addresses a valid FDT
+    // that stays mapped and unmodified, and `blob` is its direct-map alias. Only the
+    // header is read here, which the check above covers.
+    let header = unsafe { Header::from_ptr(blob) }.unwrap_or_else(|error| {
+        panic!("[dtb] failed to parse the FDT header at {dtb_ptr:#x}: {error:?}")
+    });
+    let size = header.totalsize as usize;
+    direct_map::require_reach("the device tree blob", base, size);
+    // SAFETY: as above, and the whole blob is now known to lie inside the direct map.
     let fdt = unsafe { Fdt::from_ptr(blob) }
         .unwrap_or_else(|error| panic!("[dtb] failed to parse FDT at {dtb_ptr:#x}: {error:?}"));
-    let size = fdt.header().totalsize as usize;
-    direct_map::require_reach("the device tree blob", base, size);
 
     // Which `/memory` bank is ours: the one holding our own load address.
     let kernel_pa = crate::memory::virt_to_phys(crate::memory::layout::text_start());
 
     table::TABLE.call_once(|| walk::discover(&fdt, base, size, kernel_pa));
+
+    // The console binds this window on its very next line, which is well before
+    // `memory::init` checks every window the machine describes. Checked here, where the
+    // fact becomes usable, rather than where the rest of them are.
+    let uart = table::get().expect("the table was published above").uart;
+    direct_map::require_reach("the console UART window", uart.base, uart.size);
 }
 
 /// Everything [`crate::memory::init`] needs to know about physical memory, as one value.
@@ -96,7 +119,7 @@ pub fn machine_memory() -> MachineMemory<'static> {
 
 /// Primary UART base. No address is hardcoded anywhere — the console falls back to the
 /// SBI console until this is known.
-pub fn uart_base() -> Option<usize> { table::get().map(|t| t.uart.base) }
+pub fn uart_base() -> Option<PhysicalAddr> { table::get().map(|t| t.uart.base) }
 
 /// Ticks per second of the `time` CSR, or `None` if the tree did not say.
 ///
