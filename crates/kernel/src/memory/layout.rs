@@ -2,7 +2,7 @@
 //!
 //! Every name the linker script chooses lives here, `__global_pointer$` included.
 
-use paging::sv39::PAGE_SIZE;
+use paging::PAGE_SIZE;
 use paging::{MemoryAddr, VirtualAddr};
 
 /// Declares every symbol `kernel.ld` defines, in one place.

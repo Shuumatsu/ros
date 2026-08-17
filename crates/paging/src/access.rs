@@ -3,11 +3,11 @@
 //! A page-table walk must *dereference* the frames it descends through, but a
 //! physical address is not in general a usable pointer: a higher-half kernel
 //! reaches physical memory through a mapping at some other virtual address.
-//! Naming that policy here is what lets [`super::mapper`] walk a tree without
+//! Naming that policy here is what lets [`crate::mapper`] walk a tree without
 //! assuming one — and what keeps this crate free of any addressing model of
 //! its own.
 
-use super::addr::PhysicalAddr;
+use crate::addr::PhysicalAddr;
 
 /// Turns a physical address into a pointer the caller can dereference.
 ///

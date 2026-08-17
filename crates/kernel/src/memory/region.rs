@@ -3,13 +3,15 @@
 //!
 //! The mechanism, free of any particular layout — that is [`super::kernel_table`]'s, and
 //! a user address space will want the same treatment over a different list. Generic over
-//! the mapper's two policies so it never depends on the kernel's choice of either.
+//! the mapper's three choices, scheme included, so it never depends on the kernel's.
 //!
 //! [`Region::install`] validates before writing any PTE, rather than in a separate pass,
 //! so no caller can forget: there is one way to turn a `Region` into mappings.
 
-use paging::sv39::{FrameSource, PhysAccess, page_size_at};
-use paging::{MapError, Mapper, MemoryAddr, PhysicalAddr, PteFlags, VirtualAddr};
+use paging::{
+    FrameSource, MapError, Mapper, MemoryAddr, PhysAccess, PhysicalAddr, PteFlags, Scheme,
+    VirtualAddr, page_size_at,
+};
 
 use crate::utils::ByteSize;
 
@@ -99,9 +101,9 @@ impl Region<'_> {
     }
 
     /// Install every page of this region into `mapper`.
-    pub fn install<F: FrameSource, A: PhysAccess>(
+    pub fn install<S: Scheme, F: FrameSource, A: PhysAccess>(
         &self,
-        mapper: &mut Mapper<'_, F, A>,
+        mapper: &mut Mapper<'_, S, F, A>,
     ) -> Result<(), MapError> {
         if self.is_empty() {
             return Ok(());
@@ -125,7 +127,7 @@ impl Region<'_> {
     ///
     /// Every page, not a sample: this runs once, and a wrong leaf anywhere is either a
     /// fault or a silent protection hole.
-    pub fn audit<F: FrameSource, A: PhysAccess>(&self, mapper: &Mapper<'_, F, A>) {
+    pub fn audit<S: Scheme, F: FrameSource, A: PhysAccess>(&self, mapper: &Mapper<'_, S, F, A>) {
         if self.is_empty() {
             return;
         }

@@ -6,7 +6,7 @@
 //! (aligned, zeroed, distinct, re-zeroed on reuse) are worth reading as a list.
 
 use paging::MemoryAddr;
-use paging::sv39::PAGE_SIZE;
+use paging::PAGE_SIZE;
 
 use super::{alloc, alloc_contiguous, free};
 use crate::memory::direct_map::phys_to_virt;

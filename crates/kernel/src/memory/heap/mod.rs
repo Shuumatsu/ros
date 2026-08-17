@@ -21,7 +21,7 @@ use core::ptr::{self, NonNull};
 
 use buddy_heap::{GrowableHeap, Limits, Outcome, Stats};
 
-use paging::sv39::PAGE_SIZE;
+use paging::PAGE_SIZE;
 use paging::utils::MEGABYTE;
 use paging::{MemoryAddr, VirtualAddr};
 

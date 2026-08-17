@@ -1,11 +1,17 @@
-//! Page-table entry type and permission flags for Sv39.
+//! Page-table entry type and permission flags.
+//!
+//! One format, every scheme: Sv39, Sv48 and Sv57 all reserve bits 53:10 for the physical
+//! page number and 7:0 for permissions and status. A deeper walk indexes more tables; it
+//! does not change what an entry says. So this type carries no
+//! [`Scheme`](crate::Scheme) — only [`Mapper`](crate::Mapper), which decides how many
+//! levels of these to descend, does.
 
 use bitflags::bitflags;
 use core::fmt;
 use core::mem::size_of;
 
-use super::addr::PhysicalAddr;
-use super::{ENTRY_SIZE, PPN_BITS, PPN_FIELD_BITS, VPN_BITS};
+use crate::addr::PhysicalAddr;
+use crate::geometry::{ENTRY_SIZE, PPN_BITS};
 use crate::utils::{field, with_field};
 
 /// Bit position at which the PPN begins inside a PTE.
@@ -76,7 +82,7 @@ impl PteFlags {
     }
 }
 
-/// A single Sv39 page-table entry.
+/// A single page-table entry.
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Entry(usize);
@@ -128,12 +134,6 @@ impl Entry {
 
     /// The full 44-bit physical page number this entry carries.
     pub const fn ppn(self) -> usize { field(self.0, PTE_PPN_SHIFT, PPN_BITS) }
-
-    /// One `PPN[level]` sub-field (level 2 is 26 bits wide, others 9).
-    pub const fn ppn_field(self, level: usize) -> usize {
-        debug_assert!(level < super::LEVELS, "ppn level out of range");
-        field(self.0, PTE_PPN_SHIFT + VPN_BITS * level, PPN_FIELD_BITS[level])
-    }
 
     /// Store the physical frame `paddr` points into (its offset is ignored).
     pub fn set_ppn(&mut self, paddr: PhysicalAddr) {
@@ -223,15 +223,15 @@ mod tests {
         assert_eq!(entry.flags(), PteFlags::VALID | PteFlags::READ | PteFlags::WRITE, "flags kept");
     }
 
+    /// The PPN field is the same 44 bits under every scheme, so a frame high enough to
+    /// need all of them round-trips without a scheme being named.
     #[test]
-    fn ppn_field_split() {
-        // PPN[2] is 26 bits at PTE bit 28; PPN[0] is 9 bits at bit 10.
-        let entry = Entry::new(0x3FF_FFFF << 28);
-        assert_eq!(entry.ppn_field(2), 0x3FF_FFFF, "26-bit PPN[2]");
-        assert_eq!(entry.ppn_field(0), 0);
+    fn the_ppn_field_spans_all_forty_four_bits() {
+        let mut entry = Entry::empty();
+        entry.set_ppn(PhysicalAddr::from_ppn((1 << PPN_BITS) - 1));
+        entry.set_flags(PteFlags::VALID | PteFlags::READ);
 
-        let entry = Entry::new(0x1FF << 10);
-        assert_eq!(entry.ppn_field(0), 0x1FF, "9-bit PPN[0]");
-        assert_eq!(entry.ppn_field(2), 0);
+        assert_eq!(entry.ppn(), (1 << PPN_BITS) - 1, "a maximal PPN survives");
+        assert_eq!(entry.flags(), PteFlags::VALID | PteFlags::READ, "and does not reach the flags");
     }
 }

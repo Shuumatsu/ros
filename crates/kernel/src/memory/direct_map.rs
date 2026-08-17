@@ -13,7 +13,7 @@
 //!
 //! # How the high half is divided
 //!
-//! Sv39 gives the kernel one canonical half, and that half is all it will ever have:
+//! The scheme gives the kernel one canonical half, and that half is all it will ever have:
 //!
 //! ```text
 //! VA_OFFSET                     kernel_va::START                 usize::MAX
@@ -27,19 +27,19 @@
 //! to end. Sizing the window to RAM instead would put a device window above RAM and a
 //! chosen kernel address at the same VA, and both mappings would be individually valid.
 //!
-//! Half the half is the window: 128 GiB of physical reach is more than an Sv39 machine
-//! with a 39-bit *virtual* space has any use for, and it leaves an equal amount to hand
-//! out. Physical memory or a device window beyond it cannot be aliased at all, so
+//! Half the half is the window: under Sv39 that is 128 GiB of physical reach, more than a
+//! machine with a 39-bit *virtual* space has any use for, and it leaves an equal amount to
+//! hand out. Physical memory or a device window beyond it cannot be aliased at all, so
 //! [`super::frame`] drops such RAM and [`super::machine::MachineMemory::check`] rejects
 //! such a device.
 //!
 //! [translate]: paging::Mapper::translate
-use paging::sv39::{GIGAPAGE, ROOT_ENTRIES_PER_HALF};
-use paging::{PhysicalAddr, VirtualAddr};
+use paging::{PhysicalAddr, Scheme, VirtualAddr};
 
+use super::KernelScheme;
 use crate::utils::ByteSize;
 
-/// Bottom of the Sv39 high half, and the base of the kernel's direct map.
+/// Bottom of the high half, and the base of the kernel's direct map.
 ///
 /// Duplicated in `kernel.ld` as `_va_offset` because the linker cannot read a Rust
 /// `const`; the boot entry reconciles the two before it jumps high. It keeps the linker's
@@ -49,13 +49,16 @@ use crate::utils::ByteSize;
 pub const VA_OFFSET: usize = 0xffff_ffc0_0000_0000;
 
 /// Bytes of virtual address space in the high half — everything the kernel gets.
-const HIGH_HALF: usize = ROOT_ENTRIES_PER_HALF * GIGAPAGE;
+///
+/// The scheme's, not a gigapage count: a canonical half is its root slots times whatever
+/// one of them covers, which is 1 GiB under Sv39 and 512 GiB under Sv48.
+const HIGH_HALF: usize = KernelScheme::HALF_SPAN;
 
 // The offset must be the base of that span, or the arithmetic below describes a window
 // the hardware places somewhere else.
 const _: () = assert!(
     VA_OFFSET.wrapping_add(HIGH_HALF) == 0,
-    "VA_OFFSET is not the base of the Sv39 high half"
+    "VA_OFFSET is not the base of the high half the kernel's scheme gives it"
 );
 
 /// Bytes of physical address space the direct map covers, and so how much of the high half
@@ -63,8 +66,9 @@ const _: () = assert!(
 pub const SPAN: usize = HIGH_HALF / 2;
 
 const _: () = assert!(
-    SPAN.is_multiple_of(GIGAPAGE) && SPAN > 0,
-    "the direct map is built from gigapages, so its span must be a non-zero multiple of one"
+    SPAN.is_multiple_of(KernelScheme::ROOT_PAGE) && SPAN > 0,
+    "the direct map is built from root-level leaves, so its span must be a non-zero \
+     multiple of one"
 );
 const _: () =
     assert!(SPAN < HIGH_HALF, "the direct map must leave the kernel some address space of its own");

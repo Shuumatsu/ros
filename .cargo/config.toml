@@ -20,9 +20,14 @@ kbuild = "build -p kernel --target riscv64imac-unknown-none-elf"
 # bytes says `.option norvc` itself (see `arch::riscv64::boot::asm`). Turning RVC off takes
 # `-Ctarget-feature=-c,-zca`, since this target implies `zca` and `zca` is what emits the
 # compressed integer forms.
+# The kernel selects its architecture with `cfg(target_arch = "riscv64")`, which this
+# target implies.
+#
+# The linker script lives beside the boot code it places, under `arch/riscv64`: it is
+# `OUTPUT_ARCH("riscv")` throughout, and its sections, its high-half offset and its Image
+# header are as ISA-specific as the assembly in that directory.
 rustflags = [
-    '-Clink-arg=-Tcrates/kernel/kernel.ld',  # Use custom linker script
-    '--cfg=riscv64',                # Define cfg flag for conditional compilation
+    '-Clink-arg=-Tcrates/kernel/src/arch/riscv64/kernel.ld',
 ]
 # Boot the kernel as a flat RISC-V Image (objcopy'd from the ELF) under OpenSBI.
 # scripts/run.sh does the objcopy + QEMU launch and holds the QEMU options;

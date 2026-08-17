@@ -2,7 +2,7 @@
 //! ordinary Rust is running. The boot stage writes both itself, of necessity — the first
 //! table is what makes the kernel's linked addresses resolve at all.
 //!
-//! Installing a leaf is half of a mapping. Sv39 permits a hart to cache the *absence* of a
+//! Installing a leaf is half of a mapping. RISC-V permits a hart to cache the *absence* of a
 //! translation as readily as its presence, so until a fence retires that entry the hardware
 //! may go on faulting on an address the page table now maps. Every edit to a live tree ends
 //! here; [`crate::memory::address_space::AddressSpace::edit`] is what makes that

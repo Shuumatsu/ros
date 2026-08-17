@@ -1,12 +1,27 @@
-//! Hart State Management, in the kernel's own types.
+//! The firmware interface, in the kernel's own types.
 //!
-//! `sbi-rt` owns the ABI and `sbi-spec` the numbering; only what the kernel adds
-//! on top belongs here. Calls that need nothing added are made directly at their
-//! call site. `sbi-rt`'s `legacy` feature stays off: v0.1 passes a hart mask by
-//! pointer and never says which address space it is in.
+//! `sbi-rt` owns the ABI and `sbi-spec` the numbering. What this module adds is a
+//! boundary: **SBI is named here and nowhere else**, so what the kernel asks of its
+//! firmware is one file rather than a grep. Every call is forwarded, including the ones
+//! that need no translation — a boundary that covers all of them is one a reader can rely
+//! on and a grep can check.
+//!
+//! `sbi-rt`'s `legacy` feature stays off: v0.1 passes a hart mask by pointer and never
+//! says which address space it is in.
 
 use paging::PhysicalAddr;
-use sbi_spec::{binary::Error, hsm::hart_state};
+use sbi_spec::hsm::hart_state;
+
+/// What firmware returns when it refuses a call. Re-exported so a caller can name a
+/// failure without naming `sbi-spec`.
+pub use sbi_spec::binary::Error;
+
+/// Put one byte on the firmware's console.
+///
+/// The debug console, which takes the byte in a register: no buffer, so no physical
+/// address to produce, which is what lets [`crate::console`] fall back to it when
+/// producing one is the problem. Errors go nowhere, because the caller has nowhere left.
+pub fn console_write_byte(byte: u8) { let _ = sbi_rt::console_write_byte(byte); }
 
 /// A hart's state, as [`hart_get_status`] reports it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

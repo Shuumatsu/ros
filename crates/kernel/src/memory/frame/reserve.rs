@@ -13,7 +13,7 @@
 use frame_allocator::{FrameAllocator, FrameRange};
 use heapless::Vec;
 
-use paging::sv39::PAGE_SIZE;
+use paging::PAGE_SIZE;
 use paging::{MemoryAddr, PhysicalAddr};
 
 use crate::memory::machine::MAX_FOREIGN;

@@ -1,4 +1,4 @@
-//! A RISC-V kernel, linked and run in the Sv39 high half.
+//! A RISC-V kernel, linked and run in the high half.
 //!
 //! The crate root holds only what has no other home: the language items every `no_std`
 //! binary must define. Where execution begins is [`start`]; what each subsystem owns is
@@ -43,5 +43,5 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 extern "C" fn abort() -> ! {
     // No hart id in the message: `_emergency_print` already prefixes every line.
     emergency_println!("enter abort()");
-    arch::riscv64::wait_forever()
+    arch::wait_forever()
 }

@@ -24,11 +24,9 @@
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use paging::MemoryAddr;
 use spin::Once;
 
-use crate::arch::riscv64::{boot, sbi};
-use crate::memory::direct_map::virt_to_phys;
+use crate::arch::{self, boot};
 use crate::memory::kernel_table;
 use crate::memory::stack::{self, Stack};
 use crate::println;
@@ -93,9 +91,7 @@ static BOOT_READY: AtomicBool = AtomicBool::new(false);
 /// ask: it prints from inside the window before [`init_boot`], where panicking for want
 /// of a hart id would lose the message worth having. Everything else uses [`current`].
 fn try_current() -> Option<&'static Cpu> {
-    let tp: usize;
-    // SAFETY: reading a register.
-    unsafe { core::arch::asm!("mv {}, tp", out(reg) tp, options(nomem, nostack)) };
+    let tp = arch::thread_pointer();
     // SAFETY: `tp` is either zero, or a pointer `install_current` took from the
     // static CPU slot array.
     (tp != 0).then(|| unsafe { &*(tp as *const Cpu) })
@@ -117,9 +113,9 @@ pub fn try_hart_id() -> Option<usize> { try_current().map(Cpu::hartid) }
 static ONLINE: AtomicUsize = AtomicUsize::new(0);
 
 fn install_current(cpu: &'static Cpu) {
-    let pointer = cpu as *const Cpu as usize;
-    // SAFETY: `tp` is reserved for the kernel's per-hart pointer.
-    unsafe { core::arch::asm!("mv tp, {}", in(reg) pointer, options(nomem, nostack)) };
+    // SAFETY: a `&'static Cpu` out of `CPU_SLOTS`, which is what every reader of `tp`
+    // expects to find there.
+    unsafe { arch::set_thread_pointer(cpu as *const Cpu as usize) };
 }
 
 /// Initialize slot 0 and make it current before diagnostics can panic.
@@ -228,43 +224,23 @@ pub fn assign_stacks() {
 /// Call once, from the boot hart, **after** [`crate::memory::init_page_table`]: each hart is
 /// handed a stack that only the kernel page table maps, so both must exist first.
 pub fn start_secondaries() {
-    let entry = virt_to_phys(boot::secondary_entry_address());
     let satp = kernel_table::satp()
         .expect("no kernel page table published; start_secondaries ran before memory");
     let secondaries = *SECONDARIES
         .get()
         .expect("no cpu slots assigned; start_secondaries ran before cpu::assign_stacks");
+    let entry = boot::entry_address();
 
     // The slots `assign_stacks` filled, which already know their own hart and index —
-    // recomputing either here would be a second answer to what a slot is.
+    // recomputing either here would be a second answer to what a slot is. What it takes to
+    // actually start one is `boot::start_cpu`'s; this decides who, with what, and says so.
     let mut requested = 0;
     for slot in &CPU_SLOTS[1..=secondaries] {
         let (hart, index) = (slot.cpu.hartid(), slot.cpu.index());
         let stack = *slot.stack.get().expect("assign_stacks gives every slot it fills a stack");
-        // Ask first: "already started" and "no such hart" are different problems, and
-        // hart_start's error code does not distinguish them.
-        match sbi::hart_get_status(hart) {
-            Ok(sbi::HartState::Stopped) => {}
-            Ok(state) => {
-                println!("[smp] hart {hart} not started: firmware reports {state:?}");
-                continue;
-            }
-            Err(error) => {
-                println!("[smp] hart {hart} status unavailable: {error:?}");
-                continue;
-            }
-        }
+        let cpu = &slot.cpu as *const Cpu as usize;
 
-        assert!(
-            stack.top().is_aligned(16),
-            "hart {hart}'s stack top {:#x} is not 16-byte aligned",
-            stack.top()
-        );
-
-        slot.handoff.publish(satp, stack.top().bits(), &slot.cpu as *const Cpu as usize);
-
-        let opaque = &slot.handoff as *const boot::SecondaryHandoff as usize;
-        match sbi::hart_start(hart, entry, opaque) {
+        match boot::start_cpu(hart, &slot.handoff, satp, stack.top(), cpu) {
             Ok(()) => {
                 requested += 1;
                 println!(
@@ -272,7 +248,15 @@ pub fn start_secondaries() {
                     stack.top()
                 )
             }
-            Err(error) => println!("[smp] hart {hart} failed to start: {error:?}"),
+            // A hart the firmware keeps for itself is a fact about the machine; a refused
+            // start or an unreadable status is a fault, and the two must not read alike in
+            // a log where the second one is what you are looking for.
+            Err(error @ boot::StartError::NotStopped(_)) => {
+                println!("[smp] hart {hart} (cpu {index}) not started: {error}")
+            }
+            Err(error) => {
+                println!("[smp] WARNING: hart {hart} (cpu {index}) not started: {error}")
+            }
         }
     }
 

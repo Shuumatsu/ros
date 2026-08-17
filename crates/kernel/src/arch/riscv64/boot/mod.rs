@@ -15,5 +15,4 @@ mod image;
 mod primary;
 mod secondary;
 
-pub(crate) use entry::secondary_entry_address;
-pub(crate) use secondary::SecondaryHandoff;
+pub(crate) use secondary::{SecondaryHandoff, StartError, entry_address, start_cpu};

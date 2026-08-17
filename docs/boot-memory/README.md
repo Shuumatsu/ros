@@ -43,7 +43,7 @@ rather than branching on which kind of hart it is.
 
 | stage | where | leaves behind |
 |---|---|---|
-| publish | `cpu/mod.rs::start_secondaries` | a filled `SecondaryHandoff`, then SBI `hart_start` at the *physical* `secondary_entry` |
+| publish | `cpu/mod.rs::start_secondaries` picks the hart, `arch/riscv64/boot/secondary.rs::start_cpu` starts it | a filled `SecondaryHandoff`, then SBI `hart_start` at the *physical* `secondary_entry` |
 | ISA entry | `arch/riscv64/boot/entry.rs::secondary_entry` → `enter_high` | as above, through the same boot table |
 | prologue | `arch/riscv64/boot/secondary.rs::prologue` | kernel table adopted, `sp` on this hart's guarded stack |
 | first Rust | `start.rs::secondary` | `tp` installed, hart id checked against the chosen `Cpu` |

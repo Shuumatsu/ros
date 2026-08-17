@@ -14,7 +14,7 @@
 //! | [`heap`] | the `#[global_allocator]`, carved out of those frames |
 //! | [`kernel_va`] | which kernel virtual addresses are taken |
 //! | [`stack`] | stack geometry, and every stack that must be mapped |
-//! | [`address_space`] | an Sv39 tree, its root frame, and its `satp` |
+//! | [`address_space`] | a page-table tree, its root frame, and its `satp` |
 //! | [`region`] | installing, auditing and reporting a list of mappings |
 //! | [`kernel_table`] | *which* mappings the kernel gets, and switching to them |
 //!
@@ -62,6 +62,15 @@ use crate::utils::ByteSize;
 use direct_map::virt_to_phys;
 use machine::MachineMemory;
 use phys_range::PhysRange;
+
+/// The translation scheme this kernel runs under, chosen here and nowhere else.
+///
+/// Every scheme-dependent fact below follows from it: how wide a canonical half is and so
+/// how far [`direct_map`] reaches, what page sizes [`kernel_table`] may tile with, which
+/// `satp.MODE` [`address_space`] and [`boot_table`] write. None of them names a scheme of
+/// its own, so moving to Sv48 is this line plus `kernel.ld`'s `_va_offset` — which the
+/// boot entry already reconciles against [`direct_map::VA_OFFSET`] before it jumps high.
+pub type KernelScheme = paging::Sv39;
 
 /// Bring the allocators up: physical frames, then the heap carved out of them.
 ///

@@ -22,7 +22,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use heapless::Vec;
 
-use paging::sv39::PAGE_SIZE;
+use paging::PAGE_SIZE;
 use paging::{MemoryAddr, PhysicalAddr, VirtualAddr};
 
 use super::direct_map::virt_to_phys;

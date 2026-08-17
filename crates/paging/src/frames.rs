@@ -6,7 +6,7 @@
 //! page-sized, so they belong to the frame allocator and not to the heap. In
 //! tests it can be a simple arena.
 
-use super::addr::PhysicalAddr;
+use crate::addr::PhysicalAddr;
 
 /// Supplies and reclaims the frames that intermediate page tables live in.
 ///

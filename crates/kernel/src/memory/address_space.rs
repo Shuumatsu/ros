@@ -1,4 +1,4 @@
-//! An Sv39 address space: a root table, the tree under it, and the `satp` that names it.
+//! An address space: a root table, the tree under it, and the `satp` that names it.
 //!
 //! Owning the root and handing out a [`Mapper`] is what keeps a table from being
 //! write-once; without it the next subsystem needing a mapping has no way in but a second
@@ -9,15 +9,15 @@
 //! what pairs every write with a TLB fence. A mapper handed out bare would let a caller
 //! install leaves the hardware never looks at.
 
-use paging::sv39::FrameSource;
-use paging::{LinearOffset, Mapper, PhysicalAddr, Satp, Table};
+use paging::{FrameSource, LinearOffset, Mapper, PhysicalAddr, Satp, Scheme, Table};
 
 use super::direct_map::{VA_OFFSET, phys_to_virt};
-use super::frame;
-use crate::arch::riscv64::tlb;
+use super::{KernelScheme, frame};
+use crate::arch::tlb;
 
-/// The kernel's one mapper flavour, binding the two policies [`paging`] leaves open.
-pub type KernelMapper<'a> = Mapper<'a, TableFrames, LinearOffset>;
+/// The kernel's one mapper flavour, binding the three choices [`paging`] leaves open: the
+/// translation scheme, where intermediate tables come from, and how a frame is reached.
+pub type KernelMapper<'a> = Mapper<'a, KernelScheme, TableFrames, LinearOffset>;
 
 /// Supplies the frames intermediate page tables live in.
 ///
@@ -38,7 +38,7 @@ unsafe impl FrameSource for TableFrames {
     }
 }
 
-/// A live Sv39 tree and the register value that installs it.
+/// A live page-table tree and the register value that installs it.
 pub struct AddressSpace {
     root: &'static mut Table,
     /// Also the only record of the root's physical address; a copy alongside would be a
@@ -60,7 +60,9 @@ impl AddressSpace {
         // SAFETY: a zeroed, page-aligned frame this value now owns exclusively and never
         // releases, reachable through the direct map, so the `'static mut` is unique.
         let root: &'static mut Table = unsafe { &mut *phys_to_virt(root_pa).as_mut_ptr::<Table>() };
-        Self { satp: Satp::sv39(root_pa, asid), root }
+        // The mode is the scheme's, so a tree and the register that installs it cannot
+        // disagree about how deep the walk is.
+        Self { satp: Satp::new(KernelScheme::MODE, asid, root_pa), root }
     }
 
     /// Physical address of the root table.

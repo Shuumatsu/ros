@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use heapless::String;
 
-use paging::sv39::PAGE_SIZE;
+use paging::PAGE_SIZE;
 use paging::{MemoryAddr, PhysicalAddr};
 
 use crate::utils::truncated;

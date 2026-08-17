@@ -65,7 +65,7 @@ fn kmain() -> ! {
 
     // A true halt, not an idle: `sstatus.SIE` is clear and no source is enabled, so
     // nothing will wake this. Reaching here is the success condition for this phase.
-    crate::arch::riscv64::wait_forever()
+    crate::arch::wait_forever()
 }
 
 fn kmain_ap() -> ! {
@@ -73,5 +73,5 @@ fn kmain_ap() -> ! {
 
     // No scheduler to enter yet, so park. This becomes a real idle loop on its own once
     // traps come back.
-    crate::arch::riscv64::wait_forever()
+    crate::arch::wait_forever()
 }

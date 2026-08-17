@@ -11,11 +11,12 @@
 //!   | MODE 63:60 | ASID 59:44 | PPN 43:0 |
 //! ```
 //!
-//! So this module sits *above* [`crate::sv39`] rather than inside it — `Sv39` is
-//! one of the values [`Mode`] can hold, not a property of the register.
+//! So this module sits *above* the schemes rather than inside one — `Sv39` is one of the
+//! values [`Mode`] can hold, not a property of the register. The geometry it is pinned
+//! against is the crate's, shared by every scheme, for the same reason.
 
-use crate::sv39::addr::PhysicalAddr;
-use crate::sv39::{PAGE_SIZE, PPN_BITS};
+use crate::addr::PhysicalAddr;
+use crate::geometry::{PAGE_SIZE, PPN_BITS};
 use crate::utils::{field, with_field};
 
 /// Position and width of `satp.PPN` — the root table's physical page number.
@@ -53,6 +54,9 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// Every encoding, so the lookups below can search rather than restate.
+    const ALL: [Self; 4] = [Self::Bare, Self::Sv39, Self::Sv48, Self::Sv57];
+
     /// The raw `MODE` field value.
     pub const fn bits(self) -> usize { self as usize }
 
@@ -75,6 +79,24 @@ impl Mode {
             Self::Sv48 => 4,
             Self::Sv57 => 5,
         }
+    }
+
+    /// The mode that walks `levels` levels, or `None` if no encoding does.
+    ///
+    /// How [`Scheme::MODE`](crate::Scheme::MODE) is derived, which is what keeps a scheme
+    /// from naming its own encoding: the level count already determines it. Searched over
+    /// [`levels`](Self::levels) rather than written out inverted, so the mapping between
+    /// the two exists once.
+    pub const fn from_levels(levels: usize) -> Option<Self> {
+        let mut index = 0;
+        while index < Self::ALL.len() {
+            let mode = Self::ALL[index];
+            if mode.levels() == levels {
+                return Some(mode);
+            }
+            index += 1;
+        }
+        None
     }
 }
 
@@ -169,7 +191,8 @@ impl Satp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sv39::{ROOT_LEVEL, page_size_at};
+    use crate::geometry::page_size_at;
+    use crate::scheme::{Scheme, Sv39};
 
     #[test]
     fn mode_encodings_match_the_privileged_spec() {
@@ -182,7 +205,22 @@ mod tests {
         assert_eq!(Mode::from_bits(1), None, "MODE 1 is reserved, not a mode");
         assert_eq!(Mode::from_bits(11), None, "MODE 11 is reserved");
 
-        assert_eq!(Mode::Sv39.levels(), ROOT_LEVEL + 1, "Sv39 walks one level per VPN field");
+        assert_eq!(Mode::Sv39.levels(), Sv39::LEVELS, "Sv39 walks one level per VPN field");
+    }
+
+    /// `Scheme::MODE` is derived through this, so a level count that round-trips is what
+    /// makes a scheme's encoding follow from its depth rather than be declared beside it.
+    #[test]
+    fn a_level_count_names_exactly_one_mode() {
+        for mode in Mode::ALL {
+            assert_eq!(
+                Mode::from_levels(mode.levels()),
+                Some(mode),
+                "{mode:?} must be recoverable from its own level count"
+            );
+        }
+        assert_eq!(Mode::from_levels(2), None, "no RV64 scheme walks two levels");
+        assert_eq!(Mode::from_levels(6), None, "nor six");
     }
 
     #[test]
@@ -249,6 +287,6 @@ mod tests {
     #[test]
     fn page_size_agrees_with_the_ppn_shift() {
         assert_eq!(PAGE_SIZE, 4096, "satp.PPN is an address >> 12");
-        assert_eq!(page_size_at(ROOT_LEVEL), 1 << 30, "root-level leaf is a gigapage");
+        assert_eq!(page_size_at(Sv39::ROOT_LEVEL), 1 << 30, "an Sv39 root leaf is a gigapage");
     }
 }

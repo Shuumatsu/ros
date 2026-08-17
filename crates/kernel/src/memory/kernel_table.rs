@@ -15,16 +15,17 @@
 
 use alloc::vec::Vec;
 
-use paging::sv39::{LEVELS, SUPERPAGE, page_size_at};
-use paging::{MemoryAddr, PhysicalAddr, PteFlags, VirtualAddr};
+use paging::{
+    MemoryAddr, PhysicalAddr, PteFlags, SUPERPAGE, Satp, Scheme, VirtualAddr, page_size_at,
+};
 use spin::Once;
 
 use super::address_space::{AddressSpace, KernelMapper};
 use super::direct_map::{phys_to_virt, virt_to_phys};
 use super::phys_range::{self, PhysRange};
 use super::region::{self, Region};
-use super::{frame, kernel_va, layout, stack};
-use crate::arch::riscv64;
+use super::{KernelScheme, frame, kernel_va, layout, stack};
+use crate::arch;
 use crate::sync::IrqMutex;
 
 /// One address space, never switched away from, so no id is needed. Named so the zero
@@ -48,7 +49,7 @@ const READ_WRITE: PteFlags = PteFlags::READ_WRITE.union(PteFlags::ACCESS).union(
 /// sub-page window has no exact tiling at all, and rounding it out to the 4 KiB page it
 /// already sits in is the smallest thing a page table can express.
 fn largest_level_for(base: PhysicalAddr, len: usize) -> usize {
-    (1..LEVELS)
+    (1..KernelScheme::LEVELS)
         .rev()
         .find(|&level| {
             let page = page_size_at(level);
@@ -243,7 +244,7 @@ pub fn init(mmio: &[PhysRange]) {
     region::report(&regions);
 
     let satp = space.satp();
-    // SAFETY: a live Sv39 tree, just audited to map every kernel region — the running
+    // SAFETY: a live tree, just audited to map every kernel region — the running
     // PC and SP included — to the same physical addresses the boot table does, so
     // execution continues across the write.
     unsafe { space.activate() };
@@ -265,8 +266,10 @@ pub fn with<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
 /// The live kernel page table's `satp`, copied into each secondary handoff.
 ///
 /// Read out of the address space rather than mirrored in a static: two copies could
-/// disagree about which table is live.
-pub fn satp() -> Option<usize> { with(|space| space.satp().bits()) }
+/// disagree about which table is live. Typed, because the register value that decides
+/// whether a hart boots is the last thing that should cross a subsystem boundary as a
+/// bare integer.
+pub fn satp() -> Option<Satp> { with(|space| space.satp()) }
 
 /// Require the deliberate gaps to really be gaps.
 ///
@@ -296,8 +299,8 @@ fn audit_holes(mapper: &KernelMapper<'_>) {
 /// Require the addresses the switch depends on to survive it, read from the *running*
 /// machine rather than assumed.
 fn audit_live_context(mapper: &KernelMapper<'_>) {
-    check_live(mapper, "instruction stream", riscv64::pc(), PteFlags::EXECUTE);
-    check_live(mapper, "stack pointer", riscv64::sp(), PteFlags::WRITE);
+    check_live(mapper, "instruction stream", arch::pc(), PteFlags::EXECUTE);
+    check_live(mapper, "stack pointer", arch::sp(), PteFlags::WRITE);
 }
 
 /// Require a currently-live address to survive the switch with `needed` rights.

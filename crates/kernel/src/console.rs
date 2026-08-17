@@ -11,6 +11,7 @@
 use core::fmt::{self, Write};
 use uart_16550::MmioSerialPort;
 
+use crate::arch::sbi;
 use crate::cpu;
 use crate::device_tree;
 use crate::drivers::uart16550;
@@ -48,7 +49,7 @@ fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
 /// path runs when producing one is the problem. Errors go nowhere: there is nowhere left.
 fn sbi_write(s: &str) {
     for b in s.bytes() {
-        let _ = sbi_rt::console_write_byte(b);
+        sbi::console_write_byte(b);
     }
 }
 

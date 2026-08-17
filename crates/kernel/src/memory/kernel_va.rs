@@ -14,7 +14,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use paging::sv39::{PAGE_SIZE, SUPERPAGE};
+use paging::{PAGE_SIZE, SUPERPAGE};
 use paging::utils::GIGABYTE;
 use paging::{MemoryAddr, VirtualAddr};
 

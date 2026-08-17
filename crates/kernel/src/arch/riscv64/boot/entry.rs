@@ -37,7 +37,7 @@ isa_entry!(
 );
 
 isa_entry!(
-    /// Where a hart started by [`crate::cpu::start_secondaries`] lands.
+    /// Where a hart started by [`super::start_cpu`] lands.
     ///
     /// SBI is given the *physical* address of this, because a starting hart has no
     /// translation yet — see [`secondary_entry_address`].
@@ -138,8 +138,10 @@ boot_fn!(
 
 /// [`secondary_entry`] as the virtual address it is linked at.
 ///
-/// SBI needs the physical one, and [`crate::cpu::start_secondaries`] converts: crossing
-/// between the address spaces is `memory`'s to spell out, not this module's to do quietly.
-pub(crate) fn secondary_entry_address() -> VirtualAddr {
+/// Virtual, because that is what a linked symbol is. SBI needs the physical one, and
+/// [`super::start_cpu`] converts through `memory` on its way to the call — crossing
+/// between the address spaces is spelled out where it happens rather than done quietly by
+/// whoever holds the address.
+pub(super) fn secondary_entry_address() -> VirtualAddr {
     VirtualAddr::new(secondary_entry as *const () as usize)
 }

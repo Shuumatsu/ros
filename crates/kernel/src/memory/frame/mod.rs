@@ -20,7 +20,7 @@ use core::num::NonZeroUsize;
 use frame_allocator::{FrameAllocator, FrameBlock, FrameRange, metadata_layout};
 use spin::Once;
 
-use paging::sv39::PAGE_SIZE;
+use paging::PAGE_SIZE;
 use paging::{MemoryAddr, PhysicalAddr};
 
 use super::direct_map;

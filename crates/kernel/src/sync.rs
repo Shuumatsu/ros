@@ -5,7 +5,7 @@
 //! that cannot come until it returns. The frame allocator and the heap are both reached
 //! from ordinary code *and* from trap handlers, so both are that shape.
 
-use crate::arch::riscv64::interrupts;
+use crate::arch::interrupts;
 
 /// A spin lock that masks the holder's interrupts for as long as it is held.
 pub struct IrqMutex<T> {

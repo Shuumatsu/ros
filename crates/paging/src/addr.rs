@@ -1,11 +1,18 @@
-//! Virtual and physical address types for Sv39 paging.
+//! Virtual and physical address types.
+//!
+//! Scheme-independent: a physical address is 56 bits and a page number 44 in every RV64
+//! translation scheme, and the VPN fields are nine bits apiece wherever they appear. Only
+//! *how many* of those fields a walk uses is a scheme's business, which is why the
+//! sign-extension rules live on [`Scheme`](crate::Scheme) and not here.
+//!
+//! The types are also the crate's contribution to code that never walks a page table:
+//! `PhysicalAddr` is what keeps a physical address from being passed where a pointer is
+//! wanted, which in a higher-half kernel is the difference between a fault and a wrong
+//! answer.
 
-use super::{LEVELS, PAGE_OFFSET_BITS, PPN_BITS, PPN_FIELD_BITS, VPN_BITS};
+use crate::geometry::{MAX_LEVELS, PAGE_OFFSET_BITS, PPN_BITS, VPN_BITS};
 use crate::utils::{align_down, align_offset, align_up, field, with_field};
 use core::fmt;
-
-/// Number of significant bits in an Sv39 virtual address.
-pub const VA_BITS: usize = PAGE_OFFSET_BITS + VPN_BITS * LEVELS; // 39
 
 /// Common arithmetic over machine-word-sized address types.
 ///
@@ -68,7 +75,7 @@ pub trait MemoryAddr: Copy + Clone + Ord + Eq {
     }
 }
 
-/// A 39-bit Sv39 virtual address.
+/// A virtual address.
 #[repr(transparent)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct VirtualAddr(usize);
@@ -104,34 +111,18 @@ impl MemoryAddr for VirtualAddr {
 impl VirtualAddr {
     pub const fn new(vaddr: usize) -> Self { Self(vaddr) }
 
-    /// Build an address from a combined virtual page number and a byte offset.
-    pub fn from_parts(vpn: usize, offset: usize) -> Self {
-        let bits = with_field(0, PAGE_OFFSET_BITS, VPN_BITS * LEVELS, vpn);
-        Self(with_field(bits, 0, PAGE_OFFSET_BITS, offset))
-    }
-
     pub const fn bits(self) -> usize { self.0 }
 
-    /// The 9-bit page-table index for `level` (0 = leaf level, 2 = root).
+    /// The 9-bit page-table index for `level` (0 = leaf level).
+    ///
+    /// Bounded by [`MAX_LEVELS`] rather than by a scheme's level count: this type carries
+    /// no scheme, and a walk that has one never asks past its own root.
     pub const fn vpn(self, level: usize) -> usize {
-        debug_assert!(level < LEVELS, "vpn level out of range");
+        debug_assert!(level < MAX_LEVELS, "vpn level out of range");
         field(self.0, PAGE_OFFSET_BITS + VPN_BITS * level, VPN_BITS)
     }
 
     pub const fn offset(self) -> usize { field(self.0, 0, PAGE_OFFSET_BITS) }
-
-    /// True if bits \[63:38\] are a correct sign extension of bit 38, i.e. the
-    /// address is in the form the hardware accepts.
-    pub const fn is_canonical(self) -> bool {
-        let top = (self.0 as i64) >> (VA_BITS - 1);
-        top == 0 || top == -1
-    }
-
-    /// Sign-extend bit 38 across bits \[63:39\] to produce the canonical form.
-    pub const fn canonicalize(self) -> Self {
-        let shift = (usize::BITS as usize) - VA_BITS;
-        Self((((self.0 << shift) as i64) >> shift) as usize)
-    }
 
     pub const fn as_ptr<T>(self) -> *const T { self.0 as *const T }
     pub const fn as_mut_ptr<T>(self) -> *mut T { self.0 as *mut T }
@@ -139,7 +130,7 @@ impl VirtualAddr {
     pub fn from_mut_ptr_of<T>(ptr: *mut T) -> Self { Self::new(ptr as usize) }
 }
 
-/// A 56-bit Sv39 physical address.
+/// A 56-bit physical address.
 #[repr(transparent)]
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct PhysicalAddr(usize);
@@ -163,7 +154,7 @@ impl MemoryAddr for PhysicalAddr {
 impl PhysicalAddr {
     pub const fn new(paddr: usize) -> Self { Self(paddr) }
 
-    /// Build an address from a combined physical page number and a byte offset.
+    /// Build an address from a physical page number and a byte offset.
     pub fn from_parts(ppn: usize, offset: usize) -> Self {
         let bits = with_field(0, PAGE_OFFSET_BITS, PPN_BITS, ppn);
         Self(with_field(bits, 0, PAGE_OFFSET_BITS, offset))
@@ -177,12 +168,6 @@ impl PhysicalAddr {
     /// The full 44-bit physical page number (`addr >> 12`).
     pub const fn ppn(self) -> usize { field(self.0, PAGE_OFFSET_BITS, PPN_BITS) }
 
-    /// One `PPN[level]` sub-field (level 2 is 26 bits wide, others 9).
-    pub const fn ppn_field(self, level: usize) -> usize {
-        debug_assert!(level < LEVELS, "ppn level out of range");
-        field(self.0, PAGE_OFFSET_BITS + VPN_BITS * level, PPN_FIELD_BITS[level])
-    }
-
     pub const fn offset(self) -> usize { field(self.0, 0, PAGE_OFFSET_BITS) }
 
     pub const fn as_ptr<T>(self) -> *const T { self.0 as *const T }
@@ -192,7 +177,7 @@ impl PhysicalAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sv39::PAGE_SIZE;
+    use crate::geometry::PAGE_SIZE;
 
     mod virtual_addr {
         use super::*;
@@ -207,14 +192,13 @@ mod tests {
             assert_eq!(va.offset(), 0xABC, "offset");
         }
 
+        /// The fields above level 2 exist in the wider schemes and must decode the same
+        /// way, since nothing about this type knows which scheme is live.
         #[test]
-        fn from_parts_roundtrip() {
-            let vpn = (0x1FF << 18) | (0x1FF << 9) | 0x1FF; // all fields maxed
-            let va = VirtualAddr::from_parts(vpn, 0xFFF);
-            assert_eq!(va.vpn(2), 0x1FF);
-            assert_eq!(va.vpn(1), 0x1FF);
-            assert_eq!(va.vpn(0), 0x1FF);
-            assert_eq!(va.offset(), 0xFFF);
+        fn the_deeper_schemes_index_the_same_nine_bit_fields() {
+            let va = VirtualAddr::new((5 << 39) | (7 << 30));
+            assert_eq!(va.vpn(3), 5, "vpn[3] exists under Sv48");
+            assert_eq!(va.vpn(2), 7);
         }
 
         #[test]
@@ -222,21 +206,6 @@ mod tests {
             assert!(VirtualAddr::new(0x8000_0000).is_aligned(PAGE_SIZE), "page-aligned");
             assert!(!VirtualAddr::new(0x8000_0001).is_aligned(PAGE_SIZE), "not page-aligned");
             assert!(VirtualAddr::new(0x8020_0000).is_aligned(2 * 1024 * 1024), "2 MiB aligned");
-        }
-
-        #[test]
-        fn canonicalization() {
-            // Low half of the space: already canonical, unchanged.
-            let low = VirtualAddr::new(0x8000_0000);
-            assert!(low.is_canonical(), "low address is canonical");
-            assert_eq!(low.canonicalize().bits(), low.bits(), "low address unchanged");
-
-            // Bit 38 set → canonical form fills the top bits with ones.
-            let high = VirtualAddr::new(1 << (VA_BITS - 1));
-            assert!(!high.is_canonical(), "raw high-bit address is non-canonical");
-            let c = high.canonicalize();
-            assert!(c.is_canonical(), "canonicalized address is canonical");
-            assert_eq!(c.vpn(2), high.vpn(2), "canonicalization preserves the VPN fields");
         }
     }
 
@@ -246,9 +215,6 @@ mod tests {
         #[test]
         fn ppn_extraction() {
             let pa = PhysicalAddr::new(0x8200_1ABC);
-            assert_eq!(pa.ppn_field(2), 2, "PPN[2]");
-            assert_eq!(pa.ppn_field(1), 16, "PPN[1]");
-            assert_eq!(pa.ppn_field(0), 1, "PPN[0]");
             assert_eq!(pa.offset(), 0xABC, "offset");
             assert_eq!(pa.ppn(), 0x8200_1ABC >> 12, "full PPN");
         }
