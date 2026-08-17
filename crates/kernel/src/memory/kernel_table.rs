@@ -4,7 +4,7 @@
 //! Only the *policy* — which regions exist and what rights they get. Installing and
 //! auditing is [`super::region`]'s, the tree itself [`AddressSpace`]'s, and every fact
 //! here comes from its owner: [`layout`], the [`MachineMemory`](super::machine::MachineMemory)
-//! handed to [`super::init`], [`frame::owned_range`], [`kernel_va`].
+//! handed to [`super::init_page_table`], [`frame::owned_range`], [`kernel_va`].
 //!
 //! [`regions`] is computed once and then installed, audited and reported, so there is no
 //! second list to drift. The audit precedes the switch because a mis-mapped `.text` faults
@@ -19,11 +19,12 @@ use paging::sv39::{LEVELS, SUPERPAGE, page_size_at};
 use paging::{MemoryAddr, PhysicalAddr, PteFlags, VirtualAddr};
 use spin::Once;
 
+use super::address_space::{AddressSpace, KernelMapper};
+use super::direct_map::{phys_to_virt, virt_to_phys};
+use super::phys_range::{self, PhysRange};
+use super::region::{self, Region};
+use super::{frame, kernel_va, layout, stack};
 use crate::arch::riscv64;
-use crate::memory::address_space::{AddressSpace, KernelMapper};
-use crate::memory::machine::{self, PhysRange};
-use crate::memory::region::{self, Region};
-use crate::memory::{frame, kernel_va, layout, phys_to_virt, stack, virt_to_phys};
 use crate::sync::IrqMutex;
 
 /// One address space, never switched away from, so no id is needed. Named so the zero
@@ -51,7 +52,7 @@ fn largest_level_for(base: PhysicalAddr, len: usize) -> usize {
         .rev()
         .find(|&level| {
             let page = page_size_at(level);
-            base.is_aligned(page) && len % page == 0
+            base.is_aligned(page) && len.is_multiple_of(page)
         })
         .unwrap_or(0)
 }
@@ -113,7 +114,7 @@ fn regions<'a>(windows: &'a [PhysRange]) -> Vec<Region<'a>> {
             name: stack.name,
             va: stack.bottom(),
             pa: stack.pa(),
-            len: stack.len(),
+            len: stack.bytes(),
             level: 0,
             flags: READ_WRITE,
         });
@@ -123,9 +124,9 @@ fn regions<'a>(windows: &'a [PhysRange]) -> Vec<Region<'a>> {
     // less the kernel image, whose sections above already map that span with rights of
     // their own. The pool is the whole RAM bank, so the image sits inside it rather than
     // above it, and the map is the two spans on either side.
-    let (pool_start, pool_end) = frame::owned_range();
-    let pool_start_va = phys_to_virt(pool_start);
-    let pool_end_va = phys_to_virt(pool_end);
+    let pool = frame::owned_range();
+    let pool_start_va = phys_to_virt(pool.base);
+    let pool_end_va = phys_to_virt(pool.end());
     let image_start = layout::memory_start();
     let image_end = layout::kernel_top();
     assert!(
@@ -199,8 +200,10 @@ static KERNEL: Once<IrqMutex<AddressSpace>> = Once::new();
 
 /// Build the kernel's page table, audit it, and switch `satp` to it.
 ///
-/// Call once, on the boot hart, after [`super::init`]'s earlier steps — it needs frames
-/// for the tree and the heap for the region list.
+/// Call once, on the boot hart, after [`super::init_allocators`] — it needs frames for the
+/// tree and the heap for the region list — and after every stack exists, since a stack
+/// allocated later would be memory this table does not map. [`stack::seal`] makes that
+/// second condition an error rather than a fault on some hart's first push.
 ///
 /// # Panics
 ///
@@ -213,10 +216,11 @@ pub fn init(mmio: &[PhysRange]) {
         KERNEL.get().is_none(),
         "kernel_table::init called twice; the live table is already published"
     );
+    stack::seal();
 
     // Merged first: page rounding is this module's, so two windows sharing a page is this
     // module's to absorb rather than `audit_disjoint`'s to reject.
-    let windows = machine::coalesce(mmio);
+    let windows = phys_range::coalesce(mmio);
     let regions = regions(&windows);
     let mut space = AddressSpace::new(KERNEL_ASID);
 

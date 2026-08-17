@@ -14,7 +14,8 @@ use paging::PhysicalAddr;
 
 use super::table::{Device, DeviceTable, MAX_HART_IDS};
 use crate::drivers::uart16550;
-use crate::memory::machine::{MAX_FOREIGN, MAX_MMIO, NAME_LEN, PhysRange};
+use crate::memory::machine::{MAX_FOREIGN, MAX_MMIO};
+use crate::memory::phys_range::{NAME_LEN, PhysRange};
 use crate::utils::{ByteSize, truncated};
 
 /// Longest node path kept, for the bus stack and the console lookup. Paths are compared
@@ -476,16 +477,7 @@ pub fn discover<'a>(
     let uart = resolve_console(fdt, &uarts, console.as_deref())
         .expect("[dtb] no UART node this kernel has a driver for — no console is possible");
 
-    DeviceTable {
-        blob: blob_region,
-        ram,
-        uart,
-        timebase_hz,
-        mmio,
-        foreign,
-        hart_ids,
-        disabled,
-    }
+    DeviceTable { blob: blob_region, ram, uart, timebase_hz, mmio, foreign, hart_ids, disabled }
 }
 
 /// The node path out of a `stdout-path`, whose value is `path` or `path:options`.

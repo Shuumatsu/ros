@@ -1,65 +1,89 @@
 //! Physical and virtual memory.
 //!
-//! One module per concern, and [`init`] is the only place that knows the order they
-//! have to come up in:
+//! One module per concern, and the two `init` functions below are the only places that
+//! know the order they have to come up in:
 //!
 //! | module | owns |
 //! |---|---|
 //! | [`layout`] | the kernel image, as the linker laid it out |
+//! | [`phys_range`] | a named physical range, and the geometry of a list of them |
 //! | [`machine`] | what the kernel is told about physical memory, and its one seam |
 //! | [`direct_map`] | `VA = PA + offset`, how far it reaches, and the conversions |
 //! | [`boot_table`] | the compile-time table the architecture entry installs |
 //! | [`frame`] | which physical frames the kernel has, and vending them |
 //! | [`heap`] | the `#[global_allocator]`, carved out of those frames |
 //! | [`kernel_va`] | which kernel virtual addresses are taken |
-//! | [`stack`] | one stack per hart, and its guard page |
+//! | [`stack`] | stack geometry, and every stack that must be mapped |
 //! | [`address_space`] | an Sv39 tree, its root frame, and its `satp` |
 //! | [`region`] | installing, auditing and reporting a list of mappings |
 //! | [`kernel_table`] | *which* mappings the kernel gets, and switching to them |
 //!
 //! Nothing here decides a fact one of those owns, and nothing here reads the device tree:
 //! platform facts arrive through [`machine::MachineMemory`].
+//!
+//! # Naming
+//!
+//! Nothing is re-exported from this file. A caller writes `direct_map::phys_to_virt` and
+//! `phys_range::PhysRange`, so the module that owns the fact is named at every use — which
+//! for the conversions is the difference between "the kernel's PA-to-VA" and "add the
+//! direct map's offset, which is only defined below [`direct_map::END`]". One spelling per
+//! fact holds inside the subsystem too: a module here reaches a sibling as `super::name`,
+//! never `crate::memory::name`, which is left to the nested modules that have no other way
+//! to say it.
+//!
+//! Two visibilities, and they mean something: `pub` is a module the rest of the kernel has
+//! business with, `pub(in crate::memory)` is one it does not. Widening the second kind is
+//! a deliberate one-line change rather than the default.
+//!
+//! Each module states its own facts in one shape: `check` rejects a bad one before anything
+//! derives an address from it, `report` prints it afterwards, and `self_test` exercises what
+//! is worth exercising. Where a fact does not outlive `init` there is no `report` — the
+//! kernel table's region list dies with the function that builds it, so it prints from
+//! inside.
 
 pub mod address_space;
-pub(crate) mod boot_table;
+pub mod boot_table;
 pub mod direct_map;
-pub mod frame;
-pub mod heap;
 pub mod kernel_table;
-pub mod kernel_va;
 pub mod layout;
 pub mod machine;
-pub mod region;
+pub mod phys_range;
 pub mod stack;
+
+pub(in crate::memory) mod frame;
+pub(in crate::memory) mod heap;
+pub(in crate::memory) mod kernel_va;
+pub(in crate::memory) mod region;
 
 use paging::MemoryAddr;
 
 use crate::utils::ByteSize;
 
-pub use direct_map::{phys_to_virt, virt_to_phys};
-pub use machine::MachineMemory;
+use direct_map::virt_to_phys;
+use machine::MachineMemory;
+use phys_range::PhysRange;
 
-use machine::PhysRange;
-
-/// Bring the memory subsystem up. **Boot hart only** — a secondary's architecture entry
-/// installs the finished page table and stack before it reaches Rust.
+/// Bring the allocators up: physical frames, then the heap carved out of them.
 ///
-/// The order is the content of this function, each step a customer of the one before:
-/// frames (no heap of their own), then the heap carved out of them, then the secondary
-/// stacks (frames *and* heap, and they must exist before the table that maps them), then
-/// the page table.
+/// **Boot hart only** — a secondary's architecture entry installs the finished page table
+/// and stack before it reaches Rust.
 ///
-/// Both arguments are parameters rather than lookups, for the same reason: `machine` is
-/// whoever probed the platform's to describe, `secondary_harts` is `cpu`'s to decide, and
-/// both of those already depend on this module. `start` knows all three.
-pub fn init(machine: MachineMemory<'_>, secondary_harts: impl Iterator<Item = usize>) {
+/// Everything from here to [`init_page_table`] is one sequence with a hole in the middle:
+/// whoever needs an address of its own must take it before the table that maps it is built.
+/// [`crate::cpu`] fills that hole with one [`stack::alloc`] per hart it means to start.
+/// Splitting it here rather than calling into `cpu` is what keeps this subsystem free of
+/// dependencies on its customers; [`crate::start`] owns the order across the two.
+///
+/// `machine` is a parameter rather than a lookup: it is whoever probed the platform's to
+/// describe, and that discoverer already depends on this module.
+pub fn init_allocators(machine: MachineMemory<'_>) {
     // Before any *mapping* is derived from the linker symbols or the machine. Addresses
     // have been derived already — `device_tree` located the kernel's RAM bank by its load
     // address, and the console reached the UART through the direct map — so these confirm
     // what the earlier boot stages assumed rather than gate the first use.
     layout::report();
     layout::check();
-    stack::check_layout();
+    stack::check();
     direct_map::report();
     machine.check();
 
@@ -96,13 +120,19 @@ pub fn init(machine: MachineMemory<'_>, secondary_harts: impl Iterator<Item = us
     // 2. The kernel heap, from the frames above.
     heap::init();
     heap::self_test();
+}
 
-    // 3. Secondary hart stacks, at addresses from `kernel_va`.
-    stack::init(secondary_harts);
+/// Build the kernel's own page table and switch to it: per-section rights and W^X,
+/// replacing the boot table's blanket RWX gigapages.
+///
+/// Call on the boot hart, after [`init_allocators`] and after every stack exists. From here
+/// on [`stack::alloc`] refuses, since a stack this table does not map is one a hart faults
+/// on rather than runs on.
+pub fn init_page_table(machine: MachineMemory<'_>) {
+    // Reported here rather than in `init_allocators`, because the stacks and the addresses
+    // they were given do not exist until `cpu` has asked for them.
     stack::report();
     kernel_va::report();
 
-    // 4. The real kernel page table: per-section rights and W^X, replacing the boot
-    //    table's blanket RWX gigapages.
     kernel_table::init(machine.mmio);
 }

@@ -9,7 +9,7 @@ use paging::MemoryAddr;
 use paging::sv39::PAGE_SIZE;
 
 use super::{alloc, alloc_contiguous, free};
-use crate::memory::phys_to_virt;
+use crate::memory::direct_map::phys_to_virt;
 
 /// Check the properties every caller of [`super::alloc`] relies on.
 pub fn run() {
@@ -49,7 +49,7 @@ pub fn run() {
     // (4) A 2-frame contiguous run is aligned to its size, and reports its size.
     let run = alloc_contiguous(2).expect("frame self-test: 2-frame contiguous alloc failed");
     assert!(run.base().is_aligned(2 * PAGE_SIZE), "2-frame run {:?} not 8 KiB aligned", run.base());
-    assert_eq!(run.len(), 2 * PAGE_SIZE, "a 2-frame run must report 8 KiB");
+    assert_eq!(run.bytes(), 2 * PAGE_SIZE, "a 2-frame run must report 8 KiB");
 
     // Release everything still held (freeing `recycled` covers `first`, which became it).
     // SAFETY: each token is unique, from this allocator, and has no users.

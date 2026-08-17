@@ -9,7 +9,8 @@ use heapless::Vec;
 use paging::PhysicalAddr;
 
 use crate::cpu::MAX_CPUS;
-use crate::memory::machine::{MAX_FOREIGN, MAX_MMIO, PhysRange};
+use crate::memory::machine::{MAX_FOREIGN, MAX_MMIO};
+use crate::memory::phys_range::PhysRange;
 
 /// Hart ids recordable. The kernel can serve one hart per [`MAX_CPUS`] slot, so recording
 /// more would be describing machines it cannot run on; the walk says so where it finds
@@ -55,7 +56,7 @@ pub struct DeviceTable {
     ///
     /// A window says the *device* exists, not that S-mode may touch it: PMP is a separate
     /// layer, and denies the CLINT on QEMU virt. Overlap between entries is expected;
-    /// `memory::machine::coalesce` owns removing it, because the page rounding that
+    /// `memory::phys_range::coalesce` owns removing it, because the page rounding that
     /// creates most of it belongs to whoever maps these.
     pub mmio: Vec<PhysRange, MAX_MMIO>,
     /// Every RAM range that exists but is not the kernel's to hand out; the frame

@@ -31,10 +31,10 @@ No module owns this list: each stage knows only its successor. Paths are relativ
 |---|---|---|
 | Image entry | `arch/riscv64/boot/image.rs` | the 64-byte RISC-V Image header, branching to the entry |
 | ISA entry | `arch/riscv64/boot/entry.rs::primary_entry` | the prologue to continue into, in `t2` |
-| high transition | `arch/riscv64/boot/entry.rs::enter_high` | boot table live, PC high, `gp`/`tp`/`stvec` as Rust expects, measured VMA↔LMA skew in `a2` |
+| high transition | `arch/riscv64/boot/entry.rs::enter_high` | boot table live, PC high, `gp`/`tp`/`stvec` as Rust expects — or a parked hart, since the VMA↔LMA skew is reconciled here, before the jump |
 | prologue | `arch/riscv64/boot/primary.rs::prologue` | `sp` on the linker's boot stack |
-| first Rust | `start.rs::boot` | `.bss` zeroed, skew verified, device tree parsed, then memory, then secondaries |
-| memory | `memory/mod.rs::init` | frames, heap, stacks, kernel page table — in that order, for reasons its doc gives |
+| first Rust | `start.rs::boot` | `.bss` zeroed, device tree parsed, then memory, then secondaries |
+| memory | `memory/mod.rs::init_allocators`, then `init_page_table` | frames, heap, stacks, kernel page table — in that order, for reasons its doc gives |
 
 `enter_high` is shared with secondaries, which is why it takes the prologue in a register
 rather than branching on which kind of hart it is.
@@ -53,8 +53,11 @@ to arrive with, so every later hart still enters through it.
 
 ## Where the code lives
 
-Inside `memory`, the order is `memory::init`'s and the per-module ownership table is in
-`memory/mod.rs`. Neither is repeated here.
+Inside `memory`, the order is `memory::init_allocators`' and `memory::init_page_table`'s,
+and the per-module ownership table is in `memory/mod.rs`. Neither is repeated here. The one
+step between those two is `start.rs`': anything that needs an address of its own — a hart's
+stack today — has to take it after the allocators exist and before the table that maps it
+is built.
 
 Three crates carry the parts that do not need a kernel, which is what makes them testable
 on the host rather than only on the way through a boot:

@@ -5,7 +5,7 @@ use core::alloc::Layout;
 
 use pretty_assertions::assert_eq;
 
-use heap::{GrowableHeap, Limits, Outcome};
+use buddy_heap::{GrowableHeap, Limits, Outcome};
 
 /// Blocks up to 2^15 = 32 KiB, which is plenty for these sizes and keeps the free-list
 /// array small.

@@ -43,8 +43,8 @@ change that alters a number should alter it for a reason you can name.
 ## Two things worth watching
 
 **The boot hart is firmware's choice.** Across runs QEMU has picked hart 0 and hart 2. Both
-boot identically, which is the check that nothing indexes by hart id — the property
-`memory::stack`'s module doc claims.
+boot identically, which is the check that nothing indexes by hart id — the property `cpu`'s
+module doc claims.
 
 **An audit that never fires proves nothing.** The audits are only worth the boot time if they
 reject what they claim to. To confirm one, inject the fault it exists to catch, read the

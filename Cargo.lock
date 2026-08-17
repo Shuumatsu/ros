@@ -29,6 +29,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "buddy-heap"
+version = "0.1.0"
+dependencies = [
+ "buddy_system_allocator",
+ "pretty_assertions",
+]
+
+[[package]]
 name = "buddy_system_allocator"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -108,14 +116,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "heap"
-version = "0.1.0"
-dependencies = [
- "buddy_system_allocator",
- "pretty_assertions",
-]
-
-[[package]]
 name = "heapless"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -129,9 +129,9 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
+ "buddy-heap",
  "fdt-raw",
  "frame-allocator",
- "heap",
  "heapless",
  "paging",
  "riscv",

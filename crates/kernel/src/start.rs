@@ -27,10 +27,17 @@ pub(crate) unsafe extern "C" fn boot(hartid: usize, dtb: usize) -> ! {
     cpu::print_info();
 
     println!("initializing memory...");
-    // `memory` owns the ordering; it is handed the machine description and the hart list
-    // rather than looking either up, since `device_tree` and `cpu` own those and both
-    // already depend on `memory`. This knows all three.
-    memory::init(crate::device_tree::machine_memory(), cpu::secondary_hart_ids());
+    // `memory` owns the ordering within each half; this owns the one step between them.
+    // The machine description is handed in rather than looked up, since `device_tree` owns
+    // it and already depends on `memory`.
+    //
+    // `cpu` goes in the middle because a hart's stack needs frames and an address from the
+    // first half and has to be mapped by the second — anything else wanting an address of
+    // its own belongs here too. Neither subsystem calls the other; this knows both.
+    let machine = crate::device_tree::machine_memory();
+    memory::init_allocators(machine);
+    cpu::assign_stacks();
+    memory::init_page_table(machine);
     println!("initializing memory completed");
 
     cpu::start_secondaries();

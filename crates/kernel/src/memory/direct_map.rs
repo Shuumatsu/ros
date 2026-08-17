@@ -1,19 +1,24 @@
 //! The kernel's direct-map geometry, and the address conversion it defines.
 //!
-//! `VA = PA + VA_OFFSET` holds throughout [`DIRECT_MAP_END`] with no RAM base subtracted
-//! out, which buys two things: [`phys_to_virt`] is a compile-time add, and it reaches RAM
-//! and MMIO alike. Skew the offset by the RAM base and `phys_to_virt` of a device address
-//! is not even canonical — the linear form is what makes dropping the identity map
-//! possible.
+//! `VA = PA + VA_OFFSET` holds throughout [`END`] with no RAM base subtracted out, which
+//! buys two things: [`phys_to_virt`] is a compile-time add, and it reaches RAM and MMIO
+//! alike. Skew the offset by the RAM base and `phys_to_virt` of a device address is not
+//! even canonical — the linear form is what makes dropping the identity map possible.
+//!
+//! Nothing re-exports the two conversions: a caller writes `direct_map::phys_to_virt`, so
+//! the window it is asserting the address lies in is named at the call site. Spelled
+//! bare they read as the memory subsystem's answer to "what virtual address is this", and
+//! for [`virt_to_phys`] that answer is wrong for every address above [`END`] — where a
+//! secondary's stack lives. The general question is [`Mapper::translate`][translate]'s.
 //!
 //! # How the high half is divided
 //!
 //! Sv39 gives the kernel one canonical half, and that half is all it will ever have:
 //!
 //! ```text
-//! VA_OFFSET                 DIRECT_MAP_END_VA                usize::MAX
-//! |<------- DIRECT_MAP_SPAN ------->|<--- kernel_va, less a guard --->|
-//! |  PA 0..DIRECT_MAP_END           |  addresses the kernel chooses   |
+//! VA_OFFSET                     kernel_va::START                 usize::MAX
+//! |<----------- SPAN ---------->|<--- kernel_va, less a guard --->|
+//! |  PA 0..END                  |  addresses the kernel chooses   |
 //! ```
 //!
 //! The split is the point. [`phys_to_virt`] is total over its window, so every address in
@@ -27,6 +32,8 @@
 //! out. Physical memory or a device window beyond it cannot be aliased at all, so
 //! [`super::frame`] drops such RAM and [`super::machine::MachineMemory::check`] rejects
 //! such a device.
+//!
+//! [translate]: paging::Mapper::translate
 use paging::sv39::{GIGAPAGE, ROOT_ENTRIES_PER_HALF};
 use paging::{PhysicalAddr, VirtualAddr};
 
@@ -35,8 +42,10 @@ use crate::utils::ByteSize;
 /// Bottom of the Sv39 high half, and the base of the kernel's direct map.
 ///
 /// Duplicated in `kernel.ld` as `_va_offset` because the linker cannot read a Rust
-/// `const`; the boot entry reconciles the two before it jumps high. A bare `usize` because
-/// it is a *difference* between the address spaces, not an address in either.
+/// `const`; the boot entry reconciles the two before it jumps high. It keeps the linker's
+/// spelling rather than shedding the prefix the way [`SPAN`] and [`END`] do, since the two
+/// names have to be recognisable as one fact. A bare `usize` because it is a *difference*
+/// between the address spaces, not an address in either.
 pub const VA_OFFSET: usize = 0xffff_ffc0_0000_0000;
 
 /// Bytes of virtual address space in the high half — everything the kernel gets.
@@ -51,29 +60,20 @@ const _: () = assert!(
 
 /// Bytes of physical address space the direct map covers, and so how much of the high half
 /// it claims. See the module docs for why this is bounded rather than the whole half.
-pub const DIRECT_MAP_SPAN: usize = HIGH_HALF / 2;
+pub const SPAN: usize = HIGH_HALF / 2;
 
 const _: () = assert!(
-    DIRECT_MAP_SPAN % GIGAPAGE == 0 && DIRECT_MAP_SPAN > 0,
+    SPAN.is_multiple_of(GIGAPAGE) && SPAN > 0,
     "the direct map is built from gigapages, so its span must be a non-zero multiple of one"
 );
-const _: () = assert!(
-    DIRECT_MAP_SPAN < HIGH_HALF,
-    "the direct map must leave the kernel some address space of its own"
-);
+const _: () =
+    assert!(SPAN < HIGH_HALF, "the direct map must leave the kernel some address space of its own");
 
 /// Exclusive end of the physical range the direct map can represent.
 ///
 /// Frames at or above this have no high-half alias, so the frame allocator must not hand
 /// them out and no device window may extend past it.
-pub const DIRECT_MAP_END: PhysicalAddr = PhysicalAddr::new(DIRECT_MAP_SPAN);
-
-/// First virtual address above the direct map: the bottom of what [`super::kernel_va`]
-/// hands out.
-///
-/// A constant, not a runtime fact — which is what lets `kernel_va` be a plain watermark
-/// with no "before the pool exists" state to carry.
-pub const DIRECT_MAP_END_VA: VirtualAddr = phys_to_virt(DIRECT_MAP_END);
+pub const END: PhysicalAddr = PhysicalAddr::new(SPAN);
 
 /// Require `[base, base + size)` to lie inside the window, naming it and the constant to
 /// raise if it does not.
@@ -87,10 +87,10 @@ pub const DIRECT_MAP_END_VA: VirtualAddr = phys_to_virt(DIRECT_MAP_END);
 pub fn require_reach(what: &str, base: PhysicalAddr, size: usize) {
     let end = base.bits().saturating_add(size);
     assert!(
-        end <= DIRECT_MAP_END.bits(),
+        end <= END.bits(),
         "{what} at {base:#x}..{end:#x} lies past the direct map's {} window; raise \
-         memory::direct_map::DIRECT_MAP_SPAN",
-        ByteSize(DIRECT_MAP_SPAN)
+         memory::direct_map::SPAN",
+        ByteSize(SPAN)
     );
 }
 
@@ -105,10 +105,17 @@ pub const fn phys_to_virt(pa: PhysicalAddr) -> VirtualAddr {
 
 /// Translate a direct-map virtual address back to physical (`PA = VA - OFFSET`).
 ///
-/// Only meaningful for an address *in* the direct map — a secondary's stack VA is not,
-/// and the arithmetic cannot tell.
+/// Only meaningful for an address *in* the direct map — a secondary's stack VA is not, and
+/// the arithmetic cannot tell. The `debug_assert` can: it is the difference between a
+/// wrong answer used as a frame number and a panic naming the address, and it costs a
+/// release build nothing.
 #[inline]
 pub const fn virt_to_phys(va: VirtualAddr) -> PhysicalAddr {
+    debug_assert!(
+        va.bits() >= VA_OFFSET && va.bits() < VA_OFFSET.wrapping_add(SPAN),
+        "virt_to_phys of an address outside the direct map; its physical address is \
+         whatever page table maps it, not this subtraction"
+    );
     PhysicalAddr::new(va.bits().wrapping_sub(VA_OFFSET))
 }
 
@@ -116,9 +123,9 @@ pub const fn virt_to_phys(va: VirtualAddr) -> PhysicalAddr {
 pub fn report() {
     println!(
         "[memory] direct map: PA 0x0..{:#x} -> VA {:#x}..{:#x} ({} addressable)",
-        DIRECT_MAP_END,
+        END,
         VA_OFFSET,
-        DIRECT_MAP_END_VA,
-        ByteSize(DIRECT_MAP_SPAN)
+        phys_to_virt(END),
+        ByteSize(SPAN)
     );
 }

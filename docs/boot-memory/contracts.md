@@ -18,9 +18,9 @@ is on.
 
 | fact | first copy | second copy | pinned by |
 |---|---|---|---|
-| direct-map base | `kernel.ld` `_va_offset` | `memory::direct_map::VA_OFFSET` | `direct_map::verify`, against the skew `enter_high` measures at its high-half jump |
+| direct-map base | `kernel.ld` `_va_offset` | `memory::direct_map::VA_OFFSET` | `enter_high`, which reads one label as both the VMA the linker wrote and the address it is running at, and parks instead of jumping high if the two do not differ by `VA_OFFSET` |
 | page size | `kernel.ld` `_page_size` | `paging::sv39::PAGE_SIZE` | `memory::layout::check`, by measuring the guard gap the linker actually built |
-| boot stack geometry | `kernel.ld` places `.boot_stack` | `memory::stack::STRIDE` declares its size | `memory::stack::check_layout` |
+| boot stack geometry | `kernel.ld` places `.boot_stack` | `memory::stack::STRIDE` declares its size | `memory::stack::check` |
 | `satp` encoding | `paging::Satp::sv39` | `boot_table::SATP_TEMPLATE` + `SATP_ROOT_SHIFT`, which the entry's `srli`+`or` reassembles | a `const` assert in `memory::boot_table`, one root per PPN bit |
 | handoff field offsets | `SecondaryHandoff`'s `#[repr(C)]` fields | the offsets the prologue's assembly loads | `offset_of!`, so the assembly cannot drift from the struct |
 | which sections exist | `kernel.ld`'s `SECTIONS` | the ranges `kernel_table` maps | `ASSERT`s at the foot of `kernel.ld`, at link time |

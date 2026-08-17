@@ -8,7 +8,7 @@ use paging::{MemoryAddr, VirtualAddr};
 /// Declares every symbol `kernel.ld` defines, in one place.
 ///
 /// One `extern` block, because a second would be a second place for the linker script's
-/// spelling to be wrong. The raw statics are `pub(crate)` because the boot entry needs
+/// spelling to be wrong. The raw statics are declared at all because the boot entry needs
 /// some as `sym` operands.
 ///
 /// `addresses` get an accessor as well: the kernel is linked high, so each is a *virtual*
@@ -22,13 +22,13 @@ macro_rules! linker_symbol {
         unsafe extern "C" {
             $(
                 #[doc = concat!("Raw `", stringify!($sym_name), "`. Prefer [`", stringify!($fn_name), "`].")]
-                pub(crate) static $sym_name: u8;
+                pub static $sym_name: u8;
             )*
             $(
                 $(#[$raw_doc])*
                 $(#[link_name = $link_name])?
                 $(#[doc = concat!("Linked as `", $link_name, "`.")])?
-                pub(crate) static $raw_name: u8;
+                pub static $raw_name: u8;
             )*
         }
         $(

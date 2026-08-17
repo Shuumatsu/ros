@@ -1,8 +1,10 @@
 //! The kernel heap: this crate's `#[global_allocator]`.
 //!
 //! Three things live here and nothing else: the lock, the frames, and the limits. The
-//! allocator itself is [`heap::GrowableHeap`] — a crate, so its growth arithmetic is
-//! exercised on the host rather than only on the way through a boot.
+//! allocator itself is [`buddy_heap::GrowableHeap`] — a crate, so its growth arithmetic is
+//! exercised on the host rather than only on the way through a boot. It is named
+//! `buddy-heap` and not `heap` so that a reader of this file never has to work out whether
+//! `heap::` means the crate or the module they are in.
 //!
 //! Frames come from [`super::frame`] and are reached through the direct map, so this is a
 //! customer of the frame allocator rather than a peer and growing needs no page-table work.
@@ -17,12 +19,14 @@ mod self_test;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::{self, NonNull};
 
-use heap::{GrowableHeap, Limits, Outcome, Stats};
+use buddy_heap::{GrowableHeap, Limits, Outcome, Stats};
 
 use paging::sv39::PAGE_SIZE;
+use paging::utils::MEGABYTE;
 use paging::{MemoryAddr, VirtualAddr};
 
-use crate::memory::{frame, phys_to_virt};
+use super::direct_map::phys_to_virt;
+use super::frame;
 use crate::sync::IrqMutex;
 use crate::utils::ByteSize;
 
@@ -32,14 +36,14 @@ pub use self_test::run as self_test;
 const ORDER: usize = 32;
 
 /// Bytes the heap is given at [`init`].
-const INITIAL_SIZE: usize = 8 * 1024 * 1024;
+const INITIAL_SIZE: usize = 8 * MEGABYTE;
 
 /// Smallest amount added when the heap runs dry. Frames come from the pool a run at a
 /// time, so a smaller step would only scatter the heap across the pool.
-const GROW_STEP: usize = 2 * 1024 * 1024;
+const GROW_STEP: usize = 2 * MEGABYTE;
 
 /// Ceiling on the whole heap, unless the machine is too small to spare it.
-const MAX_SIZE: usize = 64 * 1024 * 1024;
+const MAX_SIZE: usize = 64 * MEGABYTE;
 
 /// Largest share of the frame pool the heap may ever hold, as a divisor.
 ///
@@ -68,7 +72,7 @@ impl KernelHeap {
     fn add_frames(&self, at_least: usize) -> Option<(VirtualAddr, usize)> {
         let frames = frame::alloc_contiguous(at_least.div_ceil(PAGE_SIZE))?;
         // What the pool gave us, not what was asked for; the difference would strand.
-        let len = frames.len();
+        let len = frames.bytes();
         let start = phys_to_virt(frames.leak());
         // SAFETY: pool frames now owned by the heap for good, mapped read-write through
         // the direct map, reached at no other address, and never released — which is what

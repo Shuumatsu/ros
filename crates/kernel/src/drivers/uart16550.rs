@@ -21,7 +21,7 @@ pub const COMPATIBLE: &[&str] = &["ns16550a", "ns16550"];
 /// `base` must begin a 16550's MMIO window, mapped readable and writable, and this must be
 /// the only port built for it — a second would race this one on the same registers.
 pub unsafe fn bind(base: PhysicalAddr) -> MmioSerialPort {
-    let window = crate::memory::phys_to_virt(base);
+    let window = crate::memory::direct_map::phys_to_virt(base);
     // SAFETY: forwarded from this function's contract — `window` is the direct-map alias of
     // a mapped 16550 window, and the caller keeps it exclusive.
     let mut port = unsafe { MmioSerialPort::new(window.bits()) };

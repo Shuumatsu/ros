@@ -7,17 +7,30 @@
 //! and firmware-chosen; a *cpu index* is dense, `0..cpus`, assigned here, and the only
 //! one that subscripts anything. Slot 0 is the boot hart.
 //!
+//! **Nothing indexes by hart id.** Ids are only promised to be unique, and real platforms
+//! leave gaps, so an array indexed by id costs storage proportional to the largest id and
+//! mis-slots the boot hart on a machine that picks a large one.
+//!
 //! [`start_secondaries`] tells a starting hart two things and lets it derive nothing:
 //! the stackless entry to begin at, and one release-published handoff carrying the page
 //! table, stack top and prepared [`Cpu`]. Everything it needs is therefore chosen by a
 //! hart that already has a heap and a page table.
+//!
+//! Which hart runs on which stack is this module's, in the slot beside the hart's [`Cpu`].
+//! [`crate::memory::stack`] owns what a stack *is* — its size, its guard page, where in the
+//! address space it goes — and hands one over on request; pairing it with a hart is a fact
+//! about this machine's processors, and a memory subsystem holding the roster would be
+//! answering a question `cpu` is asked.
 
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use paging::MemoryAddr;
+use spin::Once;
 
 use crate::arch::riscv64::{boot, sbi};
-use crate::memory::{kernel_table, stack, virt_to_phys};
+use crate::memory::direct_map::virt_to_phys;
+use crate::memory::kernel_table;
+use crate::memory::stack::{self, Stack};
 use crate::println;
 use crate::time;
 
@@ -47,17 +60,26 @@ impl Cpu {
 struct CpuSlot {
     cpu: Cpu,
     handoff: boot::SecondaryHandoff,
+    /// The stack this hart will run on, from [`assign_stacks`]. `Once`, because a hart
+    /// handed a second stack would keep pushing onto the first.
+    ///
+    /// Slot 0's stays empty: the boot hart is already running on the linker's stack, and
+    /// nothing here has to tell it where.
+    stack: Once<Stack>,
 }
 
 impl CpuSlot {
-    const fn new() -> Self { Self { cpu: Cpu::new(), handoff: boot::SecondaryHandoff::new() } }
+    const fn new() -> Self {
+        Self { cpu: Cpu::new(), handoff: boot::SecondaryHandoff::new(), stack: Once::new() }
+    }
 }
 
 /// Upper bound on harts this kernel will run.
 ///
 /// Also what `device_tree` records hart ids up to, so a machine with more of them is
-/// reported where they are found rather than after `memory::stack` has allocated and
-/// mapped a stack for each.
+/// reported where they are found rather than after a stack has been allocated and mapped
+/// for each — and what `memory::stack` sizes its list of stacks from, since one hart is
+/// what a kernel stack is for.
 pub const MAX_CPUS: usize = 64;
 
 /// Slot 0 belongs to the firmware-selected boot hart.
@@ -140,15 +162,15 @@ pub fn boot_hart() -> Option<usize> {
 /// depend on which hart calls it. Iterated, never ranged over: ids need not be `0..n`.
 ///
 /// Slot 0 is the boot hart's, so the rest of the machine gets `MAX_CPUS - 1`. Capped here
-/// rather than at [`start_secondaries`], which runs once [`crate::memory::stack`] has
-/// already allocated and mapped a stack for every hart this yields.
+/// rather than at [`start_secondaries`], which runs once a stack has been allocated and
+/// mapped for every hart this yields.
 ///
-/// Consumed once, by [`crate::memory::init`], which stores the hart-to-stack pairing;
-/// [`start_secondaries`] reads that back rather than walking this again.
+/// Walked once, by [`assign_stacks`], which fills a slot per hart; [`start_secondaries`]
+/// reads the slots back rather than walking this again.
 ///
 /// # Panics
 /// Before [`init_boot`], when "except the boot hart" has no meaning yet.
-pub fn secondary_hart_ids() -> impl Iterator<Item = usize> {
+fn secondary_hart_ids() -> impl Iterator<Item = usize> {
     const SLOTS: usize = MAX_CPUS - 1;
 
     let boot = boot_hart().expect("secondary_hart_ids called before the boot hart was recorded");
@@ -163,20 +185,62 @@ pub fn secondary_hart_ids() -> impl Iterator<Item = usize> {
     reported.iter().copied().filter(move |&hart| hart != boot).take(SLOTS)
 }
 
-/// Bring up every hart [`crate::memory::init`] reserved a stack for.
+/// How many slots [`assign_stacks`] filled, so `CPU_SLOTS[1..=this]` are the secondaries.
 ///
-/// Call once, from the boot hart, **after** [`crate::memory::init`]: each hart is handed a
-/// stack that only the kernel page table maps, so both must exist first.
+/// A `Once`, so [`start_secondaries`] can tell "no secondaries" from "nobody has assigned
+/// them yet" — the second would otherwise start no harts and say nothing.
+static SECONDARIES: Once<usize> = Once::new();
+
+/// Claim a cpu slot and a kernel stack for every hart this kernel means to start.
+///
+/// Call once, from the boot hart, between [`crate::memory::init_allocators`] and
+/// [`crate::memory::init_page_table`]: a stack needs frames and an address, and the table
+/// built by the second has to map it before its hart ever pushes.
+///
+/// Only the slot's *contents* are decided here. Whether firmware will actually start the
+/// hart is [`start_secondaries`]' question, asked later and separately, because a hart that
+/// refuses to start still had a stack reserved for it and saying so needs the pairing to
+/// exist.
+///
+/// # Panics
+///
+/// If called twice. The second call would hand already-assigned harts nothing — every slot
+/// is a `Once` — while [`SECONDARIES`] kept the first count.
+pub fn assign_stacks() {
+    assert!(SECONDARIES.get().is_none(), "cpu::assign_stacks called twice; the slots are filled");
+
+    // Slot 0 belongs to the boot hart, so secondaries start at 1.
+    let mut filled = 0;
+    for (index, hart) in (1..).zip(secondary_hart_ids()) {
+        assert!(index < MAX_CPUS, "cpu slot {index} is out of range; secondary_hart_ids caps it");
+        let slot = &CPU_SLOTS[index];
+        slot.cpu.index.store(index, Ordering::Relaxed);
+        slot.cpu.hartid.store(hart, Ordering::Relaxed);
+        slot.stack.call_once(|| stack::alloc("secondary stack"));
+        filled += 1;
+    }
+
+    SECONDARIES.call_once(|| filled);
+}
+
+/// Bring up every hart [`assign_stacks`] claimed a slot for.
+///
+/// Call once, from the boot hart, **after** [`crate::memory::init_page_table`]: each hart is
+/// handed a stack that only the kernel page table maps, so both must exist first.
 pub fn start_secondaries() {
     let entry = virt_to_phys(boot::secondary_entry_address());
     let satp = kernel_table::satp()
-        .expect("no kernel page table published; start_secondaries ran before memory::init");
+        .expect("no kernel page table published; start_secondaries ran before memory");
+    let secondaries = *SECONDARIES
+        .get()
+        .expect("no cpu slots assigned; start_secondaries ran before cpu::assign_stacks");
 
-    // Slot 0 belongs to the boot hart, so secondaries start at 1.
+    // The slots `assign_stacks` filled, which already know their own hart and index —
+    // recomputing either here would be a second answer to what a slot is.
     let mut requested = 0;
-    for (index, &stack::Secondary { hart, stack }) in (1..).zip(stack::secondaries()) {
-        assert!(index < MAX_CPUS, "cpu slot {index} is out of range; secondary_hart_ids caps it");
-        let slot = &CPU_SLOTS[index];
+    for slot in &CPU_SLOTS[1..=secondaries] {
+        let (hart, index) = (slot.cpu.hartid(), slot.cpu.index());
+        let stack = *slot.stack.get().expect("assign_stacks gives every slot it fills a stack");
         // Ask first: "already started" and "no such hart" are different problems, and
         // hart_start's error code does not distinguish them.
         match sbi::hart_get_status(hart) {
@@ -197,8 +261,6 @@ pub fn start_secondaries() {
             stack.top()
         );
 
-        slot.cpu.index.store(index, Ordering::Relaxed);
-        slot.cpu.hartid.store(hart, Ordering::Relaxed);
         slot.handoff.publish(satp, stack.top().bits(), &slot.cpu as *const Cpu as usize);
 
         let opaque = &slot.handoff as *const boot::SecondaryHandoff as usize;

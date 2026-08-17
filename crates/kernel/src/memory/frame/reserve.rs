@@ -13,10 +13,11 @@
 use frame_allocator::{FrameAllocator, FrameRange};
 use heapless::Vec;
 
-use paging::MemoryAddr;
-use paging::sv39::{PAGE_SIZE, PhysicalAddr};
+use paging::sv39::PAGE_SIZE;
+use paging::{MemoryAddr, PhysicalAddr};
 
-use crate::memory::machine::{MAX_FOREIGN, PhysRange};
+use crate::memory::machine::MAX_FOREIGN;
+use crate::memory::phys_range::PhysRange;
 use crate::sync::IrqMutex;
 use crate::utils::ByteSize;
 
@@ -55,10 +56,13 @@ pub fn list() -> Vec<Reservation, MAX_RESERVATIONS> {
     RESERVATIONS.with(|reservations| reservations.clone())
 }
 
-/// The frames a range covers once rounded outward: a partially covered frame is still a
-/// frame that must not be handed out.
-fn frame_span(range: &PhysRange) -> (usize, usize) {
-    let (start, end) = range.frame_span();
+/// [`PhysRange::footprint`] as page numbers, which is what the allocator speaks.
+///
+/// Named for what it returns rather than repeating `footprint`: everything below compares
+/// frame numbers, and a helper that shares its caller's name while changing its units is a
+/// helper you have to read twice.
+fn ppn_span(range: &PhysRange) -> (usize, usize) {
+    let (start, end) = range.footprint();
     (start.ppn(), end.ppn())
 }
 
@@ -93,10 +97,10 @@ pub fn place_metadata(pool: FrameRange, frames: usize, carveouts: &[PhysRange]) 
         );
 
         match carveouts.iter().find(|range| {
-            let (first, last) = frame_span(range);
+            let (first, last) = ppn_span(range);
             first < end && start < last
         }) {
-            Some(conflict) => start = frame_span(conflict).1,
+            Some(conflict) => start = ppn_span(conflict).1,
             None => return FrameRange::new(start, end).expect("a bitmap spans at least one frame"),
         }
     }
@@ -117,7 +121,7 @@ fn withhold(
 ) {
     let (start, end) = (carveout.base, carveout.end());
     let name = carveout.name();
-    let (wanted_first, wanted_last) = frame_span(carveout);
+    let (wanted_first, wanted_last) = ppn_span(carveout);
     let first = wanted_first.max(pool.start());
     let last = wanted_last.min(pool.end());
 

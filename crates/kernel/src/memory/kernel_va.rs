@@ -18,16 +18,22 @@ use paging::sv39::{PAGE_SIZE, SUPERPAGE};
 use paging::utils::GIGABYTE;
 use paging::{MemoryAddr, VirtualAddr};
 
-use crate::memory::direct_map::DIRECT_MAP_END_VA;
+use super::direct_map;
 use crate::utils::ByteSize;
 
 /// First virtual address this module hands out: one past the direct map's window.
-pub const START: VirtualAddr = DIRECT_MAP_END_VA;
+///
+/// Derived here rather than named by `direct_map` as well: "where the direct map's window
+/// ends" and "where chosen addresses begin" are one address, and a second `const` for it
+/// would be a second thing to keep in step.
+pub const START: VirtualAddr = direct_map::phys_to_virt(direct_map::END);
 
 // Finer mappings go here, so the region must begin on a boundary that gives them page-table
 // slots of their own rather than sharing one with the direct map's superpages.
-const _: () =
-    assert!(START.bits() % SUPERPAGE == 0, "the kernel VA region must start superpage-aligned");
+const _: () = assert!(
+    START.bits().is_multiple_of(SUPERPAGE),
+    "the kernel VA region must start superpage-aligned"
+);
 
 /// Watermark, as raw bits: everything from [`START`] up to here has been handed out.
 static NEXT: AtomicUsize = AtomicUsize::new(START.bits());
@@ -41,10 +47,10 @@ pub fn watermark() -> VirtualAddr { VirtualAddr::new(NEXT.load(Ordering::Relaxed
 /// That superpage is withheld because walking off the end of a mapping there wraps to
 /// zero — a *user* address in this kernel. One unmapped superpage turns a kernel pointer
 /// silently becoming a user pointer into a fault.
-pub const fn end() -> VirtualAddr { VirtualAddr::new(usize::MAX - (SUPERPAGE - 1)) }
+pub const END: VirtualAddr = VirtualAddr::new(usize::MAX - (SUPERPAGE - 1));
 
 /// Bytes of kernel virtual address space still available.
-fn remaining() -> usize { end().sub_addr(watermark()) }
+fn remaining() -> usize { END.sub_addr(watermark()) }
 
 /// Take `len` bytes of kernel virtual address space, based at a multiple of `align`.
 ///
@@ -73,12 +79,11 @@ pub fn reserve(len: usize, align: usize) -> VirtualAddr {
 
         let base = from.align_up(align);
         assert!(base >= from, "aligning the kernel VA watermark to {align:#x} wrapped");
-        let top = base.checked_add(len).filter(|top| *top <= end()).unwrap_or_else(|| {
+        let top = base.checked_add(len).filter(|top| *top <= END).unwrap_or_else(|| {
             panic!(
                 "out of kernel virtual address space: {len:#x} bytes wanted at {base:#x}, \
-                 {:#x} left below {:#x}",
-                remaining(),
-                end()
+                 {:#x} left below {END:#x}",
+                remaining()
             )
         });
 
@@ -108,11 +113,10 @@ pub fn report() {
     // An interval, not a byte count: the remainder is hundreds of gigabytes and
     // page-granular, which `ByteSize` renders exactly and unreadably.
     println!(
-        "[memory] kernel VA: {:#x}..{:#x} taken ({}), free through {:#x}",
+        "[memory] kernel VA: {:#x}..{:#x} taken ({}), free through {END:#x}",
         START,
         watermark(),
-        ByteSize(watermark().sub_addr(START)),
-        end()
+        ByteSize(watermark().sub_addr(START))
     );
     if remaining() < LOW_WATER {
         println!("[memory] WARNING: less than {} of kernel VA space left", ByteSize(LOW_WATER));

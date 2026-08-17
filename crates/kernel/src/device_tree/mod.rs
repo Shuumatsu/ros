@@ -2,9 +2,9 @@
 //!
 //! Firmware hands the boot hart the blob's physical address in `a1`; we parse it here with
 //! the zero-allocation [`fdt_raw`] crate, which is what lets this run before the heap and
-//! before `memory::init`. It also runs before anything else prints: the console starts on
-//! the SBI console and binds the real UART the moment this yields its base, so walking the
-//! tree first is what puts every line on the real port.
+//! before `memory::init_allocators`. It also runs before anything else prints: the console
+//! starts on the SBI console and binds the real UART the moment this yields its base, so
+//! walking the tree first is what puts every line on the real port.
 //!
 //! One walk, one table: [`walk`] traverses, [`table`] keeps the single copy, [`report`]
 //! prints. Everything the kernel needs comes from the accessors below, never from a
@@ -39,8 +39,8 @@ pub use report::summary;
 use fdt_raw::{Fdt, Header};
 use paging::PhysicalAddr;
 
-use crate::memory::MachineMemory;
-use crate::memory::direct_map;
+use crate::memory::machine::MachineMemory;
+use crate::memory::{direct_map, layout};
 
 /// Parse the device tree at `dtb_ptr` and record the hardware the kernel needs.
 ///
@@ -74,7 +74,7 @@ pub unsafe fn init(dtb_ptr: usize) {
     // been checked. `Fdt::from_ptr` builds a slice over the whole blob, so it comes after
     // the second check rather than before it.
     direct_map::require_reach("the device tree header", base, size_of::<Header>());
-    let blob = crate::memory::phys_to_virt(base).as_mut_ptr::<u8>();
+    let blob = direct_map::phys_to_virt(base).as_mut_ptr::<u8>();
     // SAFETY: forwarded from this function's contract — `dtb_ptr` addresses a valid FDT
     // that stays mapped and unmodified, and `blob` is its direct-map alias. Only the
     // header is read here, which the check above covers.
@@ -88,18 +88,18 @@ pub unsafe fn init(dtb_ptr: usize) {
         .unwrap_or_else(|error| panic!("[dtb] failed to parse FDT at {dtb_ptr:#x}: {error:?}"));
 
     // Which `/memory` bank is ours: the one holding our own load address.
-    let kernel_pa = crate::memory::virt_to_phys(crate::memory::layout::text_start());
+    let kernel_pa = direct_map::virt_to_phys(layout::text_start());
 
     table::TABLE.call_once(|| walk::discover(&fdt, base, size, kernel_pa));
 
     // The console binds this window on its very next line, which is well before
-    // `memory::init` checks every window the machine describes. Checked here, where the
+    // `MachineMemory::check` checks every window the machine describes. Checked here, where the
     // fact becomes usable, rather than where the rest of them are.
     let uart = table::get().expect("the table was published above").uart;
     direct_map::require_reach("the console UART window", uart.base, uart.size);
 }
 
-/// Everything [`crate::memory::init`] needs to know about physical memory, as one value.
+/// Everything [`crate::memory`] needs to know about physical memory, as one value.
 ///
 /// The whole of this module's contribution to memory bring-up, in one call: `memory` reads
 /// nothing out of the tree itself, so a board without an FDT means another builder of this

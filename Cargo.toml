@@ -6,7 +6,7 @@ members = [
     "crates/rfs",
     "crates/mkfs",
     "crates/frame-allocator",
-    "crates/heap",
+    "crates/buddy-heap",
 ]
 resolver = "3"
 

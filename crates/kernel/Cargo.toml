@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 fdt-raw = "0.3.0"
 frame-allocator = { path = "../frame-allocator" }
-heap = { path = "../heap" }
+buddy-heap = { path = "../buddy-heap" }
 heapless = "0.9"
 paging = { path = "../paging", default-features = false }
 riscv = "0.16.0"

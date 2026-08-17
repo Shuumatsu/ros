@@ -20,11 +20,11 @@ use core::num::NonZeroUsize;
 use frame_allocator::{FrameAllocator, FrameBlock, FrameRange, metadata_layout};
 use spin::Once;
 
-use paging::MemoryAddr;
-use paging::sv39::{PAGE_SIZE, PhysicalAddr};
+use paging::sv39::PAGE_SIZE;
+use paging::{MemoryAddr, PhysicalAddr};
 
-use crate::memory::machine::PhysRange;
-use crate::memory::phys_to_virt;
+use super::direct_map;
+use super::phys_range::PhysRange;
 use crate::sync::IrqMutex;
 use crate::utils::ByteSize;
 
@@ -40,14 +40,18 @@ static FRAME_ALLOCATOR: IrqMutex<Option<FrameAllocator<'static>>> = IrqMutex::ne
 /// different times or disagree.
 static OWNED: Once<FrameRange> = Once::new();
 
-/// The physical span this module owns, which [`crate::memory::kernel_table`] maps exactly.
+/// The physical span this module owns, which [`super::kernel_table`] maps exactly.
 ///
 /// The same range the allocator manages: every carve-out, the metadata bitmap and the
 /// kernel image included, is withheld from inside it rather than excluded from its bounds,
 /// so there is no second extent to keep in step with this one.
-pub fn owned_range() -> (PhysicalAddr, PhysicalAddr) {
+///
+/// A [`PhysRange`] rather than a pair of addresses: the caller maps it and prints it, and
+/// both want the name, the end and the size without deriving any of them.
+pub fn owned_range() -> PhysRange {
     let owned = OWNED.get().expect("frame::owned_range queried before frame::init");
-    (PhysicalAddr::from_ppn(owned.start()), PhysicalAddr::from_ppn(owned.end()))
+    let base = PhysicalAddr::from_ppn(owned.start());
+    PhysRange::new("frame pool", base, PhysicalAddr::from_ppn(owned.end()).sub_addr(base))
 }
 
 /// Pool occupancy, in frames.
@@ -88,7 +92,10 @@ impl Frames {
 
     /// Bytes in the run, **after** buddy rounding — not what was asked for. A caller
     /// handing the memory on must pass this along or strand the difference.
-    pub fn len(&self) -> usize { self.0.frame_count() * PAGE_SIZE }
+    ///
+    /// Not `len`: on a type called `Frames` that would read as a frame count, and the
+    /// count is what the caller passed to [`alloc_contiguous`] going in.
+    pub fn bytes(&self) -> usize { self.0.frame_count() * PAGE_SIZE }
 
     /// Give up the token and keep the frames for good, yielding the base address.
     ///
@@ -114,14 +121,13 @@ impl Frames {
 pub fn init(ram: &PhysRange, image: PhysRange, foreign: &[PhysRange]) {
     assert!(OWNED.get().is_none(), "frame::init called twice; the pool is already published");
 
-    let direct_map_end = crate::memory::direct_map::DIRECT_MAP_END;
     let ram_end = ram.end();
-    let usable_end = ram_end.min(direct_map_end);
-    if ram_end > direct_map_end {
+    let usable_end = ram_end.min(direct_map::END);
+    if ram_end > direct_map::END {
         println!(
             "[memory] WARNING: {} of RAM above the direct map's {:#x} window is unmanaged",
-            ByteSize(ram_end.sub_addr(direct_map_end)),
-            direct_map_end
+            ByteSize(ram_end.sub_addr(direct_map::END)),
+            direct_map::END
         );
     }
 
@@ -145,7 +151,7 @@ pub fn init(ram: &PhysRange, image: PhysRange, foreign: &[PhysRange]) {
     // happens before a single reservation exists to protect anything from it, so the
     // choice has to respect every carve-out on its own.
     let metadata = reserve::place_metadata(pool, bitmap_frames, &carveouts);
-    let bitmap_va = phys_to_virt(PhysicalAddr::from_ppn(metadata.start()));
+    let bitmap_va = direct_map::phys_to_virt(PhysicalAddr::from_ppn(metadata.start()));
     // SAFETY: the bitmap frames are page-aligned, mapped, withheld from the pool below
     // before anything can be vended, and live as long as the kernel, so this `'static mut`
     // borrow is sound and exclusive.
@@ -169,8 +175,13 @@ pub fn init(ram: &PhysRange, image: PhysRange, foreign: &[PhysRange]) {
 
 /// Print what the kernel owns, what is left, and what was withheld.
 pub fn report() {
-    let (start, end) = owned_range();
-    println!("[memory] frames: {start:#x}..{end:#x} ({}, physical)", ByteSize(end.sub_addr(start)));
+    let pool = owned_range();
+    println!(
+        "[memory] frames: {:#x}..{:#x} ({}, physical)",
+        pool.base,
+        pool.end(),
+        ByteSize(pool.size)
+    );
     let stats = stats().expect("frame::report called before frame::init");
     println!(
         "[memory]   {} frames, {} free ({}), {} in use",
@@ -187,17 +198,17 @@ pub fn alloc() -> Option<Frames> { alloc_contiguous(1) }
 
 /// Allocate `count` physically contiguous zeroed frames, returning the run
 /// (`count` is rounded up to a power of two internally, a buddy property, so the
-/// base is aligned to the run's size — see [`Frames::len`]).
+/// base is aligned to the run's size — see [`Frames::bytes`]).
 pub fn alloc_contiguous(count: usize) -> Option<Frames> {
     let count = NonZeroUsize::new(count)?;
     // The lock is released before the zeroing below, which for a large run is far
     // more work than the allocation itself.
     let block = FRAME_ALLOCATOR.with(|slot| slot.as_mut()?.allocate(count))?;
     let frames = Frames(block);
-    let base_va = phys_to_virt(frames.base());
+    let base_va = direct_map::phys_to_virt(frames.base());
     // SAFETY: the allocator just gave us exclusive ownership of these frames,
     // which are mapped writable through the high half.
-    unsafe { core::ptr::write_bytes(base_va.as_mut_ptr::<u8>(), 0, frames.len()) };
+    unsafe { core::ptr::write_bytes(base_va.as_mut_ptr::<u8>(), 0, frames.bytes()) };
     Some(frames)
 }
 

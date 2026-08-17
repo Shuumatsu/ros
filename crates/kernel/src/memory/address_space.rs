@@ -12,9 +12,9 @@
 use paging::sv39::FrameSource;
 use paging::{LinearOffset, Mapper, PhysicalAddr, Satp, Table};
 
+use super::direct_map::{VA_OFFSET, phys_to_virt};
+use super::frame;
 use crate::arch::riscv64::tlb;
-use crate::memory::direct_map::VA_OFFSET;
-use crate::memory::{frame, phys_to_virt};
 
 /// The kernel's one mapper flavour, binding the two policies [`paging`] leaves open.
 pub type KernelMapper<'a> = Mapper<'a, TableFrames, LinearOffset>;

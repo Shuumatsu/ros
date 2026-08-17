@@ -3,7 +3,7 @@
 use paging::sv39::{PAGE_OFFSET_BITS, PPN_BITS, PteFlags};
 use paging::{PhysicalAddr, Satp, Table};
 
-use super::direct_map::{DIRECT_MAP_SPAN, VA_OFFSET};
+use super::direct_map;
 
 /// Blanket rights, `A`/`D` pre-set so the walker never writes back into a table living in
 /// `.rodata`. Temporary: [`super::kernel_table`] replaces every leaf once there is an
@@ -20,7 +20,7 @@ const BOOT: PteFlags = PteFlags::READ_WRITE_EXECUTE.union(PteFlags::ACCESS).unio
 /// table — a stray write to one faults instead of landing on whatever physical memory the
 /// blanket mapping would have aliased.
 #[used]
-pub(crate) static TABLE: Table = Table::identity_and_offset(VA_OFFSET, DIRECT_MAP_SPAN, BOOT);
+pub static TABLE: Table = Table::identity_and_offset(direct_map::VA_OFFSET, direct_map::SPAN, BOOT);
 
 /// The `satp` for [`TABLE`], in the two pieces assembly can assemble it from.
 ///
@@ -28,9 +28,9 @@ pub(crate) static TABLE: Table = Table::identity_and_offset(VA_OFFSET, DIRECT_MA
 /// load is the only way to name it, so the entry recovers it there and folds it in with
 /// `srli`+`or` — a second encoding of [`Satp::sv39`], which assembly cannot call, so both
 /// constants live next to the assertion that pins them to it.
-pub(crate) const SATP_TEMPLATE: usize = Satp::sv39(PhysicalAddr::new(0), 0).bits();
+pub const SATP_TEMPLATE: usize = Satp::sv39(PhysicalAddr::new(0), 0).bits();
 /// Right-shift that turns a page-aligned root address into `satp.PPN`.
-pub(crate) const SATP_ROOT_SHIFT: usize = PAGE_OFFSET_BITS;
+pub const SATP_ROOT_SHIFT: usize = PAGE_OFFSET_BITS;
 
 const _: () = {
     // Linear in the address, so one root per PPN bit covers every field boundary.
