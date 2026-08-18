@@ -1,8 +1,7 @@
 //! Printing the resolved device map.
 //!
 //! Reads only the stored table — no re-parse — so printing is fully decoupled from
-//! discovery. Kept in its own file because it is the one part of this module that runs
-//! after the walk rather than as part of it, on the UART the walk itself found.
+//! discovery, and runs after the walk on the UART the walk itself found.
 
 use super::table;
 use crate::utils::ByteSize;
@@ -31,9 +30,8 @@ pub fn summary() {
         None => println!("[dtb] uart:  {:#x} (size {:#x})", uart.base, uart.size),
     }
 
-    // Unconditional, and outside every device's `if`. These counts say how much of
-    // the tree we understood, which is what you want on an unfamiliar platform —
-    // exactly when some other device is likely to be missing.
+    // Unconditional: these counts say how much of the tree we understood, which is what you
+    // want on an unfamiliar platform — exactly when some other device is likely to be missing.
     println!(
         "[dtb] mmio:  {} windows, {} foreign RAM ranges",
         table.mmio.len(),
