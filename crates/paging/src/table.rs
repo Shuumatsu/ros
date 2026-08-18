@@ -17,7 +17,7 @@ use core::mem::{align_of, size_of};
 use crate::addr::{PhysicalAddr, VirtualAddr};
 use crate::geometry::{ENTRIES_PER_PAGE, PAGE_SIZE, ROOT_ENTRIES_PER_HALF};
 use crate::pte::{Entry, PteFlags};
-use crate::scheme::Scheme;
+use crate::scheme::{Scheme, vpn};
 
 /// A single page table: 512 entries filling exactly one 4 KiB frame.
 ///
@@ -70,7 +70,7 @@ impl Table {
             paddr.bits() & (S::ROOT_PAGE - 1) == 0,
             "a root-page physical address must be aligned to a whole root slot"
         );
-        self.entries[vaddr.vpn(S::ROOT_LEVEL)] = Entry::leaf(paddr, flags);
+        self.entries[vpn::<S>(vaddr, S::ROOT_LEVEL)] = Entry::leaf(paddr, flags);
     }
 
     /// The table a higher-half kernel enters paging on: the low canonical half
@@ -107,7 +107,7 @@ impl Table {
         let root_page = S::ROOT_PAGE;
         assert!(va_offset % root_page == 0, "the high half must begin on a root-page boundary");
         assert!(
-            VirtualAddr::new(va_offset).vpn(S::ROOT_LEVEL) == ROOT_ENTRIES_PER_HALF,
+            vpn::<S>(VirtualAddr::new(va_offset), S::ROOT_LEVEL) == ROOT_ENTRIES_PER_HALF,
             "va_offset must be the base of the high canonical half"
         );
         assert!(
@@ -143,7 +143,7 @@ impl Default for Table {
 mod tests {
     use super::*;
     use crate::geometry::{ENTRY_SIZE, GIGAPAGE};
-    use crate::scheme::{Sv39, Sv48};
+    use crate::scheme::{Sv39, Sv48, vpn};
 
     /// Bottom of the Sv39 high half, where a higher-half kernel lives.
     const HIGH_BASE: usize = 0xffff_ffc0_0000_0000;
@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn const_built_boot_table_has_the_expected_entries() {
         // The high half starts at root index 256 — derived, not assumed.
-        let high_index = VirtualAddr::new(HIGH_BASE).vpn(Sv39::ROOT_LEVEL);
+        let high_index = vpn::<Sv39>(VirtualAddr::new(HIGH_BASE), Sv39::ROOT_LEVEL);
         assert_eq!(high_index, ROOT_ENTRIES_PER_HALF, "high half begins at root entry 256");
         let window_slots = SPAN / GIGAPAGE;
 
@@ -228,7 +228,7 @@ mod tests {
         let span = 4 * Sv48::ROOT_PAGE;
         let table = Table::identity_and_offset::<Sv48>(SV48_HIGH_BASE, span, BOOT);
 
-        let high_index = VirtualAddr::new(SV48_HIGH_BASE).vpn(Sv48::ROOT_LEVEL);
+        let high_index = vpn::<Sv48>(VirtualAddr::new(SV48_HIGH_BASE), Sv48::ROOT_LEVEL);
         assert_eq!(high_index, ROOT_ENTRIES_PER_HALF, "Sv48's high half also begins at slot 256");
         assert_eq!(
             table.entries[high_index + 3].target(),

@@ -10,7 +10,7 @@
 //! [`Mapper`] — is written once and parameterised by it. [`geometry`] holds what all three
 //! share; a scheme holds what it does not.
 //!
-//! Nothing outside [`Mapper`] and the two [`Table`] builders takes a scheme at all: an
+//! Only [`Mapper`], the two [`Table`] builders and [`vpn`] take a scheme at all: an
 //! address, a PTE and a page size mean the same thing under each, which is why the rest of
 //! a kernel can depend on this crate without naming one.
 //!
@@ -53,5 +53,5 @@ pub use geometry::{
 pub use mapper::{MapError, Mapper, Unmapped};
 pub use pte::{Entry, PteFlags};
 pub use satp::{Mode, Satp};
-pub use scheme::{Scheme, Sv39, Sv48, Sv57};
+pub use scheme::{Scheme, Sv39, Sv48, Sv57, vpn};
 pub use table::Table;

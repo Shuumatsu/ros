@@ -144,9 +144,6 @@ impl Satp {
         )
     }
 
-    /// Sv39 translation through `root`, the common case for this kernel.
-    pub const fn sv39(root: PhysicalAddr, asid: usize) -> Self { Self::new(Mode::Sv39, asid, root) }
-
     /// Translation off: physical addressing.
     pub const fn bare() -> Self { Self(0) }
 
@@ -226,7 +223,7 @@ mod tests {
     #[test]
     fn sv39_value_matches_the_privileged_spec_layout() {
         let root = PhysicalAddr::new(0x8020_1000);
-        let satp = Satp::sv39(root, 0);
+        let satp = Satp::new(Mode::Sv39, 0, root);
         assert_eq!(satp.bits(), (8 << 60) | (0x8020_1000 >> 12), "MODE at bit 60, PPN at bit 0");
         assert_eq!(satp.mode(), Some(Mode::Sv39), "mode decodes back");
         assert_eq!(satp.root(), root, "root decodes back");
@@ -252,12 +249,12 @@ mod tests {
     /// constructors at compile time, next to the code that uses it.
     #[test]
     fn root_can_be_grafted_onto_a_const_template() {
-        const TEMPLATE: Satp = Satp::sv39(PhysicalAddr::new(0), 0);
+        const TEMPLATE: Satp = Satp::new(Mode::Sv39, 0, PhysicalAddr::new(0));
         assert_eq!(TEMPLATE.bits(), 8 << 60, "a rootless template is mode bits only");
 
         let root = PhysicalAddr::new(0x8100_0000);
         let filled = TEMPLATE.with_root(root);
-        assert_eq!(filled, Satp::sv39(root, 0), "grafting == composing directly");
+        assert_eq!(filled, Satp::new(Mode::Sv39, 0, root), "grafting == composing directly");
     }
 
     #[test]
@@ -273,7 +270,7 @@ mod tests {
     fn rejects_a_misaligned_root() {
         // Silently dropping these low bits is exactly the bug the assert exists
         // to prevent: the walk would follow a different frame than requested.
-        let _ = Satp::sv39(PhysicalAddr::new(0x8020_0800), 0);
+        let _ = Satp::new(Mode::Sv39, 0, PhysicalAddr::new(0x8020_0800));
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
 use crate::frames::FrameSource;
 use crate::geometry::{ENTRIES_PER_PAGE, PAGE_OFFSET_BITS, VPN_BITS, page_size_at};
 use crate::pte::{Entry, PteFlags};
-use crate::scheme::Scheme;
+use crate::scheme::{Scheme, vpn};
 use crate::table::Table;
 use crate::utils::mask;
 
@@ -173,7 +173,7 @@ impl<'a, S: Scheme, F: FrameSource, A: PhysAccess> Mapper<'a, S, F, A> {
         let mut table: *mut Table = self.root;
         let mut current = S::ROOT_LEVEL;
         while current > level {
-            let index = vaddr.vpn(current);
+            let index = vpn::<S>(vaddr, current);
             // Read the entry out by value: holding a `&mut` into the table
             // across the frame-source call would borrow `self` twice.
             // SAFETY: `table` is the root or a child reached through a valid
@@ -197,7 +197,7 @@ impl<'a, S: Scheme, F: FrameSource, A: PhysAccess> Mapper<'a, S, F, A> {
 
         // SAFETY: the walk stopped at `level`, so `table` is the table that
         // owns the entry for `vaddr` at that level.
-        unsafe { (*table).entries[vaddr.vpn(level)] = Entry::leaf(paddr, flags) };
+        unsafe { (*table).entries[vpn::<S>(vaddr, level)] = Entry::leaf(paddr, flags) };
         Ok(())
     }
 
@@ -215,7 +215,7 @@ impl<'a, S: Scheme, F: FrameSource, A: PhysAccess> Mapper<'a, S, F, A> {
         let mut table: *const Table = self.root;
         for level in (0..S::LEVELS).rev() {
             // SAFETY: `table` is the root or a child from a valid branch entry.
-            let entry = unsafe { (*table).entries[vaddr.vpn(level)] };
+            let entry = unsafe { (*table).entries[vpn::<S>(vaddr, level)] };
             if !entry.is_valid() {
                 return None;
             }
@@ -262,7 +262,7 @@ impl<'a, S: Scheme, F: FrameSource, A: PhysAccess> Mapper<'a, S, F, A> {
     pub fn unmap(&mut self, vaddr: VirtualAddr) -> Option<Unmapped> {
         let mut table: *mut Table = self.root;
         for level in (0..S::LEVELS).rev() {
-            let index = vaddr.vpn(level);
+            let index = vpn::<S>(vaddr, level);
             // SAFETY: `table` is the root or a child from a valid branch entry, and
             // `access` maps such frames to live pointers.
             let entry = unsafe { (*table).entries[index] };

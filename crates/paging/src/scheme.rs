@@ -13,6 +13,7 @@ use crate::geometry::{
     MAX_LEVELS, PAGE_OFFSET_BITS, ROOT_ENTRIES_PER_HALF, VPN_BITS, page_size_at,
 };
 use crate::satp::Mode;
+use crate::utils::field;
 
 /// One RV64 translation scheme.
 ///
@@ -55,6 +56,19 @@ pub trait Scheme {
         let shift = (usize::BITS as usize) - Self::VA_BITS;
         VirtualAddr::new((((va.bits() << shift) as i64) >> shift) as usize)
     }
+}
+
+/// The 9-bit page-table index `va` uses at `level` under `S` (0 = leaf level).
+///
+/// A free function rather than a method on [`VirtualAddr`] or [`Scheme`]: an address
+/// carries no scheme to bound `level` against, and a trait method could not be `const`,
+/// which the boot table is built by. Above `S::LEVELS` there is no index — those bits are
+/// the address's sign extension — so a level out of range is a caller's bug, not a field
+/// to read.
+#[inline]
+pub const fn vpn<S: Scheme>(va: VirtualAddr, level: usize) -> usize {
+    debug_assert!(level < S::LEVELS, "vpn level out of range for this scheme");
+    field(va.bits(), PAGE_OFFSET_BITS + VPN_BITS * level, VPN_BITS)
 }
 
 /// 39-bit virtual addresses, three levels, 1 GiB root leaves.
@@ -110,6 +124,34 @@ mod tests {
     }
 
     #[test]
+    fn vpn_decomposes_the_address_into_nine_bit_fields() {
+        // 0x8200_1ABC → vpn2=2, vpn1=16, vpn0=1.
+        let va = VirtualAddr::new(0x8200_1ABC);
+        assert_eq!(vpn::<Sv39>(va, 2), 2, "vpn[2]");
+        assert_eq!(vpn::<Sv39>(va, 1), 16, "vpn[1]");
+        assert_eq!(vpn::<Sv39>(va, 0), 1, "vpn[0]");
+    }
+
+    /// The fields a deeper scheme adds sit above the ones it shares, and every scheme reads
+    /// the shared ones identically — only *how many* exist differs.
+    #[test]
+    fn a_deeper_scheme_indexes_the_same_fields_and_more() {
+        let va = VirtualAddr::new((5 << 39) | (7 << 30));
+        assert_eq!(vpn::<Sv48>(va, 3), 5, "vpn[3] exists under Sv48");
+        assert_eq!(vpn::<Sv48>(va, 2), 7);
+        assert_eq!(vpn::<Sv39>(va, 2), vpn::<Sv48>(va, 2), "the shared field decodes the same");
+    }
+
+    /// Level 3 is Sv48's root and not an Sv39 index at all: those bits are sign extension
+    /// under Sv39, and reading them as a VPN would walk a table that does not exist.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "out of range for this scheme")]
+    fn a_level_the_scheme_does_not_have_is_not_a_field() {
+        let _ = vpn::<Sv39>(VirtualAddr::new(1 << 39), 3);
+    }
+
+    #[test]
     fn canonicalization_follows_the_scheme_rather_than_a_fixed_width() {
         // Bit 38 is the sign bit under Sv39 and an ordinary address bit under Sv48.
         let va = VirtualAddr::new(1 << 38);
@@ -118,7 +160,11 @@ mod tests {
 
         let fixed = Sv39::canonicalize(va);
         assert!(Sv39::is_canonical(fixed), "canonicalizing produces a canonical address");
-        assert_eq!(fixed.vpn(2), va.vpn(2), "canonicalization preserves the VPN fields");
+        assert_eq!(
+            vpn::<Sv39>(fixed, 2),
+            vpn::<Sv39>(va, 2),
+            "canonicalization preserves the VPN fields"
+        );
         assert_eq!(Sv48::canonicalize(va), va, "an already-canonical address is unchanged");
     }
 }

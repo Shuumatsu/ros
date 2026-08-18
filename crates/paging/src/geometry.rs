@@ -23,12 +23,16 @@ pub const PAGE_SIZE: usize = 4 * KILOBYTE;
 /// Virtual-page-number index bits consumed per level.
 pub const VPN_BITS: usize = 9;
 
-/// Levels the deepest scheme walks (Sv57).
+/// Levels the deepest scheme can walk.
 ///
-/// The bound on any level a caller can name, which is what the address accessors check
-/// against: they are scheme-independent, so the widest scheme is the only honest limit.
-/// A caller holding a [`Scheme`](crate::Scheme) has the tighter one.
-pub const MAX_LEVELS: usize = 5;
+/// A ceiling rather than a census: each level consumes [`VPN_BITS`] of virtual address
+/// above the page offset, so a sixth would need 66 bits and an RV64 address has 64. Sv57
+/// is therefore as deep as the family goes, which [`Scheme`](crate::Scheme) asserts.
+///
+/// This bounds [`page_size_at`], the one accessor that names a level without naming a
+/// scheme. A walk has a scheme, and [`vpn`](crate::vpn) holds it to that scheme's own
+/// count.
+pub const MAX_LEVELS: usize = (usize::BITS as usize - PAGE_OFFSET_BITS) / VPN_BITS;
 
 /// Size of one page-table entry in bytes.
 pub const ENTRY_SIZE: usize = core::mem::size_of::<u64>();
@@ -67,6 +71,6 @@ const_assert_eq!(ENTRIES_PER_PAGE * ENTRY_SIZE, PAGE_SIZE);
 const_assert_eq!(page_size_at(0), PAGE_SIZE);
 const_assert_eq!(SUPERPAGE, 2 * MEGABYTE);
 const_assert_eq!(GIGAPAGE, GIGABYTE);
-// Sv57's 57 virtual bits are the offset plus one VPN field per level, which is what makes
-// `MAX_LEVELS` the widest a `usize` address can index.
+// The ceiling is Sv57's width exactly: five VPN fields over a page offset.
 const_assert_eq!(PAGE_OFFSET_BITS + VPN_BITS * MAX_LEVELS, 57);
+const_assert_eq!(MAX_LEVELS, 5);

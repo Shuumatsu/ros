@@ -1,16 +1,16 @@
 //! Virtual and physical address types.
 //!
-//! Scheme-independent: a physical address is 56 bits and a page number 44 in every RV64
-//! translation scheme, and the VPN fields are nine bits apiece wherever they appear. Only
-//! *how many* of those fields a walk uses is a scheme's business, which is why the
-//! sign-extension rules live on [`Scheme`](crate::Scheme) and not here.
+//! A physical address is 56 bits and a page number 44 in every RV64 translation scheme, so
+//! the physical decomposition lives here. A virtual address is read differently under each:
+//! how many VPN fields it has and where its sign extension begins both follow from a
+//! scheme's level count, so [`Scheme`](crate::Scheme) owns that half.
 //!
 //! The types are also the crate's contribution to code that never walks a page table:
 //! `PhysicalAddr` is what keeps a physical address from being passed where a pointer is
 //! wanted, which in a higher-half kernel is the difference between a fault and a wrong
 //! answer.
 
-use crate::geometry::{MAX_LEVELS, PAGE_OFFSET_BITS, PPN_BITS, VPN_BITS};
+use crate::geometry::{PAGE_OFFSET_BITS, PPN_BITS};
 use crate::utils::{align_down, align_offset, align_up, field, with_field};
 use core::fmt;
 
@@ -80,25 +80,18 @@ pub trait MemoryAddr: Copy + Clone + Ord + Eq {
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub struct VirtualAddr(usize);
 
+/// The bare address: how many VPN fields it decomposes into is a scheme's answer, and this
+/// type has no scheme to ask.
 impl fmt::Debug for VirtualAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "VirtualAddr({:#x}: vpn[2]={}, vpn[1]={}, vpn[0]={}, offset={:#x})",
-            self.0,
-            self.vpn(2),
-            self.vpn(1),
-            self.vpn(0),
-            self.offset()
-        )
+        write!(f, "VirtualAddr({:#x})", self.0)
     }
 }
 
 /// Formats as the bare address, so `{:#x}` works and width flags are honoured.
 ///
-/// The alternatives are `{:?}`, which spells out the VPN decomposition, and
-/// `.bits()` — and a caller that reaches for `.bits()` to print has just dropped
-/// the type for the rest of the expression.
+/// The alternative is `.bits()` — and a caller that reaches for it to print has just
+/// dropped the type for the rest of the expression.
 impl fmt::LowerHex for VirtualAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::LowerHex::fmt(&self.0, f) }
 }
@@ -112,15 +105,6 @@ impl VirtualAddr {
     pub const fn new(vaddr: usize) -> Self { Self(vaddr) }
 
     pub const fn bits(self) -> usize { self.0 }
-
-    /// The 9-bit page-table index for `level` (0 = leaf level).
-    ///
-    /// Bounded by [`MAX_LEVELS`] rather than by a scheme's level count: this type carries
-    /// no scheme, and a walk that has one never asks past its own root.
-    pub const fn vpn(self, level: usize) -> usize {
-        debug_assert!(level < MAX_LEVELS, "vpn level out of range");
-        field(self.0, PAGE_OFFSET_BITS + VPN_BITS * level, VPN_BITS)
-    }
 
     pub const fn offset(self) -> usize { field(self.0, 0, PAGE_OFFSET_BITS) }
 
@@ -183,22 +167,8 @@ mod tests {
         use super::*;
 
         #[test]
-        fn vpn_and_offset_extraction() {
-            // 0x8200_1ABC → vpn2=2, vpn1=16, vpn0=1, offset=0xABC
-            let va = VirtualAddr::new(0x8200_1ABC);
-            assert_eq!(va.vpn(2), 2, "vpn[2]");
-            assert_eq!(va.vpn(1), 16, "vpn[1]");
-            assert_eq!(va.vpn(0), 1, "vpn[0]");
-            assert_eq!(va.offset(), 0xABC, "offset");
-        }
-
-        /// The fields above level 2 exist in the wider schemes and must decode the same
-        /// way, since nothing about this type knows which scheme is live.
-        #[test]
-        fn the_deeper_schemes_index_the_same_nine_bit_fields() {
-            let va = VirtualAddr::new((5 << 39) | (7 << 30));
-            assert_eq!(va.vpn(3), 5, "vpn[3] exists under Sv48");
-            assert_eq!(va.vpn(2), 7);
+        fn offset_extraction() {
+            assert_eq!(VirtualAddr::new(0x8200_1ABC).offset(), 0xABC, "offset");
         }
 
         #[test]
