@@ -22,7 +22,7 @@
 //! about this machine's processors, and a memory subsystem holding the roster would be
 //! answering a question `cpu` is asked.
 
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use spin::Once;
 
@@ -32,29 +32,59 @@ use crate::memory::stack::{self, Stack};
 use crate::println;
 use crate::time;
 
-/// Per-hart control block. `tp` points at this hart's.
+/// Per-hart control block, and where per-hart state lives. `tp` points at this hart's.
 ///
 /// A pointer rather than a bare id, as Linux does: `tp` is the one register that is
 /// per-hart for free, and spending it on an integer already handed to us in `a0` would
-/// leave every future piece of per-hart state needing a home and a lookup.
+/// leave every future piece of per-hart state needing a home and a lookup. A subsystem with
+/// something to keep per hart puts a field here and reaches it through [`current`]; the
+/// alternative — an array of its own, subscripted by [`Cpu::index`] — is a second per-hart
+/// storage scheme, one index lookup deeper and with every hart's copy packed into the same
+/// cache line.
+///
+/// Atomics because the block is shared state as far as the compiler is concerned. They are
+/// never contended: a `&Cpu` can only be obtained from [`current`], so a hart reaches nothing
+/// but its own, and a plain load and store is enough where a counter shared between harts
+/// would need a read-modify-write.
 #[repr(C)]
 pub struct Cpu {
     /// Physical hart id from the SBI boot protocol. Sparse — never an array index.
     hartid: AtomicUsize,
     /// Dense logical index, `0..cpus`: the array subscript.
     index: AtomicUsize,
+    /// Timer interrupts this hart has taken, from [`crate::time::timer`].
+    ticks: AtomicU64,
 }
 
 impl Cpu {
-    const fn new() -> Self { Self { hartid: AtomicUsize::new(0), index: AtomicUsize::new(0) } }
+    const fn new() -> Self {
+        Self {
+            hartid: AtomicUsize::new(0),
+            index: AtomicUsize::new(0),
+            ticks: AtomicU64::new(0),
+        }
+    }
 
     /// Physical hart id, for SBI calls and diagnostics.
     pub fn hartid(&self) -> usize { self.hartid.load(Ordering::Relaxed) }
 
     /// Dense logical index, for anything array-shaped.
     pub fn index(&self) -> usize { self.index.load(Ordering::Relaxed) }
+
+    /// Count a timer tick on this hart, and answer with the new total.
+    pub fn record_tick(&self) -> u64 {
+        let ticks = self.ticks.load(Ordering::Relaxed) + 1;
+        self.ticks.store(ticks, Ordering::Relaxed);
+        ticks
+    }
 }
 
+/// One hart's slot: its control block, the handoff that started it, and the stack it runs on.
+///
+/// A cache line to itself, so that a write to one hart's state does not evict another's. That
+/// is what lets [`Cpu`] be the home for hot per-hart state — the separation is paid for once
+/// here rather than by every subsystem that adds a field.
+#[repr(C, align(64))]
 struct CpuSlot {
     cpu: Cpu,
     handoff: boot::SecondaryHandoff,
@@ -79,6 +109,11 @@ impl CpuSlot {
 /// for each — and what `memory::stack` sizes its list of stacks from, since one hart is
 /// what a kernel stack is for.
 pub const MAX_CPUS: usize = 64;
+
+const _: () = assert!(
+    align_of::<CpuSlot>() == arch::CACHE_LINE_BYTES,
+    "a cpu slot must be aligned to a whole cache line, or two harts share one"
+);
 
 /// Slot 0 belongs to the firmware-selected boot hart.
 static CPU_SLOTS: [CpuSlot; MAX_CPUS] = [const { CpuSlot::new() }; MAX_CPUS];

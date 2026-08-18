@@ -13,6 +13,9 @@
 //! non-zero [`thread_pointer`] means a live control block, and [`crate::time`] decides what
 //! a [`time_counter`] tick is worth. Splitting them that way is what keeps an `asm!` block
 //! out of a module named after a concern rather than an instruction set.
+//!
+//! [`CACHE_LINE_BYTES`] is the one loose item that is not an instruction: a geometry this ISA
+//! fixes, which the kernel lays per-hart data out against.
 
 use mmu::VirtualAddr;
 
@@ -22,6 +25,17 @@ pub mod sbi;
 pub mod timer;
 pub mod tlb;
 pub mod trap;
+
+/// Bytes in a cache block: the unit two harts must not share to stay out of each other's way.
+///
+/// A build-time constant, and 64 on every platform this kernel targets — the `Zic64b`
+/// extension is the ISA saying exactly that, and QEMU's `virt` advertises it in the device
+/// tree. A machine with wider blocks costs alignment, never correctness, which is why this is
+/// not probed at runtime.
+///
+/// `#[repr(align(N))]` accepts only a literal, so a type aligned against this writes the
+/// number and asserts the two agree.
+pub const CACHE_LINE_BYTES: usize = 64;
 
 /// An address in the caller's instruction stream.
 ///

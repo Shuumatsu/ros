@@ -10,12 +10,10 @@
 //! handled late shifts the ones after it, and nothing derives a time from how many there
 //! have been.
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
 use spin::Once;
 
 use crate::arch::{self, interrupts, timer};
-use crate::cpu::{self, MAX_CPUS};
+use crate::cpu;
 
 /// Ticks per second, on every hart.
 pub const HZ: u64 = 100;
@@ -29,11 +27,6 @@ const REPORTED_SECONDS: u64 = 3;
 /// Counter ticks between interrupts. One timebase serves the whole machine, so the first
 /// hart to work it out decides it for all of them.
 static INTERVAL: Once<u64> = Once::new();
-
-/// Ticks taken, per cpu slot. Atomic because it is a shared static, not because it is
-/// contended: a hart touches only its own slot, so a load and a store are enough where a
-/// counter shared between harts would need a read-modify-write.
-static TICKS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 /// Arm this hart's timer and let the interrupt through.
 ///
@@ -77,9 +70,9 @@ pub(crate) fn tick() {
     timer::set_next_event(arch::time_counter() + interval)
         .expect("firmware took the first timer deadline on this hart and then refused one");
 
-    let slot = &TICKS[cpu::current().index()];
-    let ticks = slot.load(Ordering::Relaxed) + 1;
-    slot.store(ticks, Ordering::Relaxed);
+    // Counted in this hart's control block rather than in a table here: `cpu` owns per-hart
+    // storage, and a slot of its own is what keeps four harts off one cache line.
+    let ticks = cpu::current().record_tick();
 
     let seconds = ticks / HZ;
     if ticks.is_multiple_of(HZ) && seconds <= REPORTED_SECONDS {
