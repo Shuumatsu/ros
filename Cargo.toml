@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "crates/paging",
+    "crates/mmu",
     "crates/kernel",
     "crates/blockdev",
     "crates/rfs",

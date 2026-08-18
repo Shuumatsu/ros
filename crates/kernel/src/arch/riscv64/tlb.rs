@@ -13,7 +13,7 @@
 //! the RFENCE SBI extension. Neither exists yet, and until something edits a tree while a
 //! second hart runs it, neither is needed.
 
-use paging::Satp;
+use mmu::Satp;
 
 use super::interrupts;
 

@@ -37,7 +37,7 @@ mod walk;
 pub use report::summary;
 
 use fdt_raw::{Fdt, Header};
-use paging::PhysicalAddr;
+use mmu::PhysicalAddr;
 
 use crate::memory::machine::MachineMemory;
 use crate::memory::{direct_map, layout};

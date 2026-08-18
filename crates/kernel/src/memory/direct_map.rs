@@ -33,8 +33,8 @@
 //! [`super::frame`] drops such RAM and [`super::machine::MachineMemory::check`] rejects
 //! such a device.
 //!
-//! [translate]: paging::Mapper::translate
-use paging::{PhysicalAddr, Scheme, VirtualAddr};
+//! [translate]: mmu::Mapper::translate
+use mmu::{PhysicalAddr, Scheme, VirtualAddr};
 
 use super::KernelScheme;
 use crate::utils::ByteSize;

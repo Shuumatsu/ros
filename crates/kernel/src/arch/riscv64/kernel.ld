@@ -30,7 +30,7 @@ tree (see `device_tree`), not a compile-time constant. */
 
    `_page_size` is named rather than repeated: the eight places below that align or
    pad by a page then say *why*. Rust cannot read it (a small absolute linker symbol
-   is not reachable PC-relative), so it keeps its own `paging::sv39::PAGE_SIZE`, and
+   is not reachable PC-relative), so it keeps its own `mmu::PAGE_SIZE`, and
    `memory::layout::check()` pins the two together at boot by measuring a gap the
    linker built — the same duplicate-and-verify arrangement as `_va_offset`. */
 _page_size      = 4096;                     /* architectural: Sv39 base page */

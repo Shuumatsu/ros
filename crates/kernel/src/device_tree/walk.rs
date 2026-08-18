@@ -10,7 +10,7 @@
 
 use fdt_raw::{Fdt, Node, Property, RegInfo};
 use heapless::String;
-use paging::PhysicalAddr;
+use mmu::PhysicalAddr;
 
 use super::table::{Device, DeviceTable, MAX_HART_IDS};
 use crate::drivers::uart16550;

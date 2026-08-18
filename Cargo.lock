@@ -133,7 +133,7 @@ dependencies = [
  "fdt-raw",
  "frame-allocator",
  "heapless",
- "paging",
+ "mmu",
  "riscv",
  "sbi-rt",
  "sbi-spec",
@@ -165,7 +165,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "paging"
+name = "mmu"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.1",

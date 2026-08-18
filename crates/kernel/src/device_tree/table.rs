@@ -6,7 +6,7 @@
 //! therefore carries a window the same walk already put in that list.
 
 use heapless::Vec;
-use paging::PhysicalAddr;
+use mmu::PhysicalAddr;
 
 use crate::cpu::MAX_CPUS;
 use crate::memory::machine::{MAX_FOREIGN, MAX_MMIO};

@@ -15,9 +15,7 @@
 
 use alloc::vec::Vec;
 
-use paging::{
-    MemoryAddr, PhysicalAddr, PteFlags, SUPERPAGE, Satp, Scheme, VirtualAddr, page_size_at,
-};
+use mmu::{MemoryAddr, PhysicalAddr, PteFlags, SUPERPAGE, Satp, Scheme, VirtualAddr, page_size_at};
 use spin::Once;
 
 use super::address_space::{AddressSpace, KernelMapper};

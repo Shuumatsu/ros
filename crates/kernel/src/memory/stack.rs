@@ -22,8 +22,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use heapless::Vec;
 
-use paging::PAGE_SIZE;
-use paging::{MemoryAddr, PhysicalAddr, VirtualAddr};
+use mmu::PAGE_SIZE;
+use mmu::{MemoryAddr, PhysicalAddr, VirtualAddr};
 
 use super::direct_map::virt_to_phys;
 use super::{frame, kernel_va, layout};

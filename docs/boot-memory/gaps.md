@@ -40,11 +40,11 @@ straightforward.
 
 ## Testing
 
-`paging`, `frame-allocator` and `heap` are host-tested. The kernel crate is not: it is
+`mmu`, `frame-allocator` and `heap` are host-tested. The kernel crate is not: it is
 `no_std`, `no_main` and forced to the RISC-V target, so everything in `memory` — the region
 layout, the audits, the ordering — is exercised only by booting.
 
 That is a real hole. Confirming any one of those audits means injecting the fault it exists
 to catch and reading the panic off a QEMU boot, which `verify.md` gives as a procedure.
 Closing the hole means moving whatever is pure geometry out of the kernel crate and behind a
-host-testable boundary, the way `paging` already is.
+host-testable boundary, the way `mmu` already is.

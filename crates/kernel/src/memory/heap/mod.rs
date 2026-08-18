@@ -21,14 +21,13 @@ use core::ptr::{self, NonNull};
 
 use buddy_heap::{GrowableHeap, Limits, Outcome, Stats};
 
-use paging::PAGE_SIZE;
-use paging::utils::MEGABYTE;
-use paging::{MemoryAddr, VirtualAddr};
+use mmu::PAGE_SIZE;
+use mmu::{MemoryAddr, VirtualAddr};
 
 use super::direct_map::phys_to_virt;
 use super::frame;
 use crate::sync::IrqMutex;
-use crate::utils::ByteSize;
+use crate::utils::{ByteSize, MIB};
 
 pub use self_test::run as self_test;
 
@@ -36,14 +35,14 @@ pub use self_test::run as self_test;
 const ORDER: usize = 32;
 
 /// Bytes the heap is given at [`init`].
-const INITIAL_SIZE: usize = 8 * MEGABYTE;
+const INITIAL_SIZE: usize = 8 * MIB;
 
 /// Smallest amount added when the heap runs dry. Frames come from the pool a run at a
 /// time, so a smaller step would only scatter the heap across the pool.
-const GROW_STEP: usize = 2 * MEGABYTE;
+const GROW_STEP: usize = 2 * MIB;
 
 /// Ceiling on the whole heap, unless the machine is too small to spare it.
-const MAX_SIZE: usize = 64 * MEGABYTE;
+const MAX_SIZE: usize = 64 * MIB;
 
 /// Largest share of the frame pool the heap may ever hold, as a divisor.
 ///

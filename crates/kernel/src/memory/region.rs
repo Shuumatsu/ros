@@ -8,7 +8,7 @@
 //! [`Region::install`] validates before writing any PTE, rather than in a separate pass,
 //! so no caller can forget: there is one way to turn a `Region` into mappings.
 
-use paging::{
+use mmu::{
     FrameSource, MapError, Mapper, MemoryAddr, PhysAccess, PhysicalAddr, PteFlags, Scheme,
     VirtualAddr, page_size_at,
 };

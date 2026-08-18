@@ -1,6 +1,6 @@
 //! Compile-time page table used until the final kernel table is ready.
 
-use paging::{PAGE_OFFSET_BITS, PPN_BITS, PhysicalAddr, PteFlags, Satp, Scheme, Table};
+use mmu::{PAGE_OFFSET_BITS, PPN_BITS, PhysicalAddr, PteFlags, Satp, Scheme, Table};
 
 use super::{KernelScheme, direct_map};
 

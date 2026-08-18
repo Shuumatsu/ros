@@ -9,13 +9,13 @@
 //! what pairs every write with a TLB fence. A mapper handed out bare would let a caller
 //! install leaves the hardware never looks at.
 
-use paging::{FrameSource, LinearOffset, Mapper, PhysicalAddr, Satp, Scheme, Table};
+use mmu::{FrameSource, LinearOffset, Mapper, PhysicalAddr, Satp, Scheme, Table};
 
 use super::direct_map::{VA_OFFSET, phys_to_virt};
 use super::{KernelScheme, frame};
 use crate::arch::tlb;
 
-/// The kernel's one mapper flavour, binding the three choices [`paging`] leaves open: the
+/// The kernel's one mapper flavour, binding the three choices [`mmu`] leaves open: the
 /// translation scheme, where intermediate tables come from, and how a frame is reached.
 pub type KernelMapper<'a> = Mapper<'a, KernelScheme, TableFrames, LinearOffset>;
 

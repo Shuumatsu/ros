@@ -1,9 +1,11 @@
-//! Bit-field and alignment primitives shared across the paging structures.
+//! Bit-field and alignment primitives shared across the structures in this crate.
 //!
-//! Every structure in this crate is a packed bit-field over a `usize`
-//! (addresses and page-table entries alike). These helpers are the single
-//! place that knows how to read and write such fields, so no module hard-codes
-//! shift/mask arithmetic of its own.
+//! Every structure here is a packed bit-field over a `usize` (addresses and page-table
+//! entries alike). These helpers are the single place that knows how to read and write such
+//! a field, so no module hard-codes shift/mask arithmetic of its own.
+//!
+//! Crate-private: what this crate offers is the types built out of them. Callers reach the
+//! alignment helpers through [`MemoryAddr`](crate::MemoryAddr).
 
 const USIZE_BITS: usize = usize::BITS as usize;
 
@@ -31,11 +33,6 @@ pub const fn with_field(word: usize, shift: usize, width: usize, value: usize) -
     let m = mask(width) << shift;
     (word & !m) | ((value << shift) & m)
 }
-
-pub const KILOBYTE: usize = 1024;
-pub const MEGABYTE: usize = 1024 * KILOBYTE;
-pub const GIGABYTE: usize = 1024 * MEGABYTE;
-pub const TERABYTE: usize = 1024 * GIGABYTE;
 
 #[inline]
 pub const fn align_down(addr: usize, align: usize) -> usize {

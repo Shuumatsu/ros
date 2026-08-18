@@ -20,8 +20,8 @@ use core::num::NonZeroUsize;
 use frame_allocator::{FrameAllocator, FrameBlock, FrameRange, metadata_layout};
 use spin::Once;
 
-use paging::PAGE_SIZE;
-use paging::{MemoryAddr, PhysicalAddr};
+use mmu::PAGE_SIZE;
+use mmu::{MemoryAddr, PhysicalAddr};
 
 use super::direct_map;
 use super::phys_range::PhysRange;

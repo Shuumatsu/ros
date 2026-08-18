@@ -1,4 +1,10 @@
-//! RISC-V paging structures, independent of both the platform and the translation scheme.
+//! The RV64 memory-management unit: the page tables it walks, the `satp` register that
+//! arms it, and the address types its existence creates — independent of both the platform
+//! and the translation scheme.
+//!
+//! Translation is what makes a physical address something other than a pointer, so
+//! [`PhysicalAddr`] and [`VirtualAddr`] belong here, and code that never walks a table
+//! still names them to keep the two apart.
 //!
 //! All code is testable on the host machine without hardware dependencies.
 //!
@@ -23,11 +29,10 @@
 //! exists — and correct for a higher-half kernel, where a physical address is
 //! *not* a valid pointer.
 
-// `not(test)` as well as the feature: the host test modules use `Box` and `Vec` for
-// their arenas, so without it a plain `cargo test -p paging` fails to compile
-// (E0425/E0433) instead of running. That is the invocation `.cargo/config.toml`
-// documents, and it must work without an extra feature flag.
-#![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
+// `not(test)` rather than a plain `no_std`: the host test modules build their arenas out of
+// `Box` and `Vec`, so `cargo test -p mmu` — the invocation `.cargo/config.toml` documents —
+// has to compile against `std`.
+#![cfg_attr(not(test), no_std)]
 
 #[macro_use]
 extern crate static_assertions;
@@ -41,7 +46,7 @@ pub mod pte;
 pub mod satp;
 pub mod scheme;
 pub mod table;
-pub mod utils;
+pub(crate) mod utils;
 
 pub use access::{Identity, LinearOffset, PhysAccess};
 pub use addr::{MemoryAddr, PhysicalAddr, VirtualAddr};

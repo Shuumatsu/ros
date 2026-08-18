@@ -5,8 +5,8 @@
 //! file because it is test code, not allocator code, and the properties it pins
 //! (aligned, zeroed, distinct, re-zeroed on reuse) are worth reading as a list.
 
-use paging::MemoryAddr;
-use paging::PAGE_SIZE;
+use mmu::MemoryAddr;
+use mmu::PAGE_SIZE;
 
 use super::{alloc, alloc_contiguous, free};
 use crate::memory::direct_map::phys_to_virt;

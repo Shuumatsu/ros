@@ -4,7 +4,7 @@
 //! ties it to this machine: the names the device tree knows the chip by, and the alias its
 //! window is reached through.
 
-use paging::PhysicalAddr;
+use mmu::PhysicalAddr;
 use uart_16550::MmioSerialPort;
 
 /// The `compatible` strings this driver binds to, and the only place they appear — the tree

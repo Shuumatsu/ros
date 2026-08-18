@@ -55,7 +55,7 @@ pub(in crate::memory) mod heap;
 pub(in crate::memory) mod kernel_va;
 pub(in crate::memory) mod region;
 
-use paging::MemoryAddr;
+use mmu::MemoryAddr;
 
 use crate::utils::ByteSize;
 
@@ -70,7 +70,7 @@ use phys_range::PhysRange;
 /// `satp.MODE` [`address_space`] and [`boot_table`] write. None of them names a scheme of
 /// its own, so moving to Sv48 is this line plus `kernel.ld`'s `_va_offset` — which the
 /// boot entry already reconciles against [`direct_map::VA_OFFSET`] before it jumps high.
-pub type KernelScheme = paging::Sv39;
+pub type KernelScheme = mmu::Sv39;
 
 /// Bring the allocators up: physical frames, then the heap carved out of them.
 ///

@@ -13,12 +13,10 @@
 //!   | PPN 53:10 | RSW 9:8 | DAGUXWRV 7:0 |
 //! ```
 
-use crate::utils::{GIGABYTE, KILOBYTE, MEGABYTE};
-
 /// Bits of byte offset within a base page.
 pub const PAGE_OFFSET_BITS: usize = 12;
 /// Size of a base page in bytes.
-pub const PAGE_SIZE: usize = 4 * KILOBYTE;
+pub const PAGE_SIZE: usize = 1 << PAGE_OFFSET_BITS;
 
 /// Virtual-page-number index bits consumed per level.
 pub const VPN_BITS: usize = 9;
@@ -69,8 +67,10 @@ pub const GIGAPAGE: usize = page_size_at(2);
 const_assert_eq!(ENTRIES_PER_PAGE, 512);
 const_assert_eq!(ENTRIES_PER_PAGE * ENTRY_SIZE, PAGE_SIZE);
 const_assert_eq!(page_size_at(0), PAGE_SIZE);
-const_assert_eq!(SUPERPAGE, 2 * MEGABYTE);
-const_assert_eq!(GIGAPAGE, GIGABYTE);
+// The leaf sizes the spec names, against what the shifts above produce.
+const_assert_eq!(PAGE_SIZE, 4096);
+const_assert_eq!(SUPERPAGE, 2 * 1024 * 1024);
+const_assert_eq!(GIGAPAGE, 1024 * 1024 * 1024);
 // The ceiling is Sv57's width exactly: five VPN fields over a page offset.
 const_assert_eq!(PAGE_OFFSET_BITS + VPN_BITS * MAX_LEVELS, 57);
 const_assert_eq!(MAX_LEVELS, 5);

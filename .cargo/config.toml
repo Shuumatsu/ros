@@ -7,8 +7,8 @@
 # "cannot execute binary file". Spelling the target out makes cargo resolve the
 # [target.riscv64imac-unknown-none-elf].runner below.
 #
-# The alternative, a global [build] target, would force `paging`'s host unit tests
-# onto the riscv target too and break `cargo test -p paging`.
+# The alternative, a global [build] target, would force `mmu`'s host unit tests
+# onto the riscv target too and break `cargo test -p mmu`.
 krun = "run -p kernel --target riscv64imac-unknown-none-elf"
 kbuild = "build -p kernel --target riscv64imac-unknown-none-elf"
 

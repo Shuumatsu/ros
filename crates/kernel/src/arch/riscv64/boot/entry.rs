@@ -9,7 +9,7 @@
 //! PC-relative, but a jump table, a vtable or a `&'static str` is an *absolute* link-time
 //! address, and those are unmapped until translation is on.
 
-use paging::VirtualAddr;
+use mmu::VirtualAddr;
 
 use crate::memory::{boot_table, direct_map, layout};
 

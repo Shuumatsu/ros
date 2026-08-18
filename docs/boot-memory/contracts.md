@@ -19,9 +19,9 @@ is on.
 | fact | first copy | second copy | pinned by |
 |---|---|---|---|
 | direct-map base | `kernel.ld` `_va_offset` | `memory::direct_map::VA_OFFSET` | `enter_high`, which reads one label as both the VMA the linker wrote and the address it is running at, and parks instead of jumping high if the two do not differ by `VA_OFFSET` |
-| page size | `kernel.ld` `_page_size` | `paging::PAGE_SIZE` | `memory::layout::check`, by measuring the guard gap the linker actually built |
+| page size | `kernel.ld` `_page_size` | `mmu::PAGE_SIZE` | `memory::layout::check`, by measuring the guard gap the linker actually built |
 | boot stack geometry | `kernel.ld` places `.boot_stack` | `memory::stack::STRIDE` declares its size | `memory::stack::check` |
-| `satp` encoding | `paging::Satp::new` under `memory::KernelScheme::MODE` | `boot_table::SATP_TEMPLATE` + `SATP_ROOT_SHIFT`, which the entry's `srli`+`or` reassembles | a `const` assert in `memory::boot_table`, one root per PPN bit |
+| `satp` encoding | `mmu::Satp::new` under `memory::KernelScheme::MODE` | `boot_table::SATP_TEMPLATE` + `SATP_ROOT_SHIFT`, which the entry's `srli`+`or` reassembles | a `const` assert in `memory::boot_table`, one root per PPN bit |
 | handoff field offsets | `SecondaryHandoff`'s `#[repr(C)]` fields | the offsets the prologue's assembly loads | `offset_of!`, so the assembly cannot drift from the struct |
 | which sections exist | `kernel.ld`'s `SECTIONS` | the ranges `kernel_table` maps | `ASSERT`s at the foot of `kernel.ld`, at link time |
 
@@ -33,7 +33,7 @@ value, then measure what was really built rather than trusting the copy.
 | boundary | crossed as | so that |
 |---|---|---|
 | platform → `memory` | `memory::machine::MachineMemory` | `memory` reads no device tree; a board without an FDT means another builder and no change here |
-| `memory` → `paging` | `Scheme` (`memory::KernelScheme`), `FrameSource` (`address_space::TableFrames`) and `PhysAccess` (`LinearOffset(VA_OFFSET)`) | `paging` never allocates, never assumes a physical address is a pointer, and never assumes how deep a walk goes |
+| `memory` → `mmu` | `Scheme` (`memory::KernelScheme`), `FrameSource` (`address_space::TableFrames`) and `PhysAccess` (`LinearOffset(VA_OFFSET)`) | `mmu` never allocates, never assumes a physical address is a pointer, and never assumes how deep a walk goes |
 | `heap` → frames | `heap::Outcome::Grow { at_least }`, returned rather than fetched | the heap's lock is released before the frame allocator's is taken |
 | boot hart → secondary | `SecondaryHandoff`, release-published and acquire-read | SBI does not promise the start request orders the boot hart's writes |
 | page table → hardware | `AddressSpace::edit` / `walk`, never a bare `Mapper` | every write is followed by a fence; the hardware caches the *absence* of a translation too |

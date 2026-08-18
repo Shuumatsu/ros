@@ -97,7 +97,7 @@ const_assert_eq!(Sv57::LEVELS, MAX_LEVELS);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::{GIGABYTE, TERABYTE};
+    use crate::geometry::GIGAPAGE;
 
     #[test]
     fn each_scheme_derives_its_own_geometry_from_the_level_count() {
@@ -112,15 +112,15 @@ mod tests {
         assert_eq!(Sv48::MODE, Mode::Sv48);
         assert_eq!(Sv57::MODE, Mode::Sv57);
 
-        assert_eq!(Sv39::ROOT_PAGE, GIGABYTE, "an Sv39 root leaf is a gigapage");
-        assert_eq!(Sv48::ROOT_PAGE, 512 * GIGABYTE);
+        assert_eq!(Sv39::ROOT_PAGE, GIGAPAGE, "an Sv39 root leaf is a gigapage");
+        assert_eq!(Sv48::ROOT_PAGE, 512 * GIGAPAGE);
     }
 
     /// The kernel's high half is this, and it is where `direct_map` takes its window from.
     #[test]
     fn a_canonical_half_is_the_root_slots_it_holds() {
-        assert_eq!(Sv39::HALF_SPAN, 256 * GIGABYTE, "Sv39 gives a kernel 256 GiB");
-        assert_eq!(Sv48::HALF_SPAN, 128 * TERABYTE);
+        assert_eq!(Sv39::HALF_SPAN, 256 * GIGAPAGE, "Sv39 gives a kernel 256 GiB");
+        assert_eq!(Sv48::HALF_SPAN, 128 * 1024 * GIGAPAGE, "Sv48 gives it 128 TiB");
     }
 
     #[test]

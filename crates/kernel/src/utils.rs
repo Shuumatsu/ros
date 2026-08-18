@@ -1,12 +1,19 @@
 //! Small helpers with no subsystem of their own.
 //!
-//! Both exist because the boot log is read by a human: [`ByteSize`] renders a byte count
-//! the way a page multiple should read, and [`truncated`] fits a firmware-supplied name
-//! into fixed storage without panicking on it.
+//! [`KIB`] and its multiples are the kernel's one spelling of a binary unit: every size
+//! constant is written in them and [`ByteSize`] prints in them. The two functions exist
+//! because the boot log is read by a human — [`ByteSize`] renders a byte count the way a
+//! page multiple should read, and [`truncated`] fits a firmware-supplied name into fixed
+//! storage without panicking on it.
 
 use core::fmt;
 
 use heapless::String;
+
+/// Binary units. A page size is `mmu`'s to state; these are for the sizes a kernel chooses.
+pub const KIB: usize = 1024;
+pub const MIB: usize = 1024 * KIB;
+pub const GIB: usize = 1024 * MIB;
 
 /// Copy `name` into a fixed-capacity string, truncating at a character boundary.
 ///
@@ -33,9 +40,6 @@ pub struct ByteSize(pub usize);
 
 impl fmt::Display for ByteSize {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const KIB: usize = 1024;
-        const MIB: usize = KIB * 1024;
-        const GIB: usize = MIB * 1024;
         // Largest first: the first unit that divides the count exactly wins.
         const UNITS: [(usize, &str); 3] = [(GIB, "GiB"), (MIB, "MiB"), (KIB, "KiB")];
 

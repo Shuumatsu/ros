@@ -9,7 +9,7 @@
 //! `sbi-rt`'s `legacy` feature stays off: v0.1 passes a hart mask by pointer and never
 //! says which address space it is in.
 
-use paging::PhysicalAddr;
+use mmu::PhysicalAddr;
 use sbi_spec::hsm::hart_state;
 
 /// What firmware returns when it refuses a call. Re-exported so a caller can name a

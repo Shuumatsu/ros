@@ -5,7 +5,7 @@
 //! and the first real consumer is the kernel page table's own region list — so without
 //! this, a fault would land during page-table construction, nowhere near its cause.
 
-use paging::PAGE_SIZE;
+use mmu::PAGE_SIZE;
 
 use super::{Stats, stats};
 use crate::utils::ByteSize;

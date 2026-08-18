@@ -80,7 +80,7 @@ pub struct Unmapped {
 
 impl Unmapped {
     /// Bytes the leaf covered.
-    pub fn len(&self) -> usize { page_size_at(self.level) }
+    pub fn bytes(&self) -> usize { page_size_at(self.level) }
 }
 
 /// Reconstruct the physical address a leaf at `level` maps `vaddr` to.
@@ -759,7 +759,7 @@ mod tests {
             Unmapped { frame: PhysicalAddr::new(base.bits() + PAGE_SIZE), level: 0 },
             "unmap must report the frame and the size that were there",
         );
-        assert_eq!(removed.len(), PAGE_SIZE, "a level-0 leaf covers one base page");
+        assert_eq!(removed.bytes(), PAGE_SIZE, "a level-0 leaf covers one base page");
         assert_eq!(mapper.translate(base.add(PAGE_SIZE)), None, "the leaf must be gone");
         assert_eq!(
             mapper.translate(base),
@@ -794,7 +794,7 @@ mod tests {
             Unmapped { frame: PhysicalAddr::new(0), level: 1 },
             "a 2 MiB leaf must report its own base and level 1",
         );
-        assert_eq!(removed.len(), two_mib, "a level-1 leaf covers 2 MiB");
+        assert_eq!(removed.bytes(), two_mib, "a level-1 leaf covers 2 MiB");
         assert_eq!(mapper.translate(va), None, "the whole superpage must be gone");
     }
 

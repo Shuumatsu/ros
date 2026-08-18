@@ -14,12 +14,10 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use paging::{PAGE_SIZE, SUPERPAGE};
-use paging::utils::GIGABYTE;
-use paging::{MemoryAddr, VirtualAddr};
+use mmu::{MemoryAddr, PAGE_SIZE, SUPERPAGE, VirtualAddr};
 
 use super::direct_map;
-use crate::utils::ByteSize;
+use crate::utils::{ByteSize, GIB};
 
 /// First virtual address this module hands out: one past the direct map's window.
 ///
@@ -106,7 +104,7 @@ pub fn is_reserved(va: VirtualAddr, len: usize) -> bool {
 }
 
 /// Free space below which [`report`] warns.
-const LOW_WATER: usize = GIGABYTE;
+const LOW_WATER: usize = GIB;
 
 /// Print what is taken and what is left.
 pub fn report() {

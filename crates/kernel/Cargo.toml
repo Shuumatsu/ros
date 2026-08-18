@@ -16,7 +16,7 @@ fdt-raw = "0.3.0"
 frame-allocator = { path = "../frame-allocator" }
 buddy-heap = { path = "../buddy-heap" }
 heapless = "0.9"
-paging = { path = "../paging", default-features = false }
+mmu = { path = "../mmu" }
 riscv = "0.16.0"
 sbi-rt = "0.0.4"
 sbi-spec = "0.0.9"

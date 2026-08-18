@@ -9,7 +9,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use paging::{MemoryAddr, PhysicalAddr, Satp, VirtualAddr};
+use mmu::{MemoryAddr, PhysicalAddr, Satp, VirtualAddr};
 
 use super::super::sbi::{self, HartState};
 use crate::memory::direct_map::virt_to_phys;

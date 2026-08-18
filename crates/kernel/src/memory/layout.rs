@@ -2,8 +2,8 @@
 //!
 //! Every name the linker script chooses lives here, `__global_pointer$` included.
 
-use paging::PAGE_SIZE;
-use paging::{MemoryAddr, VirtualAddr};
+use mmu::PAGE_SIZE;
+use mmu::{MemoryAddr, VirtualAddr};
 
 /// Declares every symbol `kernel.ld` defines, in one place.
 ///

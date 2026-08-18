@@ -12,7 +12,7 @@
 //! a [`time_counter`] tick is worth. Splitting them that way is what keeps an `asm!` block
 //! out of a module named after a concern rather than an instruction set.
 
-use paging::VirtualAddr;
+use mmu::VirtualAddr;
 
 pub(crate) mod boot;
 pub mod interrupts;

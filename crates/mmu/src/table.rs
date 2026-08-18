@@ -105,13 +105,16 @@ impl Table {
         flags: PteFlags,
     ) -> Self {
         let root_page = S::ROOT_PAGE;
-        assert!(va_offset % root_page == 0, "the high half must begin on a root-page boundary");
+        assert!(
+            va_offset.is_multiple_of(root_page),
+            "the high half must begin on a root-page boundary"
+        );
         assert!(
             vpn::<S>(VirtualAddr::new(va_offset), S::ROOT_LEVEL) == ROOT_ENTRIES_PER_HALF,
             "va_offset must be the base of the high canonical half"
         );
         assert!(
-            offset_span % root_page == 0,
+            offset_span.is_multiple_of(root_page),
             "the offset half is built from root pages, so its span must be a multiple of one"
         );
         let offset_slots = offset_span / root_page;
