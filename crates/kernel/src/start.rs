@@ -7,9 +7,15 @@
 //! The order in [`boot`] is this module's single contribution. No subsystem below knows
 //! it, and each is handed what it needs rather than looking it up, which is what keeps
 //! `device_tree`, `cpu` and `memory` free of dependencies on each other.
+//!
+//! Traps are the one part both entries owe equally, and in the same order: a vector before an
+//! interrupt source, since a source armed on a hart still carrying the boot stage's park
+//! vector is a hart that stops dead on its first tick.
 
 use crate::cpu;
 use crate::memory;
+use crate::time;
+use crate::trap;
 
 /// First ordinary Rust code on the boot hart.
 pub(crate) unsafe extern "C" fn boot(hartid: usize, dtb: usize) -> ! {
@@ -40,6 +46,11 @@ pub(crate) unsafe extern "C" fn boot(hartid: usize, dtb: usize) -> ! {
     memory::init_page_table(machine);
     println!("initializing memory completed");
 
+    // A vector first, then the sources — and both before the secondaries, so that the wait
+    // for them is the first thing the tick runs underneath.
+    trap::init();
+    time::timer::start();
+
     cpu::start_secondaries();
 
     kmain()
@@ -54,6 +65,10 @@ pub(crate) unsafe extern "C" fn secondary(hartid: usize, cpu_pointer: usize) -> 
         cpu::current().index()
     );
 
+    // Per hart, both of them: `stvec` and `sie` are CSRs, and the deadline is this hart's.
+    trap::init();
+    time::timer::start();
+
     kmain_ap()
 }
 
@@ -61,17 +76,25 @@ fn kmain() -> ! {
     println!("enter kmain");
 
     println!("This is my operating system!");
-    println!("[kmain] higher-half kernel is live at high VAs — parking.");
+    println!("[kmain] higher-half kernel is live at high VAs — idling on the timer.");
 
-    // A true halt, not an idle: `sstatus.SIE` is clear and no source is enabled, so
-    // nothing will wake this. Reaching here is the success condition for this phase.
-    crate::arch::wait_forever()
+    idle()
 }
 
 fn kmain_ap() -> ! {
     println!("enter kmain_ap (running on the kernel page table)");
 
-    // No scheduler to enter yet, so park. This becomes a real idle loop on its own once
-    // traps come back.
-    crate::arch::wait_forever()
+    idle()
+}
+
+/// What a hart does with no work: sleep until an interrupt, handle it, sleep again.
+///
+/// The loop is what makes it a wait rather than a halt — [`crate::arch::idle`] returns on
+/// every interrupt taken. It becomes the scheduler's idle task once there is something else
+/// to run; until then a tick is the only thing that wakes a hart, and reaching here on every
+/// hart is the success condition for this phase.
+fn idle() -> ! {
+    loop {
+        crate::arch::idle();
+    }
 }

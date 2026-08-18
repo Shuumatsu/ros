@@ -1,10 +1,12 @@
 //! RV64 privileged state: the instructions and CSRs the rest of the kernel reaches it
 //! through.
 //!
-//! One module per CSR group that has a rule attached — [`interrupts`] owns `sstatus.sie`,
-//! [`sbi`] the firmware calls, and [`tlb`] owns `satp` and `sfence.vma` for as long as
-//! ordinary Rust is running. [`boot`] writes both before that, since installing the first
-//! page table is what makes the kernel's own addresses resolve.
+//! One module per CSR group that has a rule attached — [`interrupts`] owns `sstatus.SIE` and
+//! `sie`, [`trap`] owns `stvec` and the CSRs that describe a trap, [`timer`] owns the next
+//! timer deadline, [`sbi`] the firmware calls, and [`tlb`] owns `satp` and `sfence.vma` for
+//! as long as ordinary Rust is running. [`boot`] writes `satp` and `stvec` before that, since
+//! installing the first page table is what makes the kernel's own addresses resolve, and a
+//! hart that faults on the way needs somewhere to stop.
 //!
 //! The loose instructions below have no CSR group of their own. Each is a bare register
 //! read or write whose *policy* belongs to a subsystem elsewhere: `cpu` decides that a
@@ -17,7 +19,9 @@ use mmu::VirtualAddr;
 pub(crate) mod boot;
 pub mod interrupts;
 pub mod sbi;
+pub mod timer;
 pub mod tlb;
+pub mod trap;
 
 /// An address in the caller's instruction stream.
 ///
@@ -81,10 +85,22 @@ pub fn time_counter() -> u64 {
     ticks
 }
 
-/// Park this hart for good. The one parking primitive: `abort` and both `kmain`s
-/// call it rather than open-coding the loop.
+/// Wait for this hart's next interrupt. What an idle hart does, and the reason it costs
+/// nothing while it has no work: the hart stops fetching until something is pending.
+///
+/// Returns as soon as an interrupt is taken, so a caller with nothing to run loops on it.
+#[inline(always)]
+pub fn idle() { riscv::asm::wfi() }
+
+/// Park this hart for good, the fatal path's last instruction.
+///
+/// Masks interrupts first, so that "for good" is true: a pending timer would otherwise wake
+/// the hart, run a handler on a kernel that has already given up, and return here. `abort`
+/// is the caller; a hart with nothing to do calls [`idle`] instead.
 #[inline(always)]
 pub fn wait_forever() -> ! {
+    // SAFETY: this hart is not coming back, so nothing is left to lose by silencing it.
+    unsafe { interrupts::disable() };
     loop {
         riscv::asm::wfi();
     }

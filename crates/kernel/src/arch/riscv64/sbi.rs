@@ -23,6 +23,15 @@ pub use sbi_spec::binary::Error;
 /// producing one is the problem. Errors go nowhere, because the caller has nowhere left.
 pub fn console_write_byte(byte: u8) { let _ = sbi_rt::console_write_byte(byte); }
 
+/// Ask for a supervisor timer interrupt when the `time` counter reaches `deadline`.
+///
+/// The TIME extension, which is how a supervisor arms a timer at all: `mtimecmp` is the
+/// M-mode CLINT's. Setting a deadline also clears any timer interrupt already pending, so
+/// this is both the arm and the acknowledgement. [`super::timer`] is the only caller.
+pub fn set_timer(deadline: u64) -> Result<(), Error> {
+    sbi_rt::set_timer(deadline).into_result().map(|_| ())
+}
+
 /// A hart's state, as [`hart_get_status`] reports it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HartState {

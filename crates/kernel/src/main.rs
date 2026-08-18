@@ -21,6 +21,7 @@ mod memory;
 mod start;
 mod sync;
 mod time;
+mod trap;
 mod utils;
 
 #[panic_handler]
