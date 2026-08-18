@@ -34,28 +34,27 @@ use mmu::PhysicalAddr;
 use crate::memory::machine::MachineMemory;
 use crate::memory::{direct_map, layout};
 
-/// Parse the device tree at `dtb_ptr` and record the hardware the kernel needs.
+/// Parse the device tree at `base` and record the hardware the kernel needs.
 ///
 /// A usable tree is part of the boot contract: a null pointer, a blob the direct map cannot
 /// reach, an unparseable blob, a `/memory` without the kernel in it and a missing UART all
 /// panic rather than let the kernel limp on wrong addresses.
 ///
 /// # Safety
-/// `dtb_ptr` must be a valid, readable FDT blob (as passed in `a1`) that stays mapped and
+/// `base` must begin a valid, readable FDT blob (as passed in `a1`) that stays mapped and
 /// unmodified for the duration of this call — it is borrowed in place. Nothing outlives the
 /// call: [`table`] keeps copies.
-pub unsafe fn init(dtb_ptr: usize) {
+pub unsafe fn init(base: PhysicalAddr) {
     assert!(
         table::get().is_none(),
         "device_tree::init called twice; the table is already published"
     );
-    if dtb_ptr == 0 {
+    if base.bits() == 0 {
         panic!(
             "[dtb] no device tree pointer in a1 — previous boot stage violated the boot contract"
         );
     }
 
-    let base = PhysicalAddr::new(dtb_ptr);
     // The blob carries its own length, so the header is what says how far the rest reaches,
     // and nothing may borrow the rest until that reach has been checked: `Fdt::from_ptr`
     // builds a slice over the whole blob, so it comes after the second check.
@@ -65,13 +64,13 @@ pub unsafe fn init(dtb_ptr: usize) {
     // that stays mapped and unmodified, and `blob` is its direct-map alias. Only the
     // header is read here, which the check above covers.
     let header = unsafe { Header::from_ptr(blob) }.unwrap_or_else(|error| {
-        panic!("[dtb] failed to parse the FDT header at {dtb_ptr:#x}: {error:?}")
+        panic!("[dtb] failed to parse the FDT header at {base:#x}: {error:?}")
     });
     let size = header.totalsize as usize;
     direct_map::require_reach("the device tree blob", base, size);
     // SAFETY: as above, and the whole blob is now known to lie inside the direct map.
     let fdt = unsafe { Fdt::from_ptr(blob) }
-        .unwrap_or_else(|error| panic!("[dtb] failed to parse FDT at {dtb_ptr:#x}: {error:?}"));
+        .unwrap_or_else(|error| panic!("[dtb] failed to parse FDT at {base:#x}: {error:?}"));
 
     // Which `/memory` bank is ours: the one holding our own load address.
     let kernel_pa = direct_map::virt_to_phys(layout::text_start());

@@ -12,6 +12,8 @@
 //! interrupt source, since a source armed on a hart still carrying the boot stage's park
 //! vector is a hart that stops dead on its first tick.
 
+use mmu::PhysicalAddr;
+
 use crate::cpu;
 use crate::memory;
 use crate::time;
@@ -28,7 +30,7 @@ pub(crate) unsafe extern "C" fn boot(hartid: usize, dtb: usize) -> ! {
 
     // The DTB from a1 fills the device table, which is where the console learns its UART
     // base. Zero-allocation, so it is safe before the heap exists.
-    unsafe { crate::device_tree::init(dtb) };
+    unsafe { crate::device_tree::init(PhysicalAddr::new(dtb)) };
     crate::device_tree::summary();
     cpu::print_info();
 
