@@ -1,6 +1,6 @@
-//! `hello` — the first user program: print a line, then exit.
+//! `hello` — the first user program: print a line, run for a while, then exit.
 //!
-//! The program is the two calls in [`_start`]. What it takes to make them is [`abi::call`]'s, and
+//! The program is the three calls in [`_start`]. What it takes to make them is [`abi::call`]'s, and
 //! what happens before `_start` is the kernel's loader's.
 
 #![no_std]
@@ -18,7 +18,25 @@ use abi::syscall::STDOUT;
 #[unsafe(no_mangle)]
 extern "C" fn _start() -> ! {
     write(STDOUT, b"hello, world\n");
+    spin();
     exit(0)
+}
+
+/// Iterations of [`spin`]: enough to cross several timer interrupts on an emulated machine, and
+/// short enough that the program still finishes while a boot log is being read.
+const SPINS: usize = 5_000_000;
+
+/// Run for long enough to be interrupted, and no longer.
+///
+/// A hart takes a timer interrupt every ten milliseconds, so a program that exits as soon as it
+/// starts never shows that one can be taken in user mode and returned from. The bound is what keeps
+/// this a demonstration rather than a hang.
+fn spin() {
+    let mut sum = 0usize;
+    for step in 0..SPINS {
+        sum = sum.wrapping_add(step);
+    }
+    core::hint::black_box(sum);
 }
 
 /// Nowhere to report to but the kernel, so a panic is an exit with a status that says so.
