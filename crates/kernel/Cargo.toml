@@ -12,6 +12,7 @@ name = "kernel"
 path = "src/main.rs"
 
 [dependencies]
+abi = { path = "../abi" }
 hello = { path = "../../user/hello", artifact = "bin", target = "riscv64imac-unknown-none-elf" }
 fdt-raw = "0.3.0"
 frame-allocator = { path = "../frame-allocator" }

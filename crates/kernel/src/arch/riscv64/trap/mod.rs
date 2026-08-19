@@ -1,10 +1,12 @@
 //! Where a supervisor trap lands, and what the CSRs say it was.
 //!
-//! Two halves. [`frame`] owns the vector and the register file it saves; this file owns
-//! `stvec`, `scause`, `sepc` and `stval` — the CSRs that say a trap happened and what kind.
-//! Neither decides anything: [`crate::trap`] does, on a [`Cause`] this module hands it, so
-//! the ISA layer names every trap the hardware can deliver and the kernel layer names what
-//! each one costs.
+//! Two halves. [`frame`] owns the vector, the register file it saves and the return that puts
+//! one back; this file owns `stvec`, `scause`, `sepc` and `stval` — the CSRs that say a trap
+//! happened and what kind — together with `sscratch`, which is how the vector finds the hart it
+//! is running on, and `scounteren`, whose bits decide whether a counter read from user mode is a
+//! trap at all. Neither half decides anything: [`crate::trap`] does, on a [`Cause`] this module
+//! hands it, so the ISA layer names every trap the hardware can deliver and the kernel layer
+//! names what each one costs.
 //!
 //! Direct mode, so every cause arrives at one entry. Vectored mode would spread the
 //! interrupt causes over a table of jumps and buy nothing while the dispatch below is a
@@ -16,11 +18,11 @@ use core::fmt;
 
 use riscv::interrupt::Trap;
 use riscv::interrupt::supervisor::{Exception, Interrupt};
-use riscv::register::{scause, sepc, stval, stvec};
+use riscv::register::{scause, scounteren, sepc, sscratch, stval, stvec};
 
 use mmu::{MemoryAddr, VirtualAddr};
 
-pub use frame::TrapFrame;
+pub use frame::{TrapFrame, resume};
 
 /// A trap, decoded into the terms the kernel dispatches on.
 ///
@@ -31,6 +33,11 @@ pub enum Cause {
     Timer,
     Software,
     External,
+    /// A process asking the kernel for something: `ecall` from user mode.
+    ///
+    /// Its own variant rather than one of the [`Fault`]s, because it is the one exception that
+    /// is not an error — the interrupted context resumes, one instruction along.
+    Syscall,
     /// A trap the kernel has no way to resume from.
     Fault(Fault),
 }
@@ -81,6 +88,37 @@ pub fn install() {
     unsafe { stvec::write(stvec::Stvec::new(vector.bits(), stvec::TrapMode::Direct)) };
 }
 
+/// Point this hart's `sscratch` at its control block.
+///
+/// Written once, when the hart adopts the block, and read by every trap after it. The vector
+/// arrives with every register holding the interrupted context, so a CSR is the only place it can
+/// find anything at all — which is why this is the copy that has to be right.
+///
+/// # Safety
+///
+/// `control_block` must be the calling hart's [`Cpu`](crate::cpu::Cpu), valid for as long as the
+/// kernel runs. The vector spills a register into it and restores `tp` from it without being able
+/// to check either.
+pub unsafe fn set_control_block(control_block: usize) {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { sscratch::write(control_block) };
+}
+
+/// Let user mode read the counters `rdcycle`, `rdtime` and `rdinstret` name.
+///
+/// Per hart, because `scounteren` is a CSR, and alongside the vector because both are what a hart
+/// owes before user mode can run on it: without these bits one of those reads is an illegal
+/// instruction rather than a read. Writes the whole register, so the counters this kernel has
+/// never heard of stay off.
+pub fn allow_user_counters() {
+    let mut counters = scounteren::Scounteren::from_bits(0);
+    counters.set_cy(true);
+    counters.set_tm(true);
+    counters.set_ir(true);
+    // SAFETY: the counters are read-only to user mode and reading one has no side effect.
+    unsafe { scounteren::write(counters) };
+}
+
 /// What just happened, as this hart's CSRs report it.
 fn cause() -> Cause {
     let scause = scause::read();
@@ -89,6 +127,7 @@ fn cause() -> Cause {
         Ok(Trap::Interrupt(Interrupt::SupervisorTimer)) => Cause::Timer,
         Ok(Trap::Interrupt(Interrupt::SupervisorSoft)) => Cause::Software,
         Ok(Trap::Interrupt(Interrupt::SupervisorExternal)) => Cause::External,
+        Ok(Trap::Exception(Exception::UserEnvCall)) => Cause::Syscall,
         Ok(Trap::Exception(exception)) => {
             Cause::Fault(Fault::current(scause.bits(), Some(exception)))
         }

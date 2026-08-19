@@ -21,6 +21,7 @@ mod memory;
 mod process;
 mod start;
 mod sync;
+mod syscall;
 mod time;
 mod trap;
 mod utils;

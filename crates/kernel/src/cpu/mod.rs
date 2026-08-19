@@ -22,8 +22,10 @@
 //! about this machine's processors, and a memory subsystem holding the roster would be
 //! answering a question `cpu` is asked.
 
+use core::mem::offset_of;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use mmu::VirtualAddr;
 use spin::Once;
 
 use crate::arch::{self, boot};
@@ -32,7 +34,7 @@ use crate::memory::stack::{self, Stack};
 use crate::println;
 use crate::time;
 
-/// Per-hart control block, and where per-hart state lives. `tp` points at this hart's.
+/// Per-hart control block, and where per-hart state lives.
 ///
 /// A pointer rather than a bare id, as Linux does: `tp` is the one register that is
 /// per-hart for free, and spending it on an integer already handed to us in `a0` would
@@ -41,6 +43,11 @@ use crate::time;
 /// alternative — an array of its own, subscripted by [`Cpu::index`] — is a second per-hart
 /// storage scheme, one index lookup deeper and with every hart's copy packed into the same
 /// cache line.
+///
+/// Two registers point here, and they are one fact. `tp` is what ordinary kernel code reads;
+/// `sscratch` is what the trap vector reads, because a trap from user mode arrives with the
+/// process's `tp` and no free register to look anything up with. The vector restores `tp` from
+/// `sscratch`, so `sscratch` is the copy that has to be right and `tp` is derived from it.
 ///
 /// Atomics because the block is shared state as far as the compiler is concerned. They are
 /// never contended: a `&Cpu` can only be obtained from [`current`], so a hart reaches nothing
@@ -54,14 +61,39 @@ pub struct Cpu {
     index: AtomicUsize,
     /// Timer interrupts this hart has taken, from [`crate::time::timer`].
     ticks: AtomicU64,
+    /// Where a trap from user mode builds its frame: the top of the running process's kernel
+    /// stack, and zero while this hart runs nothing but the kernel.
+    ///
+    /// The process's stack rather than the hart's, because a hart in user mode has left its own
+    /// behind: the kernel it re-enters is the one that belongs to what it was running.
+    kernel_stack_top: AtomicUsize,
+    /// The word the trap vector spills a register into.
+    ///
+    /// The vector arrives with every register holding the interrupted context and nowhere to put
+    /// one, so borrowing a register through this is the first thing it does. Written and read by
+    /// that assembly alone.
+    trap_spill: AtomicUsize,
+    /// The process running on this hart: [`crate::process`]'s control block, which is the only
+    /// module that knows what the pointer points at, and zero for none.
+    process: AtomicUsize,
 }
 
 impl Cpu {
+    /// Where the trap vector finds the two words it needs.
+    ///
+    /// Offsets, because assembly cannot name a field, and taken with [`offset_of`] so a vector
+    /// cannot go on addressing a field this type has moved.
+    pub const TRAP_SPILL: usize = offset_of!(Cpu, trap_spill);
+    pub const KERNEL_STACK_TOP: usize = offset_of!(Cpu, kernel_stack_top);
+
     const fn new() -> Self {
         Self {
             hartid: AtomicUsize::new(0),
             index: AtomicUsize::new(0),
             ticks: AtomicU64::new(0),
+            kernel_stack_top: AtomicUsize::new(0),
+            trap_spill: AtomicUsize::new(0),
+            process: AtomicUsize::new(0),
         }
     }
 
@@ -76,6 +108,27 @@ impl Cpu {
         let ticks = self.ticks.load(Ordering::Relaxed) + 1;
         self.ticks.store(ticks, Ordering::Relaxed);
         ticks
+    }
+
+    /// Take up a process on this hart: the control block the trap path reaches it by, and the
+    /// kernel stack a trap from it lands on.
+    ///
+    /// One call for both, since a hart holding either without the other is one whose next trap
+    /// from user mode has no stack to push onto or no process to charge.
+    pub fn enter_process(&self, control_block: usize, kernel_stack_top: VirtualAddr) {
+        self.kernel_stack_top.store(kernel_stack_top.bits(), Ordering::Relaxed);
+        self.process.store(control_block, Ordering::Relaxed);
+    }
+
+    /// Give up the process this hart was running.
+    pub fn leave_process(&self) {
+        self.process.store(0, Ordering::Relaxed);
+        self.kernel_stack_top.store(0, Ordering::Relaxed);
+    }
+
+    /// The process running on this hart, or `None`.
+    pub fn process(&self) -> Option<usize> {
+        Some(self.process.load(Ordering::Relaxed)).filter(|&block| block != 0)
     }
 }
 
@@ -147,10 +200,16 @@ pub fn try_hart_id() -> Option<usize> { try_current().map(Cpu::hartid) }
 /// Secondary harts that have reached [`crate::start::secondary`].
 static ONLINE: AtomicUsize = AtomicUsize::new(0);
 
+/// Adopt `cpu` as this hart's control block, in both registers that point at one.
 fn install_current(cpu: &'static Cpu) {
+    let pointer = cpu as *const Cpu as usize;
     // SAFETY: a `&'static Cpu` out of `CPU_SLOTS`, which is what every reader of `tp`
     // expects to find there.
-    unsafe { arch::set_thread_pointer(cpu as *const Cpu as usize) };
+    unsafe { arch::set_thread_pointer(pointer) };
+    // SAFETY: the same block, which is what the trap vector expects to spill into and to
+    // restore `tp` from. Done here so that no trap can be taken on a hart that has one register
+    // pointing at its block and the other at whatever firmware left.
+    unsafe { arch::trap::set_control_block(pointer) };
 }
 
 /// Initialize slot 0 and make it current before diagnostics can panic.

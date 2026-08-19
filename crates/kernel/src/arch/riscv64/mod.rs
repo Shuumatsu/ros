@@ -5,11 +5,11 @@
 //! to be resumed, which is as ISA-specific as any of them.
 //!
 //! One module per CSR group that has a rule attached — [`interrupts`] owns `sstatus.SIE` and
-//! `sie`, [`trap`] owns `stvec` and the CSRs that describe a trap, [`timer`] owns the next
-//! timer deadline, [`sbi`] the firmware calls, and [`tlb`] owns `satp` and `sfence.vma` for
-//! as long as ordinary Rust is running. [`boot`] writes `satp` and `stvec` before that, since
-//! installing the first page table is what makes the kernel's own addresses resolve, and a
-//! hart that faults on the way needs somewhere to stop.
+//! `sie`, [`user_access`] owns `sstatus.SUM`, [`trap`] owns `stvec` and the CSRs that describe a
+//! trap, [`timer`] owns the next timer deadline, [`sbi`] the firmware calls, and [`tlb`] owns
+//! `satp` and `sfence.vma` for as long as ordinary Rust is running. [`boot`] writes `satp` and
+//! `stvec` before that, since installing the first page table is what makes the kernel's own
+//! addresses resolve, and a hart that faults on the way needs somewhere to stop.
 //!
 //! The loose instructions below have no CSR group of their own. Each is a bare register
 //! read or write whose *policy* belongs to a subsystem elsewhere: `cpu` decides that a
@@ -29,6 +29,7 @@ pub mod sbi;
 pub mod timer;
 pub mod tlb;
 pub mod trap;
+pub mod user_access;
 
 /// Bytes in a cache block: the unit two harts must not share to stay out of each other's way.
 ///

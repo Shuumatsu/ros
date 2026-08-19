@@ -3,9 +3,11 @@
 //! [`super::kernel_table`]'s counterpart on the other side of the privilege boundary: the same
 //! [`Region`] machinery, the same audit, a different policy. Every leaf carries `USER`, and the
 //! kernel's half is *shared in* rather than built — so a trap taken in user mode lands on a vector
-//! the running table already maps, and this kernel needs no trampoline page.
+//! and a kernel stack the running table already maps, and this kernel needs no trampoline page.
 //!
-//! What a segment is comes from whoever read the executable. Nothing here parses anything.
+//! What a segment is comes from whoever read the executable. Nothing here parses anything. What a
+//! process's *stack* is has no image to come from, so it is this module's: the image says where its
+//! own pieces go, and everything else in the low half is the kernel's to place.
 
 use alloc::vec::Vec;
 
@@ -14,12 +16,25 @@ use mmu::{MemoryAddr, PAGE_SIZE, PteFlags, VirtualAddr};
 use super::address_space::AddressSpace;
 use super::direct_map::phys_to_virt;
 use super::region::{self, Region};
-use super::{frame, kernel_table};
+use super::stack::Stack;
+use super::{frame, kernel_table, user};
 use crate::arch;
 
 /// The address space id a user image gets. One process at a time, so the id is a constant rather
 /// than something allocated.
 const USER_ASID: usize = 1;
+
+/// A process's initial `sp`, and one past the top of its stack.
+///
+/// The top of the user half, so the stack grows down from as far as it can get from the image at
+/// the bottom: everything a process may come to want in between — a heap, a mapping of its own —
+/// has the whole span to grow into. Nothing is mapped below the lowest stack page, so an overflow
+/// faults rather than reaching whatever was placed next.
+pub const STACK_TOP: VirtualAddr = user::END;
+
+/// Stack bytes a process gets, which is what a program with no recursion and no buffers of its own
+/// needs.
+const STACK_SIZE: usize = 4 * PAGE_SIZE;
 
 /// One loadable piece of an executable, as this kernel needs it.
 pub struct Segment<'a> {
@@ -34,18 +49,23 @@ pub struct Segment<'a> {
     pub rights: PteFlags,
 }
 
-/// Build an address space for `segments`: the kernel's half, plus one region per segment.
+/// Build an address space for `segments`: the kernel's half, one region per segment, and a stack.
+///
+/// `kernel_stack` is the stack a trap from this process will land on. It belongs to the half that
+/// is shared in rather than built, so the audit below is what proves it came across — a stack the
+/// user table did not map is a first trap with nowhere to push and nothing left to report from.
 ///
 /// # Panics
 ///
-/// If the kernel table is not live yet, if there are no frames for a segment, if two segments
-/// share a page, or if a mapping does not audit.
-pub fn build(segments: &[Segment<'_>]) -> AddressSpace {
+/// If the kernel table is not live yet, if there are no frames for a segment or the stack, if two
+/// segments share a page, or if a mapping does not audit.
+pub fn build(segments: &[Segment<'_>], kernel_stack: &Stack) -> AddressSpace {
     let mut space = AddressSpace::new(USER_ASID);
     kernel_table::with(|kernel| space.share_upper_half_from(kernel))
         .expect("user_table::build before the kernel page table was published");
 
-    let regions: Vec<Region<'static>> = segments.iter().map(load).collect();
+    let mut regions: Vec<Region<'static>> = segments.iter().map(load).collect();
+    regions.push(stack_region());
     region::audit_disjoint(&regions);
 
     space.edit(|mapper| {
@@ -61,11 +81,15 @@ pub fn build(segments: &[Segment<'_>]) -> AddressSpace {
         }
 
         // The kernel's half really came across. A trap taken while this table is live lands on the
-        // vector and pushes onto a kernel stack, both of which live in the half that was shared
-        // rather than built — so this is the check that says the sharing worked.
-        for (what, va) in
-            [("trap vector", arch::trap::vector()), ("stack pointer", arch::sp())]
-        {
+        // vector and pushes onto the process's kernel stack, and returns from the stack it was
+        // taken on — all three live in the half that was shared rather than built, so these are
+        // the checks that say the sharing worked. The stack top is one past the last mapped byte,
+        // which is why the address asked about is the byte below it.
+        for (what, va) in [
+            ("trap vector", arch::trap::vector()),
+            ("process kernel stack", kernel_stack.top().sub(1)),
+            ("stack pointer", arch::sp()),
+        ] {
             assert!(
                 mapper.translate(va).is_some(),
                 "the user table does not map the {what} at {va:#x}; the kernel half did not come \
@@ -105,14 +129,47 @@ fn load(segment: &Segment<'_>) -> Region<'static> {
         );
     }
 
-    let writable = segment.rights.contains(PteFlags::WRITE);
-    let mut flags = segment.rights | PteFlags::USER | PteFlags::ACCESS;
-    if writable {
-        // `D` means "has been written", and the loader just did.
-        flags |= PteFlags::DIRTY;
+    Region {
+        name: name_for(segment.rights),
+        va: start,
+        pa: frames.leak(),
+        len: span,
+        level: 0,
+        flags: leaf_flags(segment.rights),
     }
+}
 
-    Region { name: name_for(segment.rights), va: start, pa: frames.leak(), len: span, level: 0, flags }
+/// The mapping a process's stack gets: [`STACK_SIZE`] bytes below [`STACK_TOP`], writable and
+/// never executable.
+///
+/// The frames arrive zeroed from [`frame::alloc_contiguous`], which is all the initialization a
+/// stack needs.
+fn stack_region() -> Region<'static> {
+    let frames = frame::alloc_contiguous(STACK_SIZE / PAGE_SIZE)
+        .unwrap_or_else(|| panic!("no contiguous RAM for a {STACK_SIZE:#x}-byte user stack"));
+
+    Region {
+        name: "user stack",
+        va: STACK_TOP.sub(STACK_SIZE),
+        pa: frames.leak(),
+        len: STACK_SIZE,
+        level: 0,
+        flags: leaf_flags(PteFlags::READ_WRITE),
+    }
+}
+
+/// `rights` as a leaf in a user address space: `USER`, plus the status bits every one of them
+/// carries.
+///
+/// `A` is pre-set everywhere so the hardware never writes back into the table, and `D` wherever a
+/// write is allowed — it means "has been written", and the first write will not be observed.
+fn leaf_flags(rights: PteFlags) -> PteFlags {
+    let status = if rights.contains(PteFlags::WRITE) {
+        PteFlags::ACCESS.union(PteFlags::DIRTY)
+    } else {
+        PteFlags::ACCESS
+    };
+    rights | PteFlags::USER | status
 }
 
 /// What to call a segment in the boot log, from the only thing an ELF says about it.

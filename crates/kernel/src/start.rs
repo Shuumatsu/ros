@@ -56,11 +56,6 @@ pub(crate) unsafe extern "C" fn boot(hartid: usize, dtb: usize) -> ! {
 
     cpu::start_secondaries();
 
-    // No hart runs it yet: this proves the loader against the image the build produced, and the
-    // address space it hands back is what `process::run` will enter.
-    let (space, entry) = process::load();
-    println!("[process] hello: entry {entry:#x}, satp {:#x}", space.satp().bits());
-
     kmain()
 }
 
@@ -84,6 +79,13 @@ fn kmain() -> ! {
     println!("enter kmain");
 
     println!("This is my operating system!");
+
+    // The one program this kernel has. `run` blocks, so the hart is back here with the process gone
+    // and the kernel's own page table live again — and then it idles, because a kernel that
+    // outlives the programs it runs is the point.
+    let status = process::run();
+    println!("[kmain] hello exited with status {status}");
+
     println!("[kmain] higher-half kernel is live at high VAs — idling on the timer.");
 
     idle()

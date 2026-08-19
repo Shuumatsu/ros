@@ -247,6 +247,23 @@ pub fn init(mmio: &[PhysRange]) {
     println!("[memory] kernel page table live on this hart (satp {:#x})", satp.bits());
 }
 
+/// Make the kernel's own table live on the calling hart again.
+///
+/// The way back from a user address space. That space shares this table's upper half, so the hart's
+/// PC and stack pointer keep their frames across the write and the running context survives it.
+///
+/// # Panics
+///
+/// If no table has been published, which means this ran before [`init`].
+pub fn activate() {
+    with(|space| {
+        // SAFETY: the table this hart is running shares its upper half with this one, and the
+        // running PC and stack pointer are both in that half.
+        unsafe { space.activate() };
+    })
+    .expect("kernel_table::activate before the kernel page table was published");
+}
+
 /// Edit or walk the kernel address space; the way in for anything that maps after boot.
 ///
 /// `None` until [`init`] has finished — during it the space is still a local, so a
