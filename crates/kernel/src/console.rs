@@ -7,6 +7,11 @@
 //!
 //! No address is hardcoded. Until the device tree yields a UART base, both paths are the
 //! SBI console, which is what lets the earliest code print at all.
+//!
+//! Firmware's console is the same chip, written from M-mode under a lock this side does not
+//! share, so an M-mode trap report interleaves with these writes byte by byte. The overlap
+//! costs ordering rather than content: [`uart16550::bind`] adopts the port instead of
+//! reprogramming it, and every line carries its own `[hart N]`, so a shuffled log still reads.
 
 use core::fmt::{self, Write};
 use uart_16550::MmioSerialPort;
@@ -30,8 +35,8 @@ fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
         && let Some(base) = device_tree::uart_base()
     {
         // SAFETY: `base` is the window of a node the tree matched against this driver's own
-        // `compatible` list, mapped R+W, and this is the only port built for it — the `UART`
-        // mutex keeps that exclusive.
+        // `compatible` list, mapped R+W, and this is the only port this kernel builds for it —
+        // the `UART` mutex keeps that exclusive.
         *port = Some(unsafe { uart16550::bind(base) });
     }
     match port {
