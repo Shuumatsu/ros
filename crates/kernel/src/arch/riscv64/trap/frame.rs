@@ -67,15 +67,15 @@ macro_rules! define_frame {
             $(pub $reg: usize,)*
         }
 
-        /// The register file, four to a line, `\r\n` because a serial console reads it.
+        /// The register file, four to a line.
         impl fmt::Display for TrapFrame {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "  sepc {:#018x}  sstatus {:#018x}", self.sepc, self.sstatus)?;
-                write!(f, "\r\n  {:>3} {:#018x}", "sp", self.sp)?;
+                write!(f, "\n  {:>3} {:#018x}", "sp", self.sp)?;
 
                 let mut written = 1;
                 $(
-                    f.write_str(if written % 4 == 0 { "\r\n  " } else { "  " })?;
+                    f.write_str(if written % 4 == 0 { "\n  " } else { "  " })?;
                     write!(f, "{:>3} {:#018x}", stringify!($reg), self.$reg)?;
                     written += 1;
                 )*

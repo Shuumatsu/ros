@@ -64,10 +64,10 @@ pub(crate) fn handle(cause: Cause, frame: &mut TrapFrame) {
 
 /// A fault in user mode: the process cannot go on, and the kernel can.
 ///
-/// The locked console, unlike [`fatal`]: user mode holds no kernel lock, so the deadlock that path
-/// exists to avoid is not in the way, and a program failing is a routine event.
+/// The locked console: user mode holds no kernel lock, so the deadlock [`fatal`] avoids is not in
+/// the way, and a program failing is a routine event.
 fn faulted(fault: &Fault, frame: &TrapFrame) -> ! {
-    println!("[trap] the running process faulted: {fault}\r\n{frame}");
+    println!("[trap] the running process faulted: {fault}\n{frame}");
     process::kill()
 }
 
@@ -78,6 +78,6 @@ fn faulted(fault: &Fault, frame: &TrapFrame) -> ! {
 /// already holds the console lock, where the locked path would deadlock instead of reporting.
 /// Output that interleaves with another hart's beats no output.
 fn fatal(fault: &Fault, frame: &TrapFrame) -> ! {
-    emergency_println!("[trap] the register file at the fault:\r\n{frame}");
+    emergency_println!("[trap] the register file at the fault:\n{frame}");
     panic!("unhandled supervisor trap: {fault}");
 }

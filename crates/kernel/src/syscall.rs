@@ -13,6 +13,7 @@ use abi::syscall::{Answer, EXIT, Error, STDOUT, WRITE, encode};
 use mmu::VirtualAddr;
 
 use crate::arch::trap::TrapFrame;
+use crate::console;
 use crate::memory::user;
 use crate::process;
 
@@ -42,21 +43,20 @@ pub(crate) fn dispatch(frame: &mut TrapFrame) {
 }
 
 /// `write(fd, buf, len)`: the console, and no other descriptor yet.
+///
+/// The bytes go out as they are and every one of them is answered for. What they mean is the
+/// program's business: this kernel neither reads them as text nor supplies a line ending, so a
+/// program that writes half a line has written half a line.
+///
+/// The read window spans the write to the device, which is as long as the device takes.
 fn write(fd: usize, base: VirtualAddr, len: usize) -> Answer {
     if fd != STDOUT {
         return Err(Error::BadDescriptor);
     }
 
     user::read(base, len, |bytes| {
-        // A console writes text. Everything up to the first byte that is not part of a UTF-8
-        // sequence is written and answered for; the rest has no rendering to reach the wire with.
-        let text = bytes.utf8_chunks().next().map_or("", |chunk| chunk.valid());
-        // The locked console, because a program's output is a routine event and user mode holds no
-        // kernel lock to deadlock against. The line ending is the console's — a serial terminal
-        // needs `\r\n` — so a trailing newline is the program asking for the break `println!`
-        // already provides.
-        println!("{}", text.strip_suffix('\n').unwrap_or(text));
-        text.len()
+        console::write_bytes(bytes);
+        bytes.len()
     })
     .ok_or(Error::BadAddress)
 }

@@ -29,8 +29,8 @@ use crate::sync::IrqMutex;
 /// against itself forever.
 static UART: IrqMutex<Option<MmioSerialPort>> = IrqMutex::new(None);
 
-/// Write `s` to the DTB-discovered MMIO UART if we have it, else the SBI console.
-fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
+/// Write `bytes` to the DTB-discovered MMIO UART if we have it, else the SBI console.
+fn emit(port: &mut Option<MmioSerialPort>, bytes: &[u8]) {
     if port.is_none()
         && let Some(base) = device_tree::uart_base()
     {
@@ -40,10 +40,26 @@ fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
         *port = Some(unsafe { uart16550::bind(base) });
     }
     match port {
-        Some(serial) => {
-            let _ = serial.write_str(s);
+        Some(serial) => framed(bytes, |byte| serial.send_raw(byte)),
+        None => sbi_write(bytes),
+    }
+}
+
+/// Put `bytes` on a serial line with a carriage return before every line feed.
+///
+/// The device's requirement, and the only place it is stated: a terminal moves down a line on LF and
+/// returns to the first column on CR, so a lone LF leaves the next line indented by the length of
+/// this one. Every caller writes `\n`.
+///
+/// Raw sends, so a byte goes out as itself. `MmioSerialPort::send` reads 0x08 and 0x7f as a request
+/// to erase a character and expands each into three bytes, which is a terminal's convention rather
+/// than this line's.
+fn framed(bytes: &[u8], mut put: impl FnMut(u8)) {
+    for &byte in bytes {
+        if byte == b'\n' {
+            put(b'\r');
         }
-        None => sbi_write(s),
+        put(byte);
     }
 }
 
@@ -52,17 +68,13 @@ fn emit(port: &mut Option<MmioSerialPort>, s: &str) {
 ///
 /// A byte at a time, because the batched `console_write` takes a physical address and this
 /// path runs when producing one is the problem. Errors go nowhere: there is nowhere left.
-fn sbi_write(s: &str) {
-    for b in s.bytes() {
-        sbi::console_write_byte(b);
-    }
-}
+fn sbi_write(bytes: &[u8]) { framed(bytes, sbi::console_write_byte) }
 
 /// `fmt::Write` sink over the locked UART slot (the normal, locked path).
 struct Uart<'a>(&'a mut Option<MmioSerialPort>);
 impl fmt::Write for Uart<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        emit(self.0, s);
+        emit(self.0, s.as_bytes());
         Ok(())
     }
 }
@@ -71,7 +83,7 @@ impl fmt::Write for Uart<'_> {
 struct SbiConsole;
 impl fmt::Write for SbiConsole {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        sbi_write(s);
+        sbi_write(s.as_bytes());
         Ok(())
     }
 }
@@ -102,6 +114,15 @@ pub fn _print(args: fmt::Arguments) {
     });
 }
 
+/// Write `bytes` to the console as they are: no `[hart N]`, and no line ending this was not given.
+///
+/// A running program's output, which shares a device with the kernel's log and shares nothing else
+/// with it. A log line is a whole line and carries the hart that decided it; a program's bytes are a
+/// stream, and supplying either for them would be the kernel putting words in a process's mouth.
+///
+/// One `with`, so no other hart can split a program's write.
+pub fn write_bytes(bytes: &[u8]) { UART.with(|port| emit(port, bytes)) }
+
 #[doc(hidden)]
 pub fn _emergency_print(args: fmt::Arguments) {
     write_prefix(&mut SbiConsole);
@@ -116,8 +137,8 @@ macro_rules! print {
 }
 #[macro_export]
 macro_rules! println {
-    () => { $crate::print!("\r\n") };
-    ($($arg:tt)*) => { $crate::print!("{}\r\n", format_args!($($arg)*)) };
+    () => { $crate::print!("\n") };
+    ($($arg:tt)*) => { $crate::print!("{}\n", format_args!($($arg)*)) };
 }
 
 // Lock-free, for the one case the locked path cannot serve: this hart already holds the
@@ -137,6 +158,6 @@ macro_rules! emergency_print {
 
 #[macro_export]
 macro_rules! emergency_println {
-    () => { $crate::emergency_print!("\r\n") };
-    ($($arg:tt)*) => { $crate::emergency_print!("{}\r\n", format_args!($($arg)*)) };
+    () => { $crate::emergency_print!("\n") };
+    ($($arg:tt)*) => { $crate::emergency_print!("{}\n", format_args!($($arg)*)) };
 }
