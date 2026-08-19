@@ -11,12 +11,11 @@ use core::panic::PanicInfo;
 use abi::call::{exit, write};
 use abi::syscall::STDOUT;
 
-/// The first byte of the image, and the first instruction this hart runs in user mode.
+/// The entry point, named in `hello.ld` and reported to the kernel's loader as `e_entry`.
 ///
 /// No arguments, because there is no `argv` to pass yet. No return, because `ra` holds nothing on
 /// entry: the only way out is [`exit`].
 #[unsafe(no_mangle)]
-#[unsafe(link_section = ".text.entry")]
 extern "C" fn _start() -> ! {
     write(STDOUT, b"hello, world\n");
     exit(0)

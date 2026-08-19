@@ -287,6 +287,16 @@ fn stack_region(stack: &Stack) -> Region<'static> {
 pub(in crate::memory) fn map_stack(stack: &Stack) {
     let region = stack_region(stack);
     with(|space| {
+        // Every user address space shares this table's root slots by copy, so a stack that needed
+        // a slot this table does not have yet would be invisible in every one of them.
+        assert!(
+            space.root_slot(stack.bottom()).is_valid(),
+            "stack '{}' at {:#x} falls in a root slot the kernel table has not opened; the address \
+             spaces sharing this table's upper half would not see it",
+            stack.name,
+            stack.bottom()
+        );
+
         space.edit(|mapper| {
             region
                 .install(mapper)

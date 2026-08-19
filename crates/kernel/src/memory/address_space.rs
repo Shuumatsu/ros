@@ -9,7 +9,7 @@
 //! what pairs every write with a TLB fence. A mapper handed out bare would let a caller
 //! install leaves the hardware never looks at.
 
-use mmu::{FrameSource, LinearOffset, Mapper, PhysicalAddr, Satp, Scheme, Table};
+use mmu::{Entry, FrameSource, LinearOffset, Mapper, PhysicalAddr, Satp, Scheme, Table, VirtualAddr};
 
 use super::direct_map::{VA_OFFSET, phys_to_virt};
 use super::{KernelScheme, frame};
@@ -70,6 +70,22 @@ impl AddressSpace {
 
     /// The `satp` value that makes this space live.
     pub fn satp(&self) -> Satp { self.satp }
+
+    /// Point this space's upper half at the same subtrees as `other`'s.
+    ///
+    /// How a user address space comes to carry the kernel: [`Table::share_upper_half`] owns what
+    /// the operation is, and the invariant it leaves behind — that a root slot added to `other`
+    /// afterwards is invisible here — is the caller's to hold. No fence, because this space is not
+    /// live on any hart until its `satp` is installed.
+    pub fn share_upper_half_from(&mut self, other: &AddressSpace) {
+        self.root.share_upper_half(other.root);
+    }
+
+    /// The root-level entry a walk of `vaddr` would start from, for asking whether that slot
+    /// exists. See [`share_upper_half_from`](Self::share_upper_half_from).
+    pub fn root_slot(&self, vaddr: VirtualAddr) -> Entry {
+        self.root.root_slot::<KernelScheme>(vaddr)
+    }
 
     /// Change this space's mappings, then retire the translations the change invalidated.
     ///

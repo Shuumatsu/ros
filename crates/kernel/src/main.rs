@@ -18,6 +18,7 @@ mod console;
 mod device_tree;
 mod drivers;
 mod memory;
+mod process;
 mod start;
 mod sync;
 mod time;

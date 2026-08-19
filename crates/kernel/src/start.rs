@@ -16,6 +16,7 @@ use mmu::PhysicalAddr;
 
 use crate::cpu;
 use crate::memory;
+use crate::process;
 use crate::time;
 use crate::trap;
 
@@ -54,6 +55,11 @@ pub(crate) unsafe extern "C" fn boot(hartid: usize, dtb: usize) -> ! {
     time::timer::start();
 
     cpu::start_secondaries();
+
+    // No hart runs it yet: this proves the loader against the image the build produced, and the
+    // address space it hands back is what `process::run` will enter.
+    let (space, entry) = process::load();
+    println!("[process] hello: entry {entry:#x}, satp {:#x}", space.satp().bits());
 
     kmain()
 }

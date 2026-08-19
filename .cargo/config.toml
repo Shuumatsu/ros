@@ -1,3 +1,8 @@
+# `bindeps` lets the kernel name the user program as an artifact dependency, so cargo builds it
+# first and hands over its path. The alternative is a build script guessing at `target/`.
+[unstable]
+bindeps = true
+
 [alias]
 # `cargo krun` boots the kernel in QEMU; `cargo kbuild` just builds it.
 #

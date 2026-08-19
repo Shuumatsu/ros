@@ -39,6 +39,31 @@ impl Table {
     /// An empty table: every entry invalid.
     pub const fn new() -> Self { Self { entries: [Entry::empty(); ENTRIES_PER_PAGE] } }
 
+    /// Point this root table's upper canonical half at the same subtrees as `from`'s.
+    ///
+    /// The two tables *share* those subtrees rather than copying them, so a mapping installed
+    /// through either is visible through both. That is what lets a user address space carry the
+    /// kernel's half at the cost of one memcpy of [`ROOT_ENTRIES_PER_HALF`] entries, and what
+    /// makes a trap taken in user mode land on code the running table already maps.
+    ///
+    /// Sharing is by root slot, so a mapping the source adds *later* is visible only if its root
+    /// slot was already present here. A source that grows a new root slot after this call leaves
+    /// every table built before it blind to everything under that slot.
+    ///
+    /// Root tables only: below the root, half the entries are not a canonical half of anything.
+    pub fn share_upper_half(&mut self, from: &Table) {
+        let upper = ENTRIES_PER_PAGE - ROOT_ENTRIES_PER_HALF;
+        self.entries[upper..].copy_from_slice(&from.entries[upper..]);
+    }
+
+    /// The root-level entry a walk of `vaddr` starts from.
+    ///
+    /// For asking whether a root slot exists yet, which is the question
+    /// [`share_upper_half`](Self::share_upper_half) leaves a caller holding.
+    pub fn root_slot<S: Scheme>(&self, vaddr: VirtualAddr) -> Entry {
+        self.entries[vpn::<S>(vaddr, S::ROOT_LEVEL)]
+    }
+
     /// Install a leaf covering one whole root slot directly in this root table:
     /// `S::ROOT_PAGE` bytes, which is 1 GiB under Sv39.
     ///
@@ -130,7 +155,11 @@ impl Table {
             let pa = PhysicalAddr::new(index * root_page);
             table.map_root_page::<S>(VirtualAddr::new(index * root_page), pa, flags);
             if index < offset_slots {
-                table.map_root_page::<S>(VirtualAddr::new(va_offset + index * root_page), pa, flags);
+                table.map_root_page::<S>(
+                    VirtualAddr::new(va_offset + index * root_page),
+                    pa,
+                    flags,
+                );
             }
             index += 1;
         }

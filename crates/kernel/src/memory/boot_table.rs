@@ -31,8 +31,7 @@ pub static TABLE: Table =
 ///
 /// The mode is [`KernelScheme`]'s, so the table and the register that installs it cannot
 /// disagree about which scheme they are.
-pub const SATP_TEMPLATE: usize =
-    Satp::new(KernelScheme::MODE, 0, PhysicalAddr::new(0)).bits();
+pub const SATP_TEMPLATE: usize = Satp::new(KernelScheme::MODE, 0, PhysicalAddr::new(0)).bits();
 /// Right-shift that turns a page-aligned root address into `satp.PPN`.
 pub const SATP_ROOT_SHIFT: usize = PAGE_OFFSET_BITS;
 

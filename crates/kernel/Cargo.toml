@@ -12,6 +12,7 @@ name = "kernel"
 path = "src/main.rs"
 
 [dependencies]
+hello = { path = "../../user/hello", artifact = "bin", target = "riscv64imac-unknown-none-elf" }
 fdt-raw = "0.3.0"
 frame-allocator = { path = "../frame-allocator" }
 buddy-heap = { path = "../buddy-heap" }
@@ -22,4 +23,5 @@ sbi-rt = "0.0.4"
 sbi-spec = "0.0.9"
 spin = "0.10.0"
 uart_16550 = "0.4"
+elf = { version = "0.8.0", default-features = false }
 

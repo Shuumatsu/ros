@@ -17,6 +17,7 @@
 //! | [`address_space`] | a page-table tree, its root frame, and its `satp` |
 //! | [`region`] | installing, auditing and reporting a list of mappings |
 //! | [`kernel_table`] | *which* mappings the kernel gets, and switching to them |
+//! | [`user_table`] | *which* mappings a user image gets, in a space of its own |
 //!
 //! Nothing here decides a fact one of those owns, and nothing here reads the device tree:
 //! platform facts arrive through [`machine::MachineMemory`].
@@ -49,6 +50,7 @@ pub mod layout;
 pub mod machine;
 pub mod phys_range;
 pub mod stack;
+pub mod user_table;
 
 pub(in crate::memory) mod frame;
 pub(in crate::memory) mod heap;
