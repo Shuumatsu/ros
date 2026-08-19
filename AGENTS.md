@@ -1,36 +1,41 @@
 ## Engineering standards
 
-- **No patch-style fixes.** Do not paper over a problem at the symptom site. Fix the root cause, even when that means more work or a larger change.
-- **Always apply best practices.** Extra effort and architectural changes are acceptable and expected when they lead to a cleaner, more correct design.
-- **Don't repeat yourself (DRY).** No duplicated logic. Extract shared behavior into a single source of truth.
-- **No split-brain.** A given piece of state, logic, or knowledge must live in exactly one place. Never let two parts of the system independently track or decide the same thing.
-
-- Strict Modularity: Enforce logical file splitting and absolute separation of concerns. Do not output monolithic, single-file solutions.
-
-- High Reusability: Design highly modular, decoupled components and modular implementations aimed at maximum reusability across the codebase.
+- **No band-aid fixes.** Do not paper over problems by addressing only their symptoms. Fix the root cause, even when doing so requires more work or broader changes.
+- **Always follow best practices.** Additional effort and architectural changes are acceptable and expected when they produce a cleaner, more correct design.
+- **Don't repeat yourself (DRY).** Do not duplicate logic. Extract shared behavior into a single source of truth.
+- **Avoid split-brain designs.** Each piece of state, logic, or knowledge must live in exactly one place. Never allow two parts of the system to track or determine the same thing independently.
+- **Strict modularity.** Divide code logically across files and maintain a complete separation of concerns. Do not produce monolithic, single-file solutions.
+- **High reusability.** Design highly modular, decoupled components and implementations to maximize reusability across the codebase.
 
 ---
 
-- git history does not make sense. focus on current codes
-- be simple on git commit messages
-- do not drop comments everywhere. If comments are not necessary, do not write them. write comments in a conservative and restrained manner
-- write git commits in a single line
+- Git history is not meaningful. Focus on the current codebase.
+- Keep Git commit messages simple.
+- Do not add comments indiscriminately. Omit unnecessary comments, and write necessary ones conservatively and sparingly. Prefer expressing facts through code over explaining code with comments.
+- The repository contains legacy comments. Do not rely on them, and clean them up when they are incorrect.
+- Write Git commit messages on a single line.
+
+- The project is currently at an early stage, so compatibility is not required.
+- Complete refactoring is allowed and does not need to be limited to incremental changes.
+- Avoid ad hoc solutions.
 
 ---
 
-For comments: 你正在编辑一份长期使用的 comment，而不是生成讨论记录。
+When editing comments or documentation, treat them as long-lived material rather than a record of discussion.
 
-讨论内容仅用于判断事实是否正确。不要把讨论过程、错误假设、 反驳过程或纠正痕迹写进最终 doc。
+Use the discussion only to determine which facts are correct. Do not include the discussion process, incorrect assumptions, counterarguments, or traces of corrections in the final comments or documentation.
 
-编辑要求：
-1. 最终文本必须像独立的 official document，读者不需要知道此前发生过讨论。
-2. 只保留最终确认的知识结论。
-3. 优先使用肯定式陈述句。
-4. 如果结论由“A 是错误的，正确的是 B”得出，只写 B。
-5. 不要写“不是 A”“容易误以为 A”“与此前说法不同”等讨论性表述。
-6. 除了事实纠正之外，尽量保持原笔记的结构、信息密度和语气。
-7. 只有当否定本身构成重要知识边界时，才保留否定句。
-8. 只输出修改后的 comment。
+Editing requirements:
+1. The final text must read as standalone official documentation or comments. Readers should not need any knowledge of the preceding discussion.
+2. Include only conclusions that have been confirmed.
+3. Prefer affirmative declarative statements.
+4. If a conclusion was reached by determining that “A is incorrect; B is correct,” write only B.
+5. Do not include discussion-oriented phrases such as “not A,” “it is easy to assume A,” or “unlike the previous explanation.”
+6. Except for factual corrections, preserve the original structure, information density, and tone as closely as possible.
+7. Retain negative statements only when the negation itself establishes an important knowledge boundary.
+8. Output only the revised comments or documentation.
 
 ---
 
+This project aims to implement support for the RISC-V64 architecture, covering bare-metal booting, privilege-level switching and system calls, preemptive task scheduling, process lifecycle management, virtual memory with kernel/user address space isolation, and a simple file system.
+I do not wish to get bogged down in hardware intricacies or edge cases—such as security vulnerability—which I view as mere noise in the learning process.
