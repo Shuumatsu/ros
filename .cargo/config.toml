@@ -12,6 +12,10 @@
 krun = "run -p kernel --target riscv64imac-unknown-none-elf"
 kbuild = "build -p kernel --target riscv64imac-unknown-none-elf"
 
+# The crates that test on the host. `kernel` and the user programs are excluded because their
+# `forced-target` has no `test` crate; naming them here keeps the list in one place.
+test-host = "test --workspace --exclude kernel --exclude hello"
+
 [target.riscv64imac-unknown-none-elf]
 # https://doc.rust-lang.org/nightly/rustc/platform-support.html
 # Target: RISC-V 64-bit, I+M+A+C extensions, bare metal, no OS.
@@ -23,12 +27,9 @@ kbuild = "build -p kernel --target riscv64imac-unknown-none-elf"
 # The kernel selects its architecture with `cfg(target_arch = "riscv64")`, which this
 # target implies.
 #
-# The linker script lives beside the boot code it places, under `arch/riscv64`: it is
-# `OUTPUT_ARCH("riscv")` throughout, and its sections, its high-half offset and its Image
-# header are as ISA-specific as the assembly in that directory.
-rustflags = [
-    '-Clink-arg=-Tcrates/kernel/src/arch/riscv64/kernel.ld',
-]
+# No `rustflags` here. Settings in this table reach every crate built for the target, and the
+# user programs under `user/` share it with the kernel while needing linker scripts of their
+# own, so each binary names its script from its own `build.rs`.
 # Boot the kernel as a flat RISC-V Image (objcopy'd from the ELF) under OpenSBI.
 # scripts/run.sh does the objcopy + QEMU launch and holds the QEMU options;
 # cargo appends the built ELF path as the script's argument.

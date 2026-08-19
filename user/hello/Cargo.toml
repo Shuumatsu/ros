@@ -1,0 +1,11 @@
+cargo-features = ["per-package-target"]
+
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2024"
+forced-target = "riscv64imac-unknown-none-elf"
+
+[[bin]]
+name = "hello"
+path = "src/main.rs"
