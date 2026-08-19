@@ -135,8 +135,7 @@ extern "C" fn report_sp(handoff: usize) -> ! {
     // suspended inside `switch`, so this is the only context touching it.
     unsafe {
         (*handoff).observed = sp;
-        // Saved into a context on this stack that nothing will resume: the switch is one-way,
-        // and one `switch` is better than a second entry point that skips the save.
+        // Saved into a context on this stack that nothing will resume: the switch is one-way.
         let mut spent = KernelContext::default();
         switch(&raw mut spent, &raw const (*handoff).resume);
     }

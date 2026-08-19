@@ -9,3 +9,6 @@ forced-target = "riscv64imac-unknown-none-elf"
 [[bin]]
 name = "hello"
 path = "src/main.rs"
+
+[dependencies]
+abi = { path = "../../crates/abi" }

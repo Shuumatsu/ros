@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "abi"
+version = "0.1.0"
+
+[[package]]
 name = "bit_field"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -123,6 +127,13 @@ checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
 dependencies = [
  "hash32",
  "stable_deref_trait",
+]
+
+[[package]]
+name = "hello"
+version = "0.1.0"
+dependencies = [
+ "abi",
 ]
 
 [[package]]

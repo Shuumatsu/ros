@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/abi",
     "crates/mmu",
     "crates/kernel",
     "crates/blockdev",
