@@ -62,6 +62,7 @@ use crate::utils::ByteSize;
 use direct_map::virt_to_phys;
 use machine::MachineMemory;
 use phys_range::PhysRange;
+use stack::Stack;
 
 /// The translation scheme this kernel runs under, chosen here and nowhere else.
 ///
@@ -144,4 +145,30 @@ pub fn init_page_table(machine: MachineMemory<'_>) {
     kernel_va::report();
 
     kernel_table::init(machine.mmio);
+
+    // The runtime stack path, exercised where a failure is still one assertion rather than a
+    // fault inside the first context switch that uses one.
+    stack::self_test(alloc_kernel_stack("runtime stack self-test"));
+}
+
+/// Allocate a kernel stack and map it into the live kernel table.
+///
+/// For a stack whose owner does not exist when [`init_page_table`] runs — a process's kernel
+/// stack, which lives and dies with the process. [`stack::alloc`] cannot serve it: that one is
+/// mapped by the table build, which is over.
+///
+/// The two steps belong to two modules and the order belongs to neither, which is why the
+/// composition is here: [`stack`] owns what a stack is and where it goes, [`kernel_table`] owns
+/// what the kernel's table maps. Callers get a stack that is already usable.
+///
+/// **Usable on the calling hart only**, for [`kernel_table::map_stack`]'s reason.
+///
+/// # Panics
+///
+/// If there is no contiguous RAM for it, if the kernel table is not live yet, or if the mapping
+/// does not audit.
+pub fn alloc_kernel_stack(name: &'static str) -> Stack {
+    let stack = stack::reserve(name);
+    kernel_table::map_stack(&stack);
+    stack
 }

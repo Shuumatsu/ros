@@ -1,6 +1,9 @@
 //! RV64 privileged state: the instructions and CSRs the rest of the kernel reaches it
 //! through.
 //!
+//! [`context`] holds no CSR at all: it is the general registers one thread of kernel control needs
+//! to be resumed, which is as ISA-specific as any of them.
+//!
 //! One module per CSR group that has a rule attached — [`interrupts`] owns `sstatus.SIE` and
 //! `sie`, [`trap`] owns `stvec` and the CSRs that describe a trap, [`timer`] owns the next
 //! timer deadline, [`sbi`] the firmware calls, and [`tlb`] owns `satp` and `sfence.vma` for
@@ -20,6 +23,7 @@
 use mmu::VirtualAddr;
 
 pub(crate) mod boot;
+pub mod context;
 pub mod interrupts;
 pub mod sbi;
 pub mod timer;

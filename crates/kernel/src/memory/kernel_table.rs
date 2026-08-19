@@ -22,6 +22,7 @@ use super::address_space::{AddressSpace, KernelMapper};
 use super::direct_map::{phys_to_virt, virt_to_phys};
 use super::phys_range::{self, PhysRange};
 use super::region::{self, Region};
+use super::stack::Stack;
 use super::{KernelScheme, frame, kernel_va, layout, stack};
 use crate::arch;
 use crate::sync::IrqMutex;
@@ -109,14 +110,7 @@ fn regions<'a>(windows: &'a [PhysRange]) -> Vec<Region<'a>> {
     // spanning the area would map over them. Each stack reports its own `va` and `pa`,
     // so the secondaries' double mapping needs no special case here.
     for stack in stack::all() {
-        push(Region {
-            name: stack.name,
-            va: stack.bottom(),
-            pa: stack.pa(),
-            len: stack.bytes(),
-            level: 0,
-            flags: READ_WRITE,
-        });
+        push(stack_region(&stack));
     }
 
     // The direct map covers exactly what the allocator owns — asked for, not re-derived —
@@ -259,6 +253,57 @@ pub fn init(mmio: &[PhysRange]) {
 /// half-built table is unreachable.
 pub fn with<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
     KERNEL.get().map(|space| space.with(f))
+}
+
+/// The one mapping a kernel stack gets, wherever it is installed from.
+///
+/// One region per stack rather than one spanning the area, which is what leaves the guard pages
+/// unmapped. Each stack reports its own `va` and `pa`, so the secondaries' double mapping needs no
+/// special case. `'static` because a stack's name is.
+fn stack_region(stack: &Stack) -> Region<'static> {
+    Region {
+        name: stack.name,
+        va: stack.bottom(),
+        pa: stack.pa(),
+        len: stack.bytes(),
+        level: 0,
+        flags: READ_WRITE,
+    }
+}
+
+/// Install `stack` into the live kernel table, and audit what went in.
+///
+/// The runtime counterpart of the stack regions [`regions`] builds, for a stack whose owner did
+/// not exist when this table was: same [`stack_region`], so its rights and page size cannot drift
+/// from the ones every other kernel stack gets.
+///
+/// **The calling hart only.** [`AddressSpace::edit`] fences that hart, and another may have cached
+/// the absence of these translations, so until there is an IPI to fence with the stack is usable
+/// only where it was mapped (see [`arch::tlb`]).
+///
+/// # Panics
+///
+/// If the table is not published yet, if the mapping fails, or if the guard page came out mapped.
+pub(in crate::memory) fn map_stack(stack: &Stack) {
+    let region = stack_region(stack);
+    with(|space| {
+        space.edit(|mapper| {
+            region
+                .install(mapper)
+                .unwrap_or_else(|error| panic!("mapping stack '{}' failed: {error}", stack.name))
+        });
+        space.walk(|mapper| {
+            region.audit(mapper);
+            assert!(
+                mapper.translate(stack.guard()).is_none(),
+                "the guard page at {:#x} below stack '{}' came out mapped; it must stay a hole \
+                 or an overflow corrupts its neighbour silently",
+                stack.guard(),
+                stack.name
+            );
+        });
+    })
+    .expect("kernel_table::map_stack before the kernel table was published");
 }
 
 /// The live kernel page table's `satp`, copied into each secondary handoff.
