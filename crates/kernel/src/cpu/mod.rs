@@ -85,6 +85,9 @@ impl Cpu {
     /// cannot go on addressing a field this type has moved.
     pub const TRAP_SPILL: usize = offset_of!(Cpu, trap_spill);
     pub const KERNEL_STACK_TOP: usize = offset_of!(Cpu, kernel_stack_top);
+    // The vector reaches both with a plain load and store rather than through the accessors below.
+    // Sound, and it needs no ordering: a block belongs to one hart, and the code holding these
+    // offsets runs on that hart inside a trap, where nothing else on it is running to race with.
 
     const fn new() -> Self {
         Self {
@@ -116,6 +119,12 @@ impl Cpu {
     /// One call for both, since a hart holding either without the other is one whose next trap
     /// from user mode has no stack to push onto or no process to charge.
     pub fn enter_process(&self, control_block: usize, kernel_stack_top: VirtualAddr) {
+        assert_eq!(
+            self.process.load(Ordering::Relaxed),
+            0,
+            "hart {} is already running a process; the second would take the first's stack",
+            self.hartid()
+        );
         self.kernel_stack_top.store(kernel_stack_top.bits(), Ordering::Relaxed);
         self.process.store(control_block, Ordering::Relaxed);
     }

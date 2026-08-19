@@ -60,6 +60,10 @@ struct Process {
 /// Blocks. The hart goes into user mode and comes back here when the process exits, on the kernel's
 /// own page table with nothing of the process still running.
 ///
+/// Every resource the process was given is spent: its kernel stack, the frames its segments were
+/// copied into, and its page tables. Reclaiming them needs an allocator that can free an address —
+/// [`crate::memory::kernel_va`] is a watermark — so a second call costs a second set.
+///
 /// # Panics
 ///
 /// If the embedded image is not one this kernel can run, which is a build that produced something
