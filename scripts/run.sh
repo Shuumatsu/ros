@@ -13,8 +13,16 @@ set -euo pipefail
 
 ELF="$1"
 IMG="${ELF}.bin"
+DIAG="${ELF}.qemu.log"
 
 llvm-objcopy -O binary "$ELF" "$IMG"
+
+# `-D` keeps QEMU's own diagnostics off stdout. Both streams are line-buffered
+# independently, so a shared destination interleaves them mid-line and the guest's
+# serial output stops being readable. Their volume is firmware's: OpenSBI probes
+# how many PMP regions a hart implements by writing past the last one, four
+# `guest_errors` lines per hart.
+echo "qemu diagnostics: $DIAG" >&2
 
 exec qemu-system-riscv64 \
     -s \
@@ -23,6 +31,7 @@ exec qemu-system-riscv64 \
     -machine virt \
     -cpu rv64 \
     -d guest_errors,unimp \
+    -D "$DIAG" \
     -smp 4 \
     -m 128M \
     -drive if=none,format=raw,file=hdd.dsk,id=foo \
