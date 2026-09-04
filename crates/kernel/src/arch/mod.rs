@@ -1,7 +1,8 @@
 //! Architecture-specific kernel support.
+//!
+//! The rest of the kernel names this module, never the implementation below it. Only one
+//! implementation exists: `crates/kernel/Cargo.toml` forces a `riscv64` target.
 
-#[cfg(target_arch = "riscv64")]
 mod riscv64;
 
-#[cfg(target_arch = "riscv64")]
 pub use riscv64::*;

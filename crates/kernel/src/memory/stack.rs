@@ -23,7 +23,13 @@ const GUARD_SIZE: usize = PAGE_SIZE;
 pub const SIZE: usize = 64 * KIB;
 
 const STRIDE: usize = GUARD_SIZE + SIZE;
-const _: () = assert!(STRIDE.is_multiple_of(16), "kernel stack top must be 16-byte aligned");
+
+// Every stack begins on a page boundary and spans whole pages, so its top lands on one too, and
+// a page is a whole number of the alignment the ABI requires of `sp`.
+const _: () = assert!(
+    SIZE.is_multiple_of(PAGE_SIZE) && PAGE_SIZE.is_multiple_of(arch::STACK_ALIGN),
+    "a kernel stack top must be aligned as the ABI requires of `sp`"
+);
 
 /// A kernel stack above an unmapped guard page.
 #[derive(Clone, Copy, Debug)]

@@ -8,34 +8,44 @@ use riscv::interrupt::Trap;
 use riscv::interrupt::supervisor::{Exception, Interrupt};
 use riscv::register::{scause, scounteren, sepc, sscratch, stval, stvec};
 
-use mmu::{MemoryAddr, VirtualAddr};
+pub use frame::{TrapFrame, resume, vector};
 
-pub use frame::{TrapFrame, resume};
-
+/// What the hart trapped for. Fault detail is left in the CSRs for [`Fault::current`].
 pub enum Cause {
     Timer,
     Software,
     External,
     Syscall,
-    Fault(Fault),
+    Fault,
 }
 
+/// The supervisor CSRs describing an exception, snapshotted for reporting.
 pub struct Fault {
     scause: usize,
-    exception: Option<Exception>,
     sepc: usize,
     stval: usize,
 }
 
 impl Fault {
-    fn current(scause: usize, exception: Option<Exception>) -> Self {
-        Self { scause, exception, sepc: sepc::read(), stval: stval::read() }
+    /// Snapshots the exception this hart is handling.
+    ///
+    /// The CSRs hold until this hart takes another trap, and dispatch runs with interrupts
+    /// masked.
+    pub fn current() -> Self {
+        Self { scause: scause::read().bits(), sepc: sepc::read(), stval: stval::read() }
+    }
+
+    fn exception(&self) -> Option<Exception> {
+        match decode(scause::Scause::from_bits(self.scause)) {
+            Ok(Trap::Exception(exception)) => Some(exception),
+            _ => None,
+        }
     }
 }
 
 impl fmt::Display for Fault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.exception {
+        match self.exception() {
             Some(exception) => write!(f, "{exception:?}")?,
             None => write!(f, "unknown cause (scause {:#x})", self.scause)?,
         }
@@ -43,25 +53,25 @@ impl fmt::Display for Fault {
     }
 }
 
-pub fn vector() -> VirtualAddr { frame::vector() }
-
 /// Installs the kernel trap vector on this hart.
+///
+/// # Panics
+///
+/// Panics if the vector is not 4-byte aligned, which `stvec` would read as a mode.
 pub fn install() {
     let vector = vector();
-    assert!(
-        vector.is_aligned(4),
-        "trap vector {vector:#x} is not 4-byte aligned: stvec reads its low two bits as a mode"
-    );
+    let stvec = stvec::Stvec::try_new(vector.bits(), stvec::TrapMode::Direct)
+        .unwrap_or_else(|_| panic!("trap vector {vector:#x} is not 4-byte aligned"));
 
     // SAFETY: the kernel's own trap entry, in `.text`, which the page table this hart runs
     // on maps executable.
-    unsafe { stvec::write(stvec::Stvec::new(vector.bits(), stvec::TrapMode::Direct)) };
+    unsafe { stvec::write(stvec) };
 }
 
 /// # Safety
 ///
 /// `control_block` must be the calling hart's valid, permanent [`Cpu`](crate::cpu::Cpu).
-pub unsafe fn set_control_block(control_block: usize) {
+pub(super) unsafe fn set_control_block(control_block: usize) {
     // SAFETY: forwarded from this function's contract.
     unsafe { sscratch::write(control_block) };
 }
@@ -76,18 +86,18 @@ pub fn allow_user_counters() {
     unsafe { scounteren::write(counters) };
 }
 
+/// Names the trap `scause` reports, or fails on a cause this ISA revision does not define.
+fn decode(scause: scause::Scause) -> Result<Trap<Interrupt, Exception>, riscv::result::Error> {
+    scause.cause().try_into()
+}
+
 fn cause() -> Cause {
-    let scause = scause::read();
-    let decoded: Result<Trap<Interrupt, Exception>, _> = scause.cause().try_into();
-    match decoded {
+    match decode(scause::read()) {
         Ok(Trap::Interrupt(Interrupt::SupervisorTimer)) => Cause::Timer,
         Ok(Trap::Interrupt(Interrupt::SupervisorSoft)) => Cause::Software,
         Ok(Trap::Interrupt(Interrupt::SupervisorExternal)) => Cause::External,
         Ok(Trap::Exception(Exception::UserEnvCall)) => Cause::Syscall,
-        Ok(Trap::Exception(exception)) => {
-            Cause::Fault(Fault::current(scause.bits(), Some(exception)))
-        }
-        Err(_) => Cause::Fault(Fault::current(scause.bits(), None)),
+        _ => Cause::Fault,
     }
 }
 

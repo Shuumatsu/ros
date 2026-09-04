@@ -10,12 +10,19 @@ use riscv::register::sstatus;
 
 use mmu::VirtualAddr;
 
+use super::super::address_of;
 use crate::cpu::Cpu;
 
+/// `sstatus.SPP`: the kernel's encoding of the field, for trap entry's mask and the predicate
+/// below. [`TrapFrame::for_user`] sets the same field through the typed API, which assembly and
+/// a `const` operand cannot use.
 const SPP: usize = 1 << 8;
 
+/// `ecall` is always four bytes; the compressed extension defines no shorter encoding.
+const ECALL_BYTES: usize = 4;
+
 /// Saved registers in x-register order; `sp` is handled separately because it addresses the frame.
-macro_rules! saved_registers {
+macro_rules! trapped_registers {
     ($target:ident) => {
         $target! {
             ra, gp, tp,
@@ -34,30 +41,27 @@ macro_rules! define_frame {
         #[repr(C, align(16))]
         #[derive(Clone, Copy, Default)]
         pub struct TrapFrame {
-            pub sepc: usize,
-            pub sstatus: usize,
-            pub sp: usize,
-            $(pub $reg: usize,)*
+            sepc: usize,
+            sstatus: usize,
+            sp: usize,
+            $($reg: usize,)*
         }
 
         impl fmt::Display for TrapFrame {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "  sepc {:#018x}  sstatus {:#018x}", self.sepc, self.sstatus)?;
-                write!(f, "\n  {:>3} {:#018x}", "sp", self.sp)?;
 
-                let mut written = 1;
-                $(
-                    f.write_str(if written % 4 == 0 { "\n  " } else { "  " })?;
-                    write!(f, "{:>3} {:#018x}", stringify!($reg), self.$reg)?;
-                    written += 1;
-                )*
-                let _ = written;
+                let file = [("sp", self.sp), $((stringify!($reg), self.$reg),)*];
+                for (index, &(name, value)) in file.iter().enumerate() {
+                    f.write_str(if index % 4 == 0 { "\n  " } else { "  " })?;
+                    write!(f, "{name:>3} {value:#018x}")?;
+                }
                 Ok(())
             }
         }
     };
 }
-saved_registers!(define_frame);
+trapped_registers!(define_frame);
 
 impl TrapFrame {
     /// Builds a zeroed register file for first entry into user mode.
@@ -73,7 +77,16 @@ impl TrapFrame {
         Self { sepc: entry.bits(), sstatus: status.bits(), sp: stack_top.bits(), ..Self::default() }
     }
 
-    pub fn from_user(&self) -> bool { self.sstatus & SPP == 0 }
+    pub fn interrupted_user(&self) -> bool { self.sstatus & SPP == 0 }
+
+    /// The number and arguments of the `ecall` this frame trapped on.
+    pub fn syscall(&self) -> (usize, [usize; 3]) { (self.a7, [self.a0, self.a1, self.a2]) }
+
+    /// Answers the call with `result` and resumes past the `ecall`.
+    pub fn complete_syscall(&mut self, result: usize) {
+        self.a0 = result;
+        self.sepc += ECALL_BYTES;
+    }
 }
 
 macro_rules! define_entry {
@@ -82,7 +95,7 @@ macro_rules! define_entry {
         #[unsafe(naked)]
         unsafe extern "custom" fn trap_entry() {
             ::core::arch::naked_asm!(
-                // `stvec` uses the low two address bits as its mode.
+                // `stvec` reads the low two address bits as a mode; `install` checks the result.
                 ".balign 4",
 
                 // Exchange the interrupted `sp` for this hart's control block.
@@ -91,16 +104,17 @@ macro_rules! define_entry {
                 "sd    t0, {spill}(sp)",
                 "mv    t0, sp",
 
+                // User traps switch to the process's kernel stack, and are the common case, so
+                // they fall through.
                 "csrr  sp, sstatus",
                 "andi  sp, sp, {spp}",
-                "bnez  sp, 1f",
+                "beqz  sp, 1f",
 
-                // User traps switch to the process's kernel stack.
-                "ld    sp, {kernel_stack_top}(t0)",
-                "j     2f",
                 // Supervisor traps remain on the interrupted stack.
-                "1:",
                 "csrr  sp, sscratch",
+                "j     2f",
+                "1:",
+                "ld    sp, {kernel_stack_top}(t0)",
                 "2:",
                 "addi  sp, sp, -{frame_size}",
 
@@ -138,7 +152,7 @@ macro_rules! define_entry {
         }
     };
 }
-saved_registers!(define_entry);
+trapped_registers!(define_entry);
 
 macro_rules! define_resume {
     ($($reg:ident),*) => {
@@ -172,6 +186,6 @@ macro_rules! define_resume {
         }
     };
 }
-saved_registers!(define_resume);
+trapped_registers!(define_resume);
 
-pub(super) fn vector() -> VirtualAddr { VirtualAddr::new(trap_entry as *const () as usize) }
+pub fn vector() -> VirtualAddr { address_of(trap_entry) }

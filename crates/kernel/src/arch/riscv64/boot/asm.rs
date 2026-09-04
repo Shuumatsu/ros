@@ -4,6 +4,10 @@
 ///
 /// `norvc` preserves the Image header's fixed-width `code0` field. `norelax` also prevents
 /// `gp` initialization from becoming a `gp`-relative access before `gp` is valid.
+///
+/// The section names where `kernel.ld` places the function. `header` must be the image's first
+/// byte. `trap` is separate because its sole occupant takes the section's alignment as its entry
+/// address, which a naked function cannot request for itself.
 macro_rules! boot_fn {
     (@define $section:literal, $(#[$attr:meta])* $vis:vis fn $name:ident
         { $($insn:literal),* $(,)? } $($operands:tt)*

@@ -2,6 +2,8 @@
 //!
 //! RISC-V may cache missing translations. Each fence affects only the calling hart.
 
+use riscv::register::satp;
+
 use mmu::Satp;
 
 use super::interrupts;
@@ -12,17 +14,11 @@ use super::interrupts;
 ///
 /// `satp` must map the running PC and stack to their current physical addresses.
 pub unsafe fn install(satp: Satp) {
-    let bits = satp.bits();
+    let value = satp::Satp::from_bits(satp.bits());
     interrupts::without(|| {
         // SAFETY: forwarded from this function's contract.
-        unsafe {
-            core::arch::asm!(
-                "csrw satp, {satp}",
-                "sfence.vma",
-                satp = in(reg) bits,
-                options(nostack)
-            );
-        }
+        unsafe { satp::write(value) };
+        flush_all();
     });
 }
 

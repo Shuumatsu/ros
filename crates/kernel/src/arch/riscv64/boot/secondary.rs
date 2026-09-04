@@ -1,17 +1,18 @@
 //! Secondary-hart startup.
 
+use core::mem::offset_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use mmu::{MemoryAddr, PhysicalAddr, Satp, VirtualAddr};
 
 use super::super::sbi::{self, HartState};
+use super::super::{STACK_ALIGN, address_of};
 use crate::memory::direct_map::virt_to_phys;
-
-const PUBLISHED: usize = 1;
 
 /// Release-published startup data consumed by the secondary prologue.
 #[repr(C)]
 pub(crate) struct SecondaryHandoff {
+    /// Zero until the fields below are complete; the prologue spins on it.
     ready: AtomicUsize,
     satp: AtomicUsize,
     stack_top: AtomicUsize,
@@ -37,7 +38,7 @@ impl SecondaryHandoff {
         self.satp.store(satp.bits(), Ordering::Relaxed);
         self.stack_top.store(stack_top.bits(), Ordering::Relaxed);
         self.cpu.store(cpu, Ordering::Relaxed);
-        self.ready.store(PUBLISHED, Ordering::Release);
+        self.ready.store(1, Ordering::Release);
     }
 }
 
@@ -75,10 +76,9 @@ pub(crate) fn start_cpu(
         Err(error) => return Err(StartError::StatusUnavailable(error)),
     }
 
-    // The RISC-V ABI requires 16-byte stack alignment.
     assert!(
-        stack_top.is_aligned(16),
-        "hart {hartid}'s stack top {stack_top:#x} is not 16-byte aligned"
+        stack_top.is_aligned(STACK_ALIGN),
+        "hart {hartid}'s stack top {stack_top:#x} is not {STACK_ALIGN}-byte aligned"
     );
 
     handoff.publish(satp, stack_top, cpu);
@@ -89,13 +89,8 @@ pub(crate) fn start_cpu(
 
 /// Physical secondary entry address used while firmware has `satp = 0`.
 pub(crate) fn entry_address() -> PhysicalAddr {
-    virt_to_phys(super::entry::secondary_entry_address())
+    virt_to_phys(address_of(super::entry::secondary_entry))
 }
-
-const READY_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, ready);
-const SATP_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, satp);
-const STACK_TOP_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, stack_top);
-const CPU_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, cpu);
 
 boot_fn!(
     /// Installs the published page table, stack, and CPU pointer before entering Rust.
@@ -115,9 +110,9 @@ boot_fn!(
         "mv    ra, zero",
         "tail  {secondary}",
     }
-        ready = const READY_OFFSET,
-        satp = const SATP_OFFSET,
-        stack_top = const STACK_TOP_OFFSET,
-        cpu = const CPU_OFFSET,
+        ready = const offset_of!(SecondaryHandoff, ready),
+        satp = const offset_of!(SecondaryHandoff, satp),
+        stack_top = const offset_of!(SecondaryHandoff, stack_top),
+        cpu = const offset_of!(SecondaryHandoff, cpu),
         secondary = sym crate::start::secondary,
 );

@@ -8,23 +8,20 @@ use crate::console;
 use crate::memory::user;
 use crate::process;
 
-/// `ecall` is always four bytes; the compressed extension defines no shorter encoding.
-const ECALL_BYTES: usize = 4;
-
-/// Dispatches the frame's call after advancing `sepc` past `ecall`.
+/// Serves the call the frame trapped on, and answers it.
 pub(crate) fn dispatch(frame: &mut TrapFrame) {
-    frame.sepc += ECALL_BYTES;
+    let (number, [a0, a1, a2]) = frame.syscall();
 
-    let answer = match frame.a7 {
-        WRITE => write(frame.a0, VirtualAddr::new(frame.a1), frame.a2),
-        EXIT => process::exit(frame.a0),
+    let answer = match number {
+        WRITE => write(a0, VirtualAddr::new(a1), a2),
+        EXIT => process::exit(a0),
         number => {
             println!("[syscall] the process asked for call {number}, which this kernel has not");
             Err(Error::NoSuchCall)
         }
     };
 
-    frame.a0 = encode(answer) as usize;
+    frame.complete_syscall(encode(answer) as usize);
 }
 
 /// `write(fd, buf, len)`: the console, and no other descriptor yet.

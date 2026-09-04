@@ -4,7 +4,7 @@
 
 use spin::Once;
 
-use crate::arch::{self, interrupts, timer};
+use crate::arch::{interrupts, timebase};
 use crate::cpu;
 
 pub const HZ: u64 = 100;
@@ -26,7 +26,7 @@ pub fn start() {
     // Keep every interval in the future when the timebase is slower than `HZ`.
     let interval = *INTERVAL.call_once(|| (hz / HZ).max(1));
 
-    if let Err(error) = timer::set_next_event(arch::time_counter() + interval) {
+    if let Err(error) = timebase::arm_after(interval) {
         println!(
             "[timer] firmware refused a timer deadline ({error:?}): this hart runs without a tick"
         );
@@ -42,7 +42,7 @@ pub fn start() {
 /// Handles one timer interrupt, rearming first to acknowledge `sip.STIP`.
 pub(crate) fn tick() {
     let interval = *INTERVAL.get().expect("a timer interrupt before timer::start armed one");
-    timer::set_next_event(arch::time_counter() + interval)
+    timebase::arm_after(interval)
         .expect("firmware took the first timer deadline on this hart and then refused one");
 
     let ticks = cpu::current().record_tick();

@@ -101,14 +101,11 @@ pub(crate) fn exit(status: usize) -> ! {
     let process = current();
 
     // SAFETY: `run`'s `Process`, on a stack suspended inside the switch below, so this context is
-    // the only one touching it.
+    // the only one touching it. This frame and its stack are abandoned.
     unsafe {
         (*process).status = status;
-        let mut spent = KernelContext::default();
-        context::switch(&raw mut spent, &raw const (*process).resume);
+        context::switch_to(&raw const (*process).resume)
     }
-
-    unreachable!("switched back into a process that had already exited")
 }
 
 pub(crate) fn kill() -> ! { exit(FAULT_STATUS) }

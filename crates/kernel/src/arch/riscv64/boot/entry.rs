@@ -4,15 +4,13 @@
 //! disabled. All other registers, including `sp`, `gp`, and `tp`, are undefined. Compiled
 //! Rust cannot run until translation and these ABI registers are initialized.
 
-use mmu::VirtualAddr;
-
 use crate::memory::{boot_table, direct_map, layout};
 
+/// Define an entry point firmware may jump to, which hands `$prologue` to [`enter_high`].
 macro_rules! isa_entry {
-    ($(#[$doc:meta])* $vis:vis fn $name:ident => $prologue:path) => {
+    ($name:ident => $prologue:path) => {
         boot_fn!(
-            $(#[$doc])*
-            $vis fn $name in entry {
+            pub(super) fn $name in entry {
                 // `lla` remains PC-relative before translation is enabled.
                 "lla  t2, {prologue}",
                 "tail {enter_high}",
@@ -23,19 +21,14 @@ macro_rules! isa_entry {
     };
 }
 
-isa_entry!(
-    pub(super) fn primary_entry => super::primary::prologue
-);
-
-isa_entry!(
-    fn secondary_entry => super::secondary::prologue
-);
+isa_entry!(primary_entry => super::primary::prologue);
+isa_entry!(secondary_entry => super::secondary::prologue);
 
 boot_fn!(
     /// Install the boot page table and continue at the kernel's link-time addresses.
     ///
     /// Preserves `a0` and `a1`, initializes `gp` and `tp`, and leaves stack setup to the
-    /// selected prologue.
+    /// prologue `t2` names.
     fn enter_high in entry {
         // Only the physical park-vector address is valid before translation.
         "lla  t0, {park}",
@@ -83,17 +76,16 @@ boot_fn!(
 
 boot_fn!(
     /// Stackless park vector used before trap dispatch is available.
+    ///
+    /// `stvec` reads the low two address bits as a mode, so firmware must find this entry
+    /// 4-byte aligned. `.balign` gives `.text.init.trap` that alignment, and this function is
+    /// the section's only occupant, so the section's base is the entry. `kernel.ld` asserts
+    /// the result.
+    #[unsafe(no_mangle)]
     fn trap_park in trap {
-        // `stvec` uses the low two address bits as its mode.
         ".balign 4",
-        ".globl _trap_vector",
-        "_trap_vector:",
         "1:",
         "wfi",
         "j 1b",
     }
 );
-
-pub(super) fn secondary_entry_address() -> VirtualAddr {
-    VirtualAddr::new(secondary_entry as *const () as usize)
-}

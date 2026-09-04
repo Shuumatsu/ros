@@ -3,20 +3,29 @@
 use riscv::interrupt::supervisor::Interrupt;
 use riscv::register::{sie, sstatus};
 
+/// `sstatus.SIE`, encoded as the immediate the masking instructions below take.
+const SIE: usize = 1 << 1;
+
 /// Runs `f` with supervisor interrupts masked, then restores the previous state.
 pub fn without<R>(f: impl FnOnce() -> R) -> R {
-    let was_enabled = sstatus::read().sie();
-    if was_enabled {
-        // SAFETY: the previous interrupt state is restored below.
-        unsafe { sstatus::clear_sie() };
-    }
+    let previous: usize;
+    // SAFETY: reads `sstatus` and clears `SIE` in one instruction; the bit is restored below.
+    unsafe {
+        core::arch::asm!(
+            "csrrci {previous}, sstatus, {sie}",
+            previous = out(reg) previous,
+            sie = const SIE,
+            options(nostack)
+        )
+    };
 
     let result = f();
 
-    if was_enabled {
-        // SAFETY: restoring the bit this function cleared, on the same hart.
-        unsafe { sstatus::set_sie() };
-    }
+    // SAFETY: sets the bit this function cleared, on the same hart. A zero mask sets nothing,
+    // so interrupts that were already masked stay masked.
+    unsafe {
+        core::arch::asm!("csrs sstatus, {mask}", mask = in(reg) previous & SIE, options(nostack))
+    };
     result
 }
 

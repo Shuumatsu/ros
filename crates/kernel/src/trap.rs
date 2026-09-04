@@ -23,7 +23,7 @@ pub fn init() {
 pub(crate) fn handle(cause: Cause, frame: &mut TrapFrame) {
     match cause {
         Cause::Timer => {
-            if frame.from_user() {
+            if frame.interrupted_user() {
                 process::record_user_tick();
             }
             crate::time::timer::tick()
@@ -31,18 +31,19 @@ pub(crate) fn handle(cause: Cause, frame: &mut TrapFrame) {
         Cause::Syscall => crate::syscall::dispatch(frame),
         Cause::Software => panic!("supervisor software interrupt with no handler"),
         Cause::External => panic!("supervisor external interrupt with no handler"),
-        Cause::Fault(fault) if frame.from_user() => faulted(&fault, frame),
-        Cause::Fault(fault) => fatal(&fault, frame),
+        Cause::Fault if frame.interrupted_user() => faulted(frame),
+        Cause::Fault => fatal(frame),
     }
 }
 
-fn faulted(fault: &Fault, frame: &TrapFrame) -> ! {
-    println!("[trap] the running process faulted: {fault}\n{frame}");
+fn faulted(frame: &TrapFrame) -> ! {
+    println!("[trap] the running process faulted: {}\n{frame}", Fault::current());
     process::kill()
 }
 
 /// Reports a fatal trap without acquiring the potentially faulting console lock.
-fn fatal(fault: &Fault, frame: &TrapFrame) -> ! {
+fn fatal(frame: &TrapFrame) -> ! {
+    let fault = Fault::current();
     emergency_println!("[trap] the register file at the fault:\n{frame}");
     panic!("unhandled supervisor trap: {fault}");
 }

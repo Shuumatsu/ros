@@ -110,7 +110,7 @@ SECTIONS {
 /* Page-sized gaps detect orphan sections that the kernel page table would not map. */
 ASSERT(_start == _memory_start, "_start must be the first byte of the Image")
 ASSERT(_image_header_end - _start == 64, "RISC-V Image header must be 64 bytes")
-ASSERT((_trap_vector & 3) == 0, "the early trap vector must be 4-byte aligned: stvec reads its low two bits as a mode")
+ASSERT((trap_park & 3) == 0, "the boot park vector must be 4-byte aligned: stvec reads its low two bits as a mode")
 ASSERT(_rodata_start - _text_end   < _page_size, "orphan section between .text and .rodata")
 ASSERT(_data_start   - _rodata_end < _page_size, "orphan section between .rodata and .data")
 ASSERT(_bss_start    - _data_end   < _page_size, "orphan section between .data and .bss")

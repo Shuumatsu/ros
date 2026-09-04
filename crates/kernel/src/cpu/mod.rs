@@ -129,13 +129,9 @@ pub fn try_hart_id() -> Option<usize> { try_current().map(Cpu::hartid) }
 
 static ONLINE: AtomicUsize = AtomicUsize::new(0);
 
-/// Installs the same control block in `tp` and `sscratch`.
 fn install_current(cpu: &'static Cpu) {
-    let pointer = cpu as *const Cpu as usize;
-    // SAFETY: `cpu` is a permanent control block with the representation expected by `tp`.
-    unsafe { arch::set_thread_pointer(pointer) };
-    // SAFETY: the trap vector requires the same permanent control block in `sscratch`.
-    unsafe { arch::trap::set_control_block(pointer) };
+    // SAFETY: `cpu` is a permanent control block with the representation `tp` readers expect.
+    unsafe { arch::adopt_control_block(cpu as *const Cpu as usize) };
 }
 
 pub fn init_boot(hartid: usize) {
