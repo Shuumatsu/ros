@@ -4,6 +4,7 @@
 //! because an invalid live mapping faults immediately after the `satp` write.
 
 use alloc::vec::Vec;
+use core::slice;
 
 use mmu::{MemoryAddr, PhysicalAddr, PteFlags, SUPERPAGE, Satp, Scheme, VirtualAddr, page_size_at};
 use spin::Once;
@@ -19,10 +20,9 @@ use crate::sync::IrqMutex;
 
 const KERNEL_ASID: usize = 0;
 
-/// `A` prevents walker writeback; writable mappings also pre-set `D`.
-const READ_ONLY: PteFlags = PteFlags::READ.union(PteFlags::ACCESS);
-const READ_EXEC: PteFlags = PteFlags::READ_EXECUTE.union(PteFlags::ACCESS);
-const READ_WRITE: PteFlags = PteFlags::READ_WRITE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
+const READ_ONLY: PteFlags = region::leaf_flags(PteFlags::READ);
+const READ_EXEC: PteFlags = region::leaf_flags(PteFlags::READ_EXECUTE);
+const READ_WRITE: PteFlags = region::leaf_flags(PteFlags::READ_WRITE);
 
 /// The largest level that tiles the range exactly; larger leaves could map adjacent memory.
 fn largest_level_for(base: PhysicalAddr, len: usize) -> usize {
@@ -52,45 +52,40 @@ fn direct<'a>(
     }
 }
 
-fn regions<'a>(windows: &'a [PhysRange]) -> Vec<Region<'a>> {
+fn regions<'a>(windows: &'a [PhysRange], stacks: &[Stack]) -> Vec<Region<'a>> {
     let mut regions = Vec::new();
-    let mut push = |region: Region<'a>| {
-        regions.push(region);
-    };
 
     for device in windows {
-        push(Region {
-            name: device.name(),
-            va: phys_to_virt(device.base),
-            pa: device.base,
-            len: device.size,
-            level: largest_level_for(device.base, device.size),
-            flags: READ_WRITE,
-        });
+        regions.push(direct(
+            device.name(),
+            phys_to_virt(device.base),
+            phys_to_virt(device.end()),
+            largest_level_for(device.base, device.size),
+            READ_WRITE,
+        ));
     }
 
-    push(direct("text", layout::text_start(), layout::text_end(), 0, READ_EXEC));
-    push(direct("rodata", layout::rodata_start(), layout::rodata_end(), 0, READ_ONLY));
-    push(direct("data", layout::data_start(), layout::data_end(), 0, READ_WRITE));
-    push(direct("bss", layout::bss_start(), layout::bss_end(), 0, READ_WRITE));
+    regions.push(direct("text", layout::text_start(), layout::text_end(), 0, READ_EXEC));
+    regions.push(direct("rodata", layout::rodata_start(), layout::rodata_end(), 0, READ_ONLY));
+    regions.push(direct("data", layout::data_start(), layout::data_end(), 0, READ_WRITE));
+    regions.push(direct("bss", layout::bss_start(), layout::bss_end(), 0, READ_WRITE));
     // Separate regions leave each guard page unmapped.
-    for stack in stack::all() {
-        push(stack_region(&stack));
+    for stack in stacks {
+        regions.push(stack_region(stack));
     }
 
     // Exclude the image because its sections require stricter permissions.
     let pool = frame::owned_range();
     let pool_start_va = phys_to_virt(pool.base);
     let pool_end_va = phys_to_virt(pool.end());
-    let image_start = layout::memory_start();
-    let image_end = layout::kernel_top();
+    let (image_start, image_end) = layout::image();
     assert!(
         pool_start_va <= image_start && image_end <= pool_end_va,
         "the kernel image at {image_start:#x}..{image_end:#x} is not inside the frame pool at \
          {pool_start_va:#x}..{pool_end_va:#x}, so the two tilings below would leave a hole"
     );
-    tile_direct_map(&mut push, pool_start_va, image_start);
-    tile_direct_map(&mut push, image_end, pool_end_va);
+    tile_direct_map(&mut regions, pool_start_va, image_start);
+    tile_direct_map(&mut regions, image_end, pool_end_va);
 
     region::audit_disjoint(&regions);
     audit_kernel_va(&regions);
@@ -98,15 +93,15 @@ fn regions<'a>(windows: &'a [PhysRange]) -> Vec<Region<'a>> {
 }
 
 /// Tile the direct map without letting superpage rounding cross either endpoint.
-fn tile_direct_map<'a>(push: &mut impl FnMut(Region<'a>), start: VirtualAddr, end: VirtualAddr) {
+fn tile_direct_map<'a>(out: &mut Vec<Region<'a>>, start: VirtualAddr, end: VirtualAddr) {
     if end <= start {
         return;
     }
     let head_end = start.align_up(SUPERPAGE).min(end);
     let bulk_end = end.align_down(SUPERPAGE).max(head_end);
-    push(direct("direct map", start, head_end, 0, READ_WRITE));
-    push(direct("direct map", head_end, bulk_end, 1, READ_WRITE));
-    push(direct("direct map", bulk_end, end, 0, READ_WRITE));
+    out.push(direct("direct map", start, head_end, 0, READ_WRITE));
+    out.push(direct("direct map", head_end, bulk_end, 1, READ_WRITE));
+    out.push(direct("direct map", bulk_end, end, 0, READ_WRITE));
 }
 
 /// Require mappings above the direct map to be reserved through [`kernel_va`].
@@ -149,24 +144,17 @@ pub fn init(mmio: &[PhysRange]) {
         KERNEL.get().is_none(),
         "kernel_table::init called twice; the live table is already published"
     );
-    stack::seal();
 
+    // One snapshot drives the mappings and the guard-hole audit alike.
+    let stacks: Vec<Stack> = stack::all().collect();
     let windows = phys_range::coalesce(mmio);
-    let regions = regions(&windows);
+    let regions = regions(&windows, &stacks);
     let mut space = AddressSpace::new(KERNEL_ASID);
 
-    space.edit(|mapper| {
-        for region in &regions {
-            region
-                .install(mapper)
-                .unwrap_or_else(|error| panic!("mapping region '{}' failed: {error}", region.name));
-        }
-    });
+    space.edit(|mapper| region::install_all(mapper, &regions));
     space.walk(|mapper| {
-        for region in &regions {
-            region.audit(mapper);
-        }
-        audit_holes(mapper);
+        region::audit_all(mapper, &regions);
+        audit_holes(mapper, &stacks);
         audit_live_context(mapper);
     });
 
@@ -205,7 +193,7 @@ fn stack_region(stack: &Stack) -> Region<'static> {
         name: stack.name,
         va: stack.bottom(),
         pa: stack.pa(),
-        len: stack.bytes(),
+        len: stack::SIZE,
         level: 0,
         flags: READ_WRITE,
     }
@@ -231,13 +219,10 @@ pub(in crate::memory) fn map_stack(stack: &Stack) {
             stack.bottom()
         );
 
-        space.edit(|mapper| {
-            region
-                .install(mapper)
-                .unwrap_or_else(|error| panic!("mapping stack '{}' failed: {error}", stack.name))
-        });
+        let regions = slice::from_ref(&region);
+        space.edit(|mapper| region::install_all(mapper, regions));
         space.walk(|mapper| {
-            region.audit(mapper);
+            region::audit_all(mapper, regions);
             assert!(
                 mapper.translate(stack.guard()).is_none(),
                 "the guard page at {:#x} below stack '{}' came out mapped; it must stay a hole \
@@ -254,10 +239,10 @@ pub(in crate::memory) fn map_stack(stack: &Stack) {
 pub fn satp() -> Option<Satp> { with(|space| space.satp()) }
 
 /// Verify all deliberate guard gaps remain unmapped.
-fn audit_holes(mapper: &KernelMapper<'_>) {
+fn audit_holes(mapper: &KernelMapper<'_>, stacks: &[Stack]) {
     let unmapped = |va: VirtualAddr| mapper.entry_of(va).is_none();
 
-    for guard in stack::guards() {
+    for guard in stacks.iter().map(Stack::guard) {
         assert!(
             unmapped(guard),
             "the stack guard page at {guard:#x} is mapped; it must stay a hole or a \
@@ -279,13 +264,13 @@ fn audit_live_context(mapper: &KernelMapper<'_>) {
 }
 
 fn check_live(mapper: &KernelMapper<'_>, what: &str, va: VirtualAddr, needed: PteFlags) {
-    let (entry, _) = mapper
+    let (entry, level) = mapper
         .entry_of(va)
         .unwrap_or_else(|| panic!("the running {what} at {va:#x} would be unmapped"));
     assert!(entry.flags().contains(needed), "the running {what} at {va:#x} would lack {needed:?}");
     assert_eq!(
-        mapper.translate(va),
-        Some(virt_to_phys(va)),
+        entry.phys_at(va, level),
+        virt_to_phys(va),
         "the running {what} at {va:#x} would move to a different frame"
     );
 }

@@ -8,7 +8,6 @@ mod self_test;
 use core::num::NonZeroUsize;
 
 use frame_allocator::{FrameAllocator, FrameBlock, FrameRange, metadata_layout};
-use spin::Once;
 
 use mmu::PAGE_SIZE;
 use mmu::{MemoryAddr, PhysicalAddr};
@@ -23,17 +22,16 @@ pub use self_test::run as self_test;
 /// The interrupt-masking lock prevents same-hart reentrant allocation deadlock.
 static FRAME_ALLOCATOR: IrqMutex<Option<FrameAllocator<'static>>> = IrqMutex::new(None);
 
-static OWNED: Once<FrameRange> = Once::new();
-
 /// Return the full managed span, including ranges withheld within it.
 ///
 /// # Panics
 ///
 /// Panics before [`init`].
 pub fn owned_range() -> PhysRange {
-    let owned = OWNED.get().expect("frame::owned_range queried before frame::init");
-    let base = PhysicalAddr::from_ppn(owned.start());
-    PhysRange::new("frame pool", base, PhysicalAddr::from_ppn(owned.end()).sub_addr(base))
+    let range = FRAME_ALLOCATOR
+        .with(|slot| slot.as_ref().map(FrameAllocator::range))
+        .expect("frame::owned_range queried before frame::init");
+    reserve::phys_range("frame pool", range)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -79,7 +77,10 @@ impl Frames {
 ///
 /// Panics on repeated initialization or unusable pool geometry.
 pub fn init(ram: &PhysRange, image: PhysRange, foreign: &[PhysRange]) {
-    assert!(OWNED.get().is_none(), "frame::init called twice; the pool is already published");
+    assert!(
+        FRAME_ALLOCATOR.with(|slot| slot.is_none()),
+        "frame::init called twice; the pool is already published"
+    );
 
     let ram_end = ram.end();
     let usable_end = ram_end.min(direct_map::END);
@@ -119,8 +120,6 @@ pub fn init(ram: &PhysRange, image: PhysRange, foreign: &[PhysRange]) {
     };
     reserve::withhold_all(&mut allocator, pool, metadata, &carveouts);
     FRAME_ALLOCATOR.with(|slot| *slot = Some(allocator));
-
-    OWNED.call_once(|| pool);
 }
 
 pub fn report() {

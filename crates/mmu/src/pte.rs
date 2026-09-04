@@ -7,8 +7,8 @@ use bitflags::bitflags;
 use core::fmt;
 use core::mem::size_of;
 
-use crate::addr::PhysicalAddr;
-use crate::geometry::{ENTRY_SIZE, PPN_BITS};
+use crate::addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
+use crate::geometry::{ENTRY_SIZE, PPN_BITS, page_size_at};
 use crate::utils::{field, with_field};
 
 const PTE_PPN_SHIFT: usize = 10;
@@ -45,20 +45,17 @@ impl PteFlags {
     pub const USER_READ_WRITE_EXECUTE: Self = Self::PERMS.union(Self::USER);
 
     #[inline]
-    pub const fn is_leaf(self) -> bool { self.bits() & Self::PERMS.bits() != 0 }
+    pub const fn is_leaf(self) -> bool { self.intersects(Self::PERMS) }
 
     #[inline]
     pub const fn is_legal_leaf(self) -> bool {
-        self.bits() & Self::WRITE.bits() == 0 || self.bits() & Self::READ.bits() != 0
+        !self.contains(Self::WRITE) || self.contains(Self::READ)
     }
 
     /// Format permissions as an `rwx` triple.
     pub const fn rwx(self) -> &'static str {
-        match (
-            self.bits() & Self::READ.bits() != 0,
-            self.bits() & Self::WRITE.bits() != 0,
-            self.bits() & Self::EXECUTE.bits() != 0,
-        ) {
+        match (self.contains(Self::READ), self.contains(Self::WRITE), self.contains(Self::EXECUTE))
+        {
             (false, false, false) => "---",
             (false, false, true) => "--x",
             (false, true, false) => "-w-",
@@ -107,22 +104,18 @@ impl Entry {
         PteFlags::from_bits_truncate(field(self.0, 0, FLAG_BITS))
     }
 
-    pub fn set_flags(&mut self, flags: PteFlags) {
-        self.0 = with_field(self.0, 0, FLAG_BITS, flags.bits());
-    }
-
     pub const fn ppn(self) -> usize { field(self.0, PTE_PPN_SHIFT, PPN_BITS) }
-
-    /// Replace the PPN, ignoring `paddr`'s page offset.
-    pub fn set_ppn(&mut self, paddr: PhysicalAddr) {
-        self.0 = with_field(self.0, PTE_PPN_SHIFT, PPN_BITS, paddr.ppn());
-    }
 
     pub const fn target(self) -> PhysicalAddr { PhysicalAddr::from_ppn(self.ppn()) }
 
-    pub const fn is_valid(self) -> bool {
-        field(self.0, 0, FLAG_BITS) & PteFlags::VALID.bits() != 0
+    /// The physical address `vaddr` resolves to through this leaf at `level`.
+    #[inline]
+    pub fn phys_at(self, vaddr: VirtualAddr, level: usize) -> PhysicalAddr {
+        let page = page_size_at(level);
+        self.target().align_down(page).add(vaddr.align_offset(page))
     }
+
+    pub const fn is_valid(self) -> bool { self.flags().contains(PteFlags::VALID) }
 
     pub const fn is_leaf(self) -> bool { self.is_valid() && self.flags().is_leaf() }
 
@@ -170,13 +163,11 @@ mod tests {
     fn entry_validity_and_kind() {
         assert!(!Entry::empty().is_valid(), "zeroed entry is invalid");
 
-        let mut branch = Entry::empty();
-        branch.set_flags(PteFlags::VALID);
+        let branch = Entry::branch(PhysicalAddr::new(0x8020_0000));
         assert!(branch.is_branch(), "valid + no perms = branch");
         assert!(!branch.is_leaf());
 
-        let mut leaf = Entry::empty();
-        leaf.set_flags(PteFlags::VALID | PteFlags::READ);
+        let leaf = Entry::leaf(PhysicalAddr::new(0x8020_0000), PteFlags::READ);
         assert!(leaf.is_leaf(), "valid + R = leaf");
         assert!(!leaf.is_branch());
 
@@ -187,22 +178,36 @@ mod tests {
 
     #[test]
     fn ppn_storage_preserves_flags() {
-        let mut entry = Entry::empty();
-        entry.set_flags(PteFlags::VALID | PteFlags::READ | PteFlags::WRITE);
-        entry.set_ppn(PhysicalAddr::new(0x8020_0000));
+        let entry = Entry::leaf(PhysicalAddr::new(0x8020_0ABC), PteFlags::READ_WRITE);
 
-        assert_eq!(entry.ppn(), 0x8020_0000 >> 12, "ppn stored");
+        assert_eq!(entry.ppn(), 0x8020_0000 >> 12, "ppn stored without the page offset");
         assert_eq!(entry.target(), PhysicalAddr::new(0x8020_0000), "target is page-aligned frame");
         assert_eq!(entry.flags(), PteFlags::VALID | PteFlags::READ | PteFlags::WRITE, "flags kept");
     }
 
     #[test]
     fn the_ppn_field_spans_all_forty_four_bits() {
-        let mut entry = Entry::empty();
-        entry.set_ppn(PhysicalAddr::from_ppn((1 << PPN_BITS) - 1));
-        entry.set_flags(PteFlags::VALID | PteFlags::READ);
+        let entry = Entry::leaf(PhysicalAddr::from_ppn((1 << PPN_BITS) - 1), PteFlags::READ);
 
         assert_eq!(entry.ppn(), (1 << PPN_BITS) - 1, "a maximal PPN survives");
         assert_eq!(entry.flags(), PteFlags::VALID | PteFlags::READ, "and does not reach the flags");
+    }
+
+    #[test]
+    fn a_leaf_resolves_an_address_within_its_page() {
+        let leaf = Entry::leaf(PhysicalAddr::new(0x8020_0000), PteFlags::READ);
+        assert_eq!(
+            leaf.phys_at(VirtualAddr::new(0xDEAD_1ABC), 0),
+            PhysicalAddr::new(0x8020_0ABC),
+            "a 4 KiB leaf keeps the low 12 bits of the virtual address"
+        );
+
+        // A leaf installed mid-superpage still resolves from the superpage base.
+        let superpage = Entry::leaf(PhysicalAddr::new(0x8020_1000), PteFlags::READ);
+        assert_eq!(
+            superpage.phys_at(VirtualAddr::new(0xDEAD_1ABC), 1),
+            PhysicalAddr::new(0x802D_1ABC),
+            "a 2 MiB leaf keeps the low 21 bits of the virtual address"
+        );
     }
 }

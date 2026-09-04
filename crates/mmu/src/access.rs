@@ -12,17 +12,9 @@ pub unsafe trait PhysAccess {
     fn ptr<T>(&self, pa: PhysicalAddr) -> *mut T;
 }
 
-/// Direct physical-to-pointer conversion for identity-mapped memory.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Identity;
-
-// SAFETY: callers must provide a live identity mapping for every reachable frame.
-unsafe impl PhysAccess for Identity {
-    #[inline]
-    fn ptr<T>(&self, pa: PhysicalAddr) -> *mut T { pa.bits() as *mut T }
-}
-
 /// Physical memory is mapped at a fixed virtual offset: `VA = PA + offset`.
+///
+/// `LinearOffset(0)` is the identity mapping.
 #[derive(Clone, Copy, Debug)]
 pub struct LinearOffset(pub usize);
 

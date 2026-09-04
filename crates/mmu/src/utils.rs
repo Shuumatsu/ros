@@ -44,6 +44,9 @@ pub const fn align_offset(addr: usize, align: usize) -> usize {
     addr & (align - 1)
 }
 
+#[inline]
+pub const fn is_aligned(addr: usize, align: usize) -> bool { align_offset(addr, align) == 0 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

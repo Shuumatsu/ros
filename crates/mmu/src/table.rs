@@ -6,6 +6,7 @@ use crate::addr::{PhysicalAddr, VirtualAddr};
 use crate::geometry::{ENTRIES_PER_PAGE, PAGE_SIZE, ROOT_ENTRIES_PER_HALF};
 use crate::pte::{Entry, PteFlags};
 use crate::scheme::{Scheme, vpn};
+use crate::utils::is_aligned;
 
 /// A 512-entry, 4 KiB page table.
 ///
@@ -52,11 +53,11 @@ impl Table {
         assert!(flags.is_leaf(), "a root-page mapping needs at least one of R/W/X");
         assert!(flags.is_legal_leaf(), "write-without-read is a reserved PTE encoding");
         assert!(
-            vaddr.bits() & (S::ROOT_PAGE - 1) == 0,
+            is_aligned(vaddr.bits(), S::ROOT_PAGE),
             "a root-page virtual address must be aligned to a whole root slot"
         );
         assert!(
-            paddr.bits() & (S::ROOT_PAGE - 1) == 0,
+            is_aligned(paddr.bits(), S::ROOT_PAGE),
             "a root-page physical address must be aligned to a whole root slot"
         );
         self.entries[vpn::<S>(vaddr, S::ROOT_LEVEL)] = Entry::leaf(paddr, flags);

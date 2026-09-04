@@ -1,10 +1,10 @@
 //! Typed virtual and physical addresses.
 
 use crate::geometry::{PAGE_OFFSET_BITS, PPN_BITS};
-use crate::utils::{align_down, align_offset, align_up, field, with_field};
+use crate::utils::{align_down, align_offset, align_up, field, is_aligned, with_field};
 use core::fmt;
 
-/// Common checked, wrapping, and alignment operations for address types.
+/// Common checked arithmetic and alignment operations for address types.
 pub trait MemoryAddr: Copy + Clone + Ord + Eq {
     fn from_usize(addr: usize) -> Self;
     fn as_usize(self) -> usize;
@@ -14,26 +14,15 @@ pub trait MemoryAddr: Copy + Clone + Ord + Eq {
     }
     fn align_up(self, align: usize) -> Self { Self::from_usize(align_up(self.as_usize(), align)) }
     fn align_offset(self, align: usize) -> usize { align_offset(self.as_usize(), align) }
-    fn is_aligned(self, align: usize) -> bool {
-        debug_assert!(align.is_power_of_two(), "alignment must be power of 2");
-        self.as_usize() & (align - 1) == 0
-    }
+    fn is_aligned(self, align: usize) -> bool { is_aligned(self.as_usize(), align) }
 
-    fn offset(self, off: isize) -> Self {
-        Self::from_usize(self.as_usize().checked_add_signed(off).expect("address overflow"))
-    }
-    fn wrapping_offset(self, off: isize) -> Self {
-        Self::from_usize(self.as_usize().wrapping_add_signed(off))
-    }
-    fn offset_from(self, base: Self) -> isize {
-        (self.as_usize() as isize).checked_sub(base.as_usize() as isize).expect("offset overflow")
+    /// `[self, end)` rounded outward to whole `align`-sized units.
+    fn footprint(self, end: Self, align: usize) -> (Self, Self) {
+        (self.align_down(align), end.align_up(align))
     }
 
     fn add(self, rhs: usize) -> Self {
         Self::from_usize(self.as_usize().checked_add(rhs).expect("address overflow"))
-    }
-    fn wrapping_add(self, rhs: usize) -> Self {
-        Self::from_usize(self.as_usize().wrapping_add(rhs))
     }
     fn checked_add(self, rhs: usize) -> Option<Self> {
         self.as_usize().checked_add(rhs).map(Self::from_usize)
@@ -41,12 +30,6 @@ pub trait MemoryAddr: Copy + Clone + Ord + Eq {
 
     fn sub(self, rhs: usize) -> Self {
         Self::from_usize(self.as_usize().checked_sub(rhs).expect("address underflow"))
-    }
-    fn wrapping_sub(self, rhs: usize) -> Self {
-        Self::from_usize(self.as_usize().wrapping_sub(rhs))
-    }
-    fn checked_sub(self, rhs: usize) -> Option<Self> {
-        self.as_usize().checked_sub(rhs).map(Self::from_usize)
     }
 
     fn sub_addr(self, rhs: Self) -> usize {
@@ -112,7 +95,7 @@ impl MemoryAddr for PhysicalAddr {
 impl PhysicalAddr {
     pub const fn new(paddr: usize) -> Self { Self(paddr) }
 
-    pub fn from_parts(ppn: usize, offset: usize) -> Self {
+    pub const fn from_parts(ppn: usize, offset: usize) -> Self {
         let bits = with_field(0, PAGE_OFFSET_BITS, PPN_BITS, ppn);
         Self(with_field(bits, 0, PAGE_OFFSET_BITS, offset))
     }

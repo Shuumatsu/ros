@@ -26,10 +26,7 @@ pub trait Scheme {
     const HALF_SPAN: usize = ROOT_ENTRIES_PER_HALF * Self::ROOT_PAGE;
 
     /// Whether bits above `VA_BITS - 1` sign-extend that bit.
-    fn is_canonical(va: VirtualAddr) -> bool {
-        let top = (va.bits() as i64) >> (Self::VA_BITS - 1);
-        top == 0 || top == -1
-    }
+    fn is_canonical(va: VirtualAddr) -> bool { Self::canonicalize(va) == va }
 
     /// Sign-extend bit `VA_BITS - 1`.
     fn canonicalize(va: VirtualAddr) -> VirtualAddr {

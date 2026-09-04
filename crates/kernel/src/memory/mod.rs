@@ -39,11 +39,9 @@ pub fn init_allocators(machine: MachineMemory<'_>) {
     direct_map::report();
     machine.check();
 
-    let image = PhysRange::new(
-        "kernel image",
-        virt_to_phys(layout::memory_start()),
-        layout::kernel_top().sub_addr(layout::memory_start()),
-    );
+    let (image_start, image_end) = layout::image();
+    let image =
+        PhysRange::new("kernel image", virt_to_phys(image_start), image_end.sub_addr(image_start));
     assert!(
         machine.ram.base <= image.base && image.end() <= machine.ram.end(),
         "the kernel image occupies {:#x}..{:#x}, which is not inside the RAM bank at \
@@ -76,6 +74,8 @@ pub fn init_page_table(machine: MachineMemory<'_>) {
     stack::report();
     kernel_va::report();
 
+    // The table maps the stacks that exist now, so no later one could be mapped by anything.
+    stack::seal();
     kernel_table::init(machine.mmio);
 
     stack::self_test(alloc_kernel_stack("runtime stack self-test"));

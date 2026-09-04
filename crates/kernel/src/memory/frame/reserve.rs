@@ -4,7 +4,7 @@ use frame_allocator::{FrameAllocator, FrameRange};
 use heapless::Vec;
 
 use mmu::PAGE_SIZE;
-use mmu::{MemoryAddr, PhysicalAddr};
+use mmu::PhysicalAddr;
 
 use crate::memory::machine::MAX_FOREIGN;
 use crate::memory::phys_range::PhysRange;
@@ -19,21 +19,22 @@ const METADATA: &str = "frame bitmap";
 
 /// A range withheld from the frame pool.
 #[derive(Clone, Debug)]
-pub struct Reservation {
+struct Reservation {
     /// Page-rounded range clipped to the pool.
-    pub range: PhysRange,
+    range: PhysRange,
     /// Frames not already covered by earlier overlapping reservations.
-    pub newly_withheld: usize,
+    newly_withheld: usize,
 }
 
 impl Reservation {
-    pub fn frames(&self) -> usize { self.range.size / PAGE_SIZE }
+    fn frames(&self) -> usize { self.range.size / PAGE_SIZE }
 }
 
 static RESERVATIONS: IrqMutex<Vec<Reservation, MAX_RESERVATIONS>> = IrqMutex::new(Vec::new());
 
-pub fn list() -> Vec<Reservation, MAX_RESERVATIONS> {
-    RESERVATIONS.with(|reservations| reservations.clone())
+/// The byte range `frames` covers, under `name`.
+pub fn phys_range(name: &str, frames: FrameRange) -> PhysRange {
+    PhysRange::new(name, PhysicalAddr::from_ppn(frames.start()), frames.len() * PAGE_SIZE)
 }
 
 fn ppn_span(range: &PhysRange) -> (usize, usize) {
@@ -50,8 +51,9 @@ fn ppn_span(range: &PhysRange) -> (usize, usize) {
 ///
 /// Panics if no suitable run exists.
 pub fn place_metadata(pool: FrameRange, frames: usize, carveouts: &[PhysRange]) -> FrameRange {
+    // Every conflict moves `start` past that carve-out, so this runs at most once per carve-out.
     let mut start = pool.start();
-    for _ in 0..=carveouts.len() {
+    loop {
         let end = start.saturating_add(frames);
         assert!(
             end <= pool.end(),
@@ -61,15 +63,15 @@ pub fn place_metadata(pool: FrameRange, frames: usize, carveouts: &[PhysRange]) 
             carveouts.len()
         );
 
-        match carveouts.iter().find(|range| {
+        let conflict = carveouts.iter().find_map(|range| {
             let (first, last) = ppn_span(range);
-            first < end && start < last
-        }) {
-            Some(conflict) => start = ppn_span(conflict).1,
-            None => return FrameRange::new(start, end).expect("a bitmap spans at least one frame"),
-        }
+            (first < end && start < last).then_some(last)
+        });
+        let Some(past_conflict) = conflict else {
+            return FrameRange::new(start, end).expect("a bitmap spans at least one frame");
+        };
+        start = past_conflict;
     }
-    unreachable!("stepping past every carve-out leaves nothing left to conflict with")
 }
 
 /// Withhold the page-rounded intersection of `carveout` and `pool`.
@@ -98,18 +100,30 @@ fn withhold(
         );
     }
 
-    // Overlapping carve-outs share frames without double-reserving them.
+    // Overlapping carve-outs share frames, so reserve only the runs no earlier one covers.
     let free_before = allocator.free_frames();
     let mut newly = 0;
-    for frame in range.start()..range.end() {
-        if withheld.iter().any(|held| held.start() <= frame && frame < held.end()) {
-            continue;
+    let mut cursor = range.start();
+    while cursor < range.end() {
+        while let Some(covering) = withheld.iter().find(|held| held.contains(cursor)) {
+            cursor = covering.end();
         }
-        let single = FrameRange::new(frame, frame + 1).expect("frame + 1 always exceeds frame");
-        allocator.reserve(single).unwrap_or_else(|error| {
-            panic!("reserving {name} at {start:#x}..{end:#x} failed at frame {frame}: {error}")
+        if cursor >= range.end() {
+            break;
+        }
+        let run_end = withheld
+            .iter()
+            .map(|held| held.start())
+            .filter(|&first| first > cursor)
+            .min()
+            .unwrap_or(range.end())
+            .min(range.end());
+        let run = FrameRange::new(cursor, run_end).expect("a run spans at least one frame");
+        allocator.reserve(run).unwrap_or_else(|error| {
+            panic!("reserving {name} at {start:#x}..{end:#x} failed at frame {cursor}: {error}")
         });
-        newly += 1;
+        newly += run_end - cursor;
+        cursor = run_end;
     }
     withheld.push(range).expect("one reservation per carve-out, plus the metadata");
 
@@ -119,15 +133,7 @@ fn withhold(
         "reserving {newly} new frames for {name} did not remove them from the pool"
     );
 
-    let withheld_base = PhysicalAddr::from_ppn(range.start());
-    let record = Reservation {
-        range: PhysRange::new(
-            name,
-            withheld_base,
-            PhysicalAddr::from_ppn(range.end()).sub_addr(withheld_base),
-        ),
-        newly_withheld: newly,
-    };
+    let record = Reservation { range: phys_range(name, range), newly_withheld: newly };
     RESERVATIONS
         .with(|reservations| reservations.push(record))
         .expect("one reservation per carve-out, plus the metadata");
@@ -144,9 +150,7 @@ pub fn withhold_all(
 ) {
     let mut withheld: Vec<FrameRange, MAX_RESERVATIONS> = Vec::new();
 
-    let base = PhysicalAddr::from_ppn(metadata.start());
-    let size = PhysicalAddr::from_ppn(metadata.end()).sub_addr(base);
-    withhold(allocator, pool, &mut withheld, &PhysRange::new(METADATA, base, size));
+    withhold(allocator, pool, &mut withheld, &phys_range(METADATA, metadata));
 
     for range in carveouts {
         withhold(allocator, pool, &mut withheld, range);
@@ -154,19 +158,20 @@ pub fn withhold_all(
 }
 
 pub fn report() {
-    let reserved = list();
-    let frames: usize = reserved.iter().map(|entry| entry.newly_withheld).sum();
-    println!("[memory]   withheld {} frames in {} reservations:", frames, reserved.len());
-    for entry in &reserved {
-        let overlap = entry.frames() - entry.newly_withheld;
-        let note = if overlap > 0 { " (already covered)" } else { "" };
-        println!(
-            "[memory]     {:<24} {:#x}..{:#x} ({}){}",
-            entry.range.name(),
-            entry.range.base,
-            entry.range.end(),
-            ByteSize(entry.range.size),
-            note
-        );
-    }
+    RESERVATIONS.with(|reserved| {
+        let frames: usize = reserved.iter().map(|entry| entry.newly_withheld).sum();
+        println!("[memory]   withheld {} frames in {} reservations:", frames, reserved.len());
+        for entry in reserved.iter() {
+            let note =
+                if entry.newly_withheld < entry.frames() { " (already covered)" } else { "" };
+            println!(
+                "[memory]     {:<24} {:#x}..{:#x} ({}){}",
+                entry.range.name(),
+                entry.range.base,
+                entry.range.end(),
+                ByteSize(entry.range.size),
+                note
+            );
+        }
+    });
 }

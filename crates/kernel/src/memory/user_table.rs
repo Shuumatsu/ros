@@ -43,21 +43,14 @@ pub fn build(segments: &[Segment<'_>], kernel_stack: &Stack) -> AddressSpace {
     kernel_table::with(|kernel| space.share_upper_half_from(kernel))
         .expect("user_table::build before the kernel page table was published");
 
-    let mut regions: Vec<Region<'static>> = segments.iter().map(load).collect();
+    let mut regions: Vec<Region<'static>> = Vec::with_capacity(segments.len() + 1);
+    regions.extend(segments.iter().map(load));
     regions.push(stack_region());
     region::audit_disjoint(&regions);
 
-    space.edit(|mapper| {
-        for region in &regions {
-            region
-                .install(mapper)
-                .unwrap_or_else(|error| panic!("mapping '{}' failed: {error}", region.name));
-        }
-    });
+    space.edit(|mapper| region::install_all(mapper, &regions));
     space.walk(|mapper| {
-        for region in &regions {
-            region.audit(mapper);
-        }
+        region::audit_all(mapper, &regions);
 
         // Trap entry and return state must survive the shared-half switch.
         for (what, va) in [
@@ -80,9 +73,9 @@ pub fn build(segments: &[Segment<'_>], kernel_stack: &Stack) -> AddressSpace {
 
 /// Allocate and initialize one segment; bytes after `data` remain zero.
 fn load(segment: &Segment<'_>) -> Region<'static> {
-    let start = segment.vaddr.align_down(PAGE_SIZE);
+    let (start, end) = segment.vaddr.footprint(segment.vaddr.add(segment.bytes), PAGE_SIZE);
     let offset = segment.vaddr.sub_addr(start);
-    let span = (offset + segment.bytes).next_multiple_of(PAGE_SIZE);
+    let span = end.sub_addr(start);
 
     let frames = frame::alloc_contiguous(span / PAGE_SIZE)
         .unwrap_or_else(|| panic!("no contiguous RAM for a {span:#x}-byte user segment"));
@@ -103,7 +96,7 @@ fn load(segment: &Segment<'_>) -> Region<'static> {
         pa: frames.leak(),
         len: span,
         level: 0,
-        flags: leaf_flags(segment.rights),
+        flags: region::leaf_flags(segment.rights | PteFlags::USER),
     }
 }
 
@@ -117,18 +110,8 @@ fn stack_region() -> Region<'static> {
         pa: frames.leak(),
         len: STACK_SIZE,
         level: 0,
-        flags: leaf_flags(PteFlags::READ_WRITE),
+        flags: region::leaf_flags(PteFlags::USER_READ_WRITE),
     }
-}
-
-/// Add `USER` and pre-set `A`; writable mappings also pre-set `D`.
-fn leaf_flags(rights: PteFlags) -> PteFlags {
-    let status = if rights.contains(PteFlags::WRITE) {
-        PteFlags::ACCESS.union(PteFlags::DIRTY)
-    } else {
-        PteFlags::ACCESS
-    };
-    rights | PteFlags::USER | status
 }
 
 fn name_for(rights: PteFlags) -> &'static str {

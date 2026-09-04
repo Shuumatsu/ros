@@ -6,7 +6,7 @@
 
 use crate::addr::PhysicalAddr;
 use crate::geometry::{PAGE_SIZE, PPN_BITS};
-use crate::utils::{field, with_field};
+use crate::utils::{field, is_aligned, with_field};
 
 const PPN_SHIFT: usize = 0;
 const ASID_SHIFT: usize = 44;
@@ -93,7 +93,7 @@ impl Satp {
     /// If `root` is not page-aligned or `asid` exceeds 16 bits.
     pub const fn new(mode: Mode, asid: usize, root: PhysicalAddr) -> Self {
         assert!(
-            root.bits() & (PAGE_SIZE - 1) == 0,
+            is_aligned(root.bits(), PAGE_SIZE),
             "a satp root table address must be page aligned"
         );
         assert!(asid >> ASID_BITS == 0, "asid does not fit satp.ASID");
@@ -104,7 +104,7 @@ impl Satp {
         )
     }
 
-    pub const fn bare() -> Self { Self(0) }
+    pub const fn bare() -> Self { Self::from_bits(0) }
 
     pub const fn from_bits(bits: usize) -> Self { Self(bits) }
 
@@ -128,7 +128,7 @@ impl Satp {
     /// If `root` is not page-aligned.
     pub const fn with_root(self, root: PhysicalAddr) -> Self {
         assert!(
-            root.bits() & (PAGE_SIZE - 1) == 0,
+            is_aligned(root.bits(), PAGE_SIZE),
             "a satp root table address must be page aligned"
         );
         Self(with_field(self.0, PPN_SHIFT, PPN_BITS, root.ppn()))

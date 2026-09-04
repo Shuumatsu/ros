@@ -5,20 +5,11 @@ use mmu::{MemoryAddr, VirtualAddr};
 
 /// Declare linker symbols and typed virtual-address accessors.
 macro_rules! linker_symbol {
-    (
-        addresses { $($fn_name:ident => $sym_name:ident),* $(,)? }
-        raw { $($(#[$raw_doc:meta])* $raw_name:ident $(as $link_name:literal)?),* $(,)? }
-    ) => {
+    ($($fn_name:ident => $sym_name:ident),* $(,)?) => {
         unsafe extern "C" {
             $(
                 #[doc = concat!("Raw `", stringify!($sym_name), "`. Prefer [`", stringify!($fn_name), "`].")]
                 pub static $sym_name: u8;
-            )*
-            $(
-                $(#[$raw_doc])*
-                $(#[link_name = $link_name])?
-                $(#[doc = concat!("Linked as `", $link_name, "`.")])?
-                pub static $raw_name: u8;
             )*
         }
         $(
@@ -30,28 +21,31 @@ macro_rules! linker_symbol {
     };
 }
 
+unsafe extern "C" {
+    /// Linker-provided value loaded into `gp`. Linked as `__global_pointer$`.
+    #[link_name = "__global_pointer$"]
+    pub static GLOBAL_POINTER: u8;
+}
+
 linker_symbol!(
-    addresses {
-        text_start         => _text_start,
-        text_end           => _text_end,
-        rodata_start       => _rodata_start,
-        rodata_end         => _rodata_end,
-        data_start         => _data_start,
-        data_end           => _data_end,
-        bss_start          => _bss_start,
-        bss_end            => _bss_end,
-        memory_start       => _memory_start,
-        boot_stack_start   => _boot_stack_start,
-        boot_stack_end     => _boot_stack_end,
-        kernel_top         => _kernel_top,
-    }
-    raw {
-        /// Linker-provided value loaded into `gp`.
-        GLOBAL_POINTER as "__global_pointer$",
-    }
+    text_start         => _text_start,
+    text_end           => _text_end,
+    rodata_start       => _rodata_start,
+    rodata_end         => _rodata_end,
+    data_start         => _data_start,
+    data_end           => _data_end,
+    bss_start          => _bss_start,
+    bss_end            => _bss_end,
+    memory_start       => _memory_start,
+    boot_stack_start   => _boot_stack_start,
+    boot_stack_end     => _boot_stack_end,
+    kernel_top         => _kernel_top,
 );
 
 // These declarations are PC-relative symbol addresses, not absolute linker values.
+
+/// The virtual extent of the loaded kernel image.
+pub fn image() -> (VirtualAddr, VirtualAddr) { (memory_start(), kernel_top()) }
 
 /// Zero `.bss` on the boot hart.
 ///

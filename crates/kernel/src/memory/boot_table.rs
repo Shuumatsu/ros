@@ -2,10 +2,10 @@
 
 use mmu::{PAGE_OFFSET_BITS, PPN_BITS, PhysicalAddr, PteFlags, Satp, Scheme, Table};
 
-use super::{KernelScheme, direct_map};
+use super::{KernelScheme, direct_map, region};
 
-/// Temporary blanket rights with `A`/`D` set to keep the walker from writing `.rodata`.
-const BOOT: PteFlags = PteFlags::READ_WRITE_EXECUTE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
+/// Temporary blanket rights, with the status bits that keep the walker from writing `.rodata`.
+const BOOT: PteFlags = region::leaf_flags(PteFlags::READ_WRITE_EXECUTE);
 
 /// Compile-time table used by the architecture entry.
 ///

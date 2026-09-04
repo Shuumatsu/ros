@@ -16,11 +16,11 @@ use super::{frame, kernel_va, layout};
 use crate::arch;
 use crate::cpu::MAX_CPUS;
 use crate::sync::IrqMutex;
-use crate::utils::ByteSize;
+use crate::utils::{ByteSize, KIB};
 
 const GUARD_SIZE: usize = PAGE_SIZE;
 
-const SIZE: usize = 64 * 1024;
+pub const SIZE: usize = 64 * KIB;
 
 const STRIDE: usize = GUARD_SIZE + SIZE;
 const _: () = assert!(STRIDE.is_multiple_of(16), "kernel stack top must be 16-byte aligned");
@@ -42,8 +42,6 @@ impl Stack {
     pub fn top(&self) -> VirtualAddr { self.bottom.add(SIZE) }
 
     pub fn pa(&self) -> PhysicalAddr { self.pa }
-
-    pub fn bytes(&self) -> usize { SIZE }
 }
 
 /// Linker-placed boot stack backing storage, accessed only through `sp`.
@@ -139,21 +137,21 @@ pub fn all() -> impl Iterator<Item = Stack> {
     core::iter::once(boot()).chain(allocated)
 }
 
-pub fn guards() -> impl Iterator<Item = VirtualAddr> { all().map(|stack| stack.guard()) }
-
 /// Prevent further [`alloc()`] calls before the table snapshots [`all`].
 pub fn seal() { SEALED.store(true, Ordering::Release); }
 
 pub fn report() {
-    let allocated = ALLOCATED.with(|allocated| allocated.clone());
+    let (count, span) = ALLOCATED.with(|allocated| {
+        let span = allocated.first().zip(allocated.last()).map(|(a, b)| (a.guard(), b.top()));
+        (allocated.len(), span)
+    });
     println!(
-        "[memory] stacks: 1 boot + {} allocated x {} (each above a {} guard)",
-        allocated.len(),
+        "[memory] stacks: 1 boot + {count} allocated x {} (each above a {} guard)",
         ByteSize(SIZE),
         ByteSize(GUARD_SIZE)
     );
-    if let (Some(first), Some(last)) = (allocated.first(), allocated.last()) {
-        println!("[memory]   allocated stacks at {:#x}..{:#x}", first.guard(), last.top());
+    if let Some((first, last)) = span {
+        println!("[memory]   allocated stacks at {first:#x}..{last:#x}");
     }
 }
 

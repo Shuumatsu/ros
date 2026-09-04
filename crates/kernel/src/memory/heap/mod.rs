@@ -53,33 +53,30 @@ impl KernelHeap {
 // under the same lock.
 unsafe impl GlobalAlloc for KernelHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let mut grown = false;
-        loop {
+        // One growth attempt, then one retry; a second `Grow` means growing did not help.
+        for _ in 0..2 {
             match self.0.with(|heap| heap.allocate(layout)) {
                 Outcome::Served(block) => return block.as_ptr(),
-                Outcome::Grow { at_least } => {
-                    if grown {
-                        return ptr::null_mut();
-                    }
-                    grown = true;
-                    if self.add_frames(at_least).is_none() {
-                        println!("[memory] kernel heap cannot grow: the frame pool is exhausted");
-                        return ptr::null_mut();
-                    }
+                Outcome::Grow { at_least } if self.add_frames(at_least).is_some() => {}
+                Outcome::Grow { .. } => {
+                    println!("[memory] kernel heap cannot grow: the frame pool is exhausted");
+                    break;
                 }
                 Outcome::AtCeiling { wanted } => {
-                    let Stats { total, .. } = self.0.with(|heap| heap.stats());
+                    let (Stats { total, .. }, limits) =
+                        self.0.with(|heap| (heap.stats(), heap.limits()));
                     println!(
                         "[memory] kernel heap refusing to grow by {} past its {} ceiling \
                          ({} given out)",
                         ByteSize(wanted),
-                        ByteSize(self.0.with(|heap| heap.limits()).max),
+                        ByteSize(limits.max),
                         ByteSize(total)
                     );
-                    return ptr::null_mut();
+                    break;
                 }
             }
         }
+        ptr::null_mut()
     }
 
     unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {

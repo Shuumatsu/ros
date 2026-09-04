@@ -47,13 +47,13 @@ pub fn reserve(len: usize, align: usize) -> VirtualAddr {
 
         let base = from.align_up(align);
         assert!(base >= from, "aligning the kernel VA watermark to {align:#x} wrapped");
-        let top = base.checked_add(len).filter(|top| *top <= END).unwrap_or_else(|| {
+        let Some(top) = base.checked_add(len).filter(|top| *top <= END) else {
             panic!(
                 "out of kernel virtual address space: {len:#x} bytes wanted at {base:#x}, \
                  {:#x} left below {END:#x}",
                 remaining()
             )
-        });
+        };
 
         // Relaxed is sufficient because only address ownership is published.
         let claimed =

@@ -5,11 +5,10 @@ use core::marker::PhantomData;
 use crate::access::PhysAccess;
 use crate::addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
 use crate::frames::FrameSource;
-use crate::geometry::{ENTRIES_PER_PAGE, PAGE_OFFSET_BITS, VPN_BITS, page_size_at};
+use crate::geometry::{ENTRIES_PER_PAGE, page_size_at};
 use crate::pte::{Entry, PteFlags};
 use crate::scheme::{Scheme, vpn};
 use crate::table::Table;
-use crate::utils::mask;
 
 /// Why a mapping could not be installed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -45,14 +44,6 @@ impl Unmapped {
     pub fn bytes(&self) -> usize { page_size_at(self.level) }
 }
 
-#[inline]
-fn leaf_to_phys(entry: Entry, vaddr: VirtualAddr, level: usize) -> PhysicalAddr {
-    let page_bits = PAGE_OFFSET_BITS + VPN_BITS * level;
-    let in_page = mask(page_bits);
-    let base = entry.ppn() << PAGE_OFFSET_BITS;
-    PhysicalAddr::new((base & !in_page) | (vaddr.bits() & in_page))
-}
-
 fn validate<S: Scheme>(
     vaddr: VirtualAddr,
     paddr: PhysicalAddr,
@@ -79,16 +70,19 @@ fn validate<S: Scheme>(
 }
 
 /// A page-table tree bound to its frame source and physical-access policy.
+///
+/// Every level is reached through [`PhysAccess`], so the root is held as a
+/// pointer like its descendants; the lifetime keeps the borrow exclusive.
 pub struct Mapper<'a, S, F, A> {
-    root: &'a mut Table,
+    root: *mut Table,
     frames: F,
     access: A,
-    scheme: PhantomData<S>,
+    marker: PhantomData<(S, &'a mut Table)>,
 }
 
 impl<'a, S: Scheme, F: FrameSource, A: PhysAccess> Mapper<'a, S, F, A> {
     pub fn new(root: &'a mut Table, frames: F, access: A) -> Self {
-        Self { root, frames, access, scheme: PhantomData }
+        Self { root, frames, access, marker: PhantomData }
     }
 
     pub fn frames_mut(&mut self) -> &mut F { &mut self.frames }
@@ -143,26 +137,35 @@ impl<'a, S: Scheme, F: FrameSource, A: PhysAccess> Mapper<'a, S, F, A> {
         Ok(())
     }
 
-    /// Return the mapping leaf and its level, including permission flags.
-    pub fn entry_of(&self, vaddr: VirtualAddr) -> Option<(Entry, usize)> {
-        let mut table: *const Table = self.root;
+    /// Descend to the leaf mapping `vaddr`, returning its table, slot, and level.
+    fn locate(&self, vaddr: VirtualAddr) -> Option<(*mut Table, usize, usize)> {
+        let mut table = self.root;
         for level in (0..S::LEVELS).rev() {
-            // SAFETY: `table` is the root or a child from a valid branch entry.
-            let entry = unsafe { (*table).entries[vpn::<S>(vaddr, level)] };
+            let index = vpn::<S>(vaddr, level);
+            // SAFETY: `table` is the root or a child reached through a valid
+            // branch entry, and `access` maps such frames to live pointers.
+            let entry = unsafe { (*table).entries[index] };
             if !entry.is_valid() {
                 return None;
             }
             if entry.is_leaf() {
-                return Some((entry, level));
+                return Some((table, index, level));
             }
             table = self.access.ptr::<Table>(entry.target());
         }
         None
     }
 
+    /// Return the mapping leaf and its level, including permission flags.
+    pub fn entry_of(&self, vaddr: VirtualAddr) -> Option<(Entry, usize)> {
+        let (table, index, level) = self.locate(vaddr)?;
+        // SAFETY: `locate` returns a live table and the slot holding the found leaf.
+        Some((unsafe { (*table).entries[index] }, level))
+    }
+
     /// Translate through a leaf at any level, or return `None` for an invalid walk.
     pub fn translate(&self, vaddr: VirtualAddr) -> Option<PhysicalAddr> {
-        self.entry_of(vaddr).map(|(entry, level)| leaf_to_phys(entry, vaddr, level))
+        self.entry_of(vaddr).map(|(entry, level)| entry.phys_at(vaddr, level))
     }
 
     /// Remove and return the leaf mapping `vaddr`.
@@ -170,23 +173,10 @@ impl<'a, S: Scheme, F: FrameSource, A: PhysAccess> Mapper<'a, S, F, A> {
     /// Leaf frames are not released, intermediate tables remain allocated, and
     /// the caller must perform any required TLB invalidation.
     pub fn unmap(&mut self, vaddr: VirtualAddr) -> Option<Unmapped> {
-        let mut table: *mut Table = self.root;
-        for level in (0..S::LEVELS).rev() {
-            let index = vpn::<S>(vaddr, level);
-            // SAFETY: `table` is the root or a child from a valid branch entry, and
-            // `access` maps such frames to live pointers.
-            let entry = unsafe { (*table).entries[index] };
-            if !entry.is_valid() {
-                return None;
-            }
-            if entry.is_leaf() {
-                // SAFETY: `table` is live and `index` selects the found leaf.
-                unsafe { (*table).entries[index] = Entry::empty() };
-                return Some(Unmapped { frame: entry.target(), level });
-            }
-            table = self.access.ptr::<Table>(entry.target());
-        }
-        None
+        let (table, index, level) = self.locate(vaddr)?;
+        // SAFETY: `locate` returns a live table and the slot holding the found leaf.
+        let entry = unsafe { core::mem::replace(&mut (*table).entries[index], Entry::empty()) };
+        Some(Unmapped { frame: entry.target(), level })
     }
 
     /// Map every page of the size `level` selects that overlaps `[start, end)`,
@@ -209,8 +199,7 @@ impl<'a, S: Scheme, F: FrameSource, A: PhysAccess> Mapper<'a, S, F, A> {
             return Err(MapError::InvalidLevel { level, levels: S::LEVELS });
         }
         let page = page_size_at(level);
-        let mut va = start.align_down(page);
-        let end = end.align_up(page);
+        let (mut va, end) = start.footprint(end, page);
         while va < end {
             self.map_at_level(va, translate(va), level, flags)?;
             va = va.add(page);
@@ -249,9 +238,8 @@ impl<'a, S: Scheme, F: FrameSource, A: PhysAccess> Mapper<'a, S, F, A> {
     /// Every branch must come from this mapper's [`FrameSource`]. The tree must
     /// no longer be used by hardware, including stale TLB entries.
     pub unsafe fn free_subtables(&mut self) {
-        let root: *mut Table = self.root;
         // SAFETY: forwarded from this function's contract.
-        unsafe { self.free_below(root, S::ROOT_LEVEL) };
+        unsafe { self.free_below(self.root, S::ROOT_LEVEL) };
     }
 
     /// # Safety
@@ -283,11 +271,11 @@ impl<'a, S: Scheme, F: FrameSource, A: PhysAccess> Mapper<'a, S, F, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access::Identity;
+    use crate::access::LinearOffset;
     use crate::geometry::PAGE_SIZE;
     use crate::scheme::{Sv39, Sv48};
 
-    type Sv39Mapper<'a, F> = Mapper<'a, Sv39, F, Identity>;
+    type Sv39Mapper<'a, F> = Mapper<'a, Sv39, F, LinearOffset>;
 
     #[derive(Default)]
     struct Arena {
@@ -323,13 +311,13 @@ mod tests {
         let phys = |v: VirtualAddr| PhysicalAddr::new(v.bits() - base.bits() + 0x8000_0000);
 
         let mut lhs = Table::new();
-        let mut generic = Sv39Mapper::new(&mut lhs, Arena::default(), Identity);
+        let mut generic = Sv39Mapper::new(&mut lhs, Arena::default(), LinearOffset(0));
         generic
             .map_range_at_level(base, base.add(span), 0, phys, PteFlags::READ_WRITE)
             .expect("explicit level-0 range must map");
 
         let mut rhs = Table::new();
-        let mut shorthand = Sv39Mapper::new(&mut rhs, Arena::default(), Identity);
+        let mut shorthand = Sv39Mapper::new(&mut rhs, Arena::default(), LinearOffset(0));
         shorthand
             .map_range(base, base.add(span), phys, PteFlags::READ_WRITE)
             .expect("shorthand range must map");
@@ -355,7 +343,7 @@ mod tests {
     #[test]
     fn map_range_at_level_builds_superpages_and_rejects_a_bad_level() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         let base = VirtualAddr::new(4 << 30);
         let superpage = page_size_at(1);
 
@@ -391,7 +379,7 @@ mod tests {
     #[test]
     fn entry_of_reports_the_flags_and_level_a_mapping_landed_at() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
 
         let text = VirtualAddr::new(4 << 21);
         let data = VirtualAddr::new(5 << 21);
@@ -430,7 +418,7 @@ mod tests {
     #[test]
     fn maps_and_translates_a_four_kib_page() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         let va = VirtualAddr::new((1 << 30) | (2 << 21) | (3 << 12));
         let pa = PhysicalAddr::new(0x8020_1000);
 
@@ -446,7 +434,7 @@ mod tests {
     fn maps_and_translates_superpages() {
         for (level, size) in [(1usize, 2 * 1024 * 1024usize), (2, 1024 * 1024 * 1024)] {
             let mut root = Table::new();
-            let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+            let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
             let va = VirtualAddr::new(4 * size);
             let pa = PhysicalAddr::new(6 * size);
 
@@ -467,7 +455,7 @@ mod tests {
     #[test]
     fn a_gigapage_needs_no_frames() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Barren, Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Barren, LinearOffset(0));
         let va = VirtualAddr::new(2 << 30);
         let pa = PhysicalAddr::new(2 << 30);
 
@@ -480,7 +468,7 @@ mod tests {
     #[test]
     fn reports_out_of_frames_below_the_root() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Barren, Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Barren, LinearOffset(0));
         let error = mapper
             .map(VirtualAddr::new(0x4000), PhysicalAddr::new(0x4000), RWX)
             .expect_err("a 4 KiB mapping needs intermediate tables");
@@ -490,7 +478,7 @@ mod tests {
     #[test]
     fn rejects_a_superpage_in_the_walk_path() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         let giga = 1 << 30;
         mapper
             .map_at_level(VirtualAddr::new(giga), PhysicalAddr::new(giga), Sv39::ROOT_LEVEL, RWX)
@@ -509,7 +497,7 @@ mod tests {
     #[test]
     fn rejects_misaligned_and_illegal_requests() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         let two_mib = 2 * 1024 * 1024;
 
         assert_eq!(
@@ -545,7 +533,7 @@ mod tests {
     #[test]
     fn unmapped_translates_to_none() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         mapper
             .map(
                 VirtualAddr::new(0x8000_0000),
@@ -560,7 +548,7 @@ mod tests {
     #[test]
     fn map_range_covers_a_partial_final_page() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         mapper
             .id_map_range(VirtualAddr::new(0x1000), VirtualAddr::new(0x3001), PteFlags::READ_WRITE)
             .expect("range must map");
@@ -579,7 +567,7 @@ mod tests {
     #[test]
     fn remapping_overwrites_the_leaf() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         let va = VirtualAddr::new(0x4000_0000);
         mapper.map(va, PhysicalAddr::new(0x1000), PteFlags::READ).expect("first map");
         mapper.map(va, PhysicalAddr::new(0x2000), PteFlags::READ_WRITE).expect("second map");
@@ -590,7 +578,7 @@ mod tests {
     #[test]
     fn free_subtables_returns_every_intermediate_frame() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         mapper
             .map(VirtualAddr::new(0x4000_0000), PhysicalAddr::new(0x1000), PteFlags::READ_WRITE)
             .expect("mapping must succeed");
@@ -611,7 +599,7 @@ mod tests {
     #[test]
     fn unmap_clears_one_leaf_and_leaves_its_neighbours() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         let base = VirtualAddr::new(0x4000_0000);
         mapper
             .id_map_range(base, base.add(3 * PAGE_SIZE), PteFlags::READ_WRITE)
@@ -646,7 +634,7 @@ mod tests {
     fn unmap_reports_the_level_a_superpage_was_installed_at() {
         let two_mib = page_size_at(1);
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         let va = VirtualAddr::new(0x4000_0000);
         mapper.map_at_level(va, PhysicalAddr::new(0), 1, PteFlags::READ_WRITE).expect("superpage");
 
@@ -663,7 +651,7 @@ mod tests {
     #[test]
     fn unmap_of_an_unmapped_address_reports_nothing() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         let va = VirtualAddr::new(0x4000_0000);
         mapper.map(va, PhysicalAddr::new(0x1000), PteFlags::READ_WRITE).expect("mapping");
 
@@ -676,7 +664,7 @@ mod tests {
     #[test]
     fn unmap_keeps_the_intermediate_tables_for_the_next_mapping() {
         let mut root = Table::new();
-        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), Identity);
+        let mut mapper = Sv39Mapper::new(&mut root, Arena::default(), LinearOffset(0));
         let va = VirtualAddr::new(0x4000_0000);
         mapper.map(va, PhysicalAddr::new(0x1000), PteFlags::READ_WRITE).expect("first mapping");
         let built = mapper.frames_mut().tables.len();
@@ -699,11 +687,11 @@ mod tests {
         let pa = PhysicalAddr::new(0x1000);
 
         let mut sv39_root = Table::new();
-        let mut sv39 = Mapper::<Sv39, _, _>::new(&mut sv39_root, Arena::default(), Identity);
+        let mut sv39 = Mapper::<Sv39, _, _>::new(&mut sv39_root, Arena::default(), LinearOffset(0));
         sv39.map(va, pa, PteFlags::READ_WRITE).expect("Sv39 mapping");
 
         let mut sv48_root = Table::new();
-        let mut sv48 = Mapper::<Sv48, _, _>::new(&mut sv48_root, Arena::default(), Identity);
+        let mut sv48 = Mapper::<Sv48, _, _>::new(&mut sv48_root, Arena::default(), LinearOffset(0));
         sv48.map(va, pa, PteFlags::READ_WRITE).expect("Sv48 mapping");
 
         assert_eq!(sv39.frames_mut().tables.len(), 2, "Sv39 descends from level 2");
@@ -718,7 +706,7 @@ mod tests {
         let pa = PhysicalAddr::new(0);
 
         let mut sv39_root = Table::new();
-        let mut sv39 = Mapper::<Sv39, _, _>::new(&mut sv39_root, Arena::default(), Identity);
+        let mut sv39 = Mapper::<Sv39, _, _>::new(&mut sv39_root, Arena::default(), LinearOffset(0));
         assert_eq!(
             sv39.map_at_level(va, pa, 3, RWX),
             Err(MapError::InvalidLevel { level: 3, levels: 3 }),
@@ -726,7 +714,7 @@ mod tests {
         );
 
         let mut sv48_root = Table::new();
-        let mut sv48 = Mapper::<Sv48, _, _>::new(&mut sv48_root, Arena::default(), Identity);
+        let mut sv48 = Mapper::<Sv48, _, _>::new(&mut sv48_root, Arena::default(), LinearOffset(0));
         assert_eq!(sv48.map_at_level(va, pa, 3, RWX), Ok(()), "under Sv48 level 3 is the root");
     }
 }

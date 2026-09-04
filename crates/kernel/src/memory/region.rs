@@ -7,6 +7,18 @@ use mmu::{
 
 use crate::utils::ByteSize;
 
+/// Add the status bits a leaf needs: `A` always, and `D` when it is writable.
+///
+/// Pre-setting them keeps the hardware walker from writing back into the table.
+pub const fn leaf_flags(rights: PteFlags) -> PteFlags {
+    let status = if rights.contains(PteFlags::WRITE) {
+        PteFlags::ACCESS.union(PteFlags::DIRTY)
+    } else {
+        PteFlags::ACCESS
+    };
+    rights.union(status)
+}
+
 /// A contiguous virtual-to-physical mapping with a constant offset.
 #[derive(Clone, Copy)]
 pub struct Region<'a> {
@@ -26,8 +38,7 @@ impl Region<'_> {
 
     /// The page-rounded virtual range installed by this region.
     pub fn footprint(&self) -> (VirtualAddr, VirtualAddr) {
-        let page = self.page_size();
-        (self.va.align_down(page), self.end_va().align_up(page))
+        self.va.footprint(self.end_va(), self.page_size())
     }
 
     pub fn pages(&self) -> usize {
@@ -117,13 +128,36 @@ impl Region<'_> {
                 "region '{}' has the wrong rights at {vaddr:#x}",
                 self.name
             );
+            // The leaf just found already answers this; translating would walk again.
             assert_eq!(
-                mapper.translate(vaddr),
-                Some(self.pa.add(offset)),
+                entry.phys_at(vaddr, level),
+                self.pa.add(offset),
                 "region '{}' translates {vaddr:#x} to the wrong frame",
                 self.name
             );
         }
+    }
+}
+
+/// Install every region, panicking with the offending region's name on failure.
+pub fn install_all<S: Scheme, F: FrameSource, A: PhysAccess>(
+    mapper: &mut Mapper<'_, S, F, A>,
+    regions: &[Region<'_>],
+) {
+    for region in regions {
+        region
+            .install(mapper)
+            .unwrap_or_else(|error| panic!("mapping region '{}' failed: {error}", region.name));
+    }
+}
+
+/// Verify every region's leaves against what it asked for.
+pub fn audit_all<S: Scheme, F: FrameSource, A: PhysAccess>(
+    mapper: &Mapper<'_, S, F, A>,
+    regions: &[Region<'_>],
+) {
+    for region in regions {
+        region.audit(mapper);
     }
 }
 
@@ -187,7 +221,7 @@ pub fn report(regions: &[Region<'_>]) {
             region.pa,
             region.flags.rwx(),
             pages,
-            ByteSize(region.page_size()),
+            ByteSize(page_size),
             Run(run)
         );
         index += run;

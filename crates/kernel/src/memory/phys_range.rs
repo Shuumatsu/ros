@@ -43,7 +43,7 @@ impl PhysRange {
 
     /// Range rounded outward to whole frames.
     pub fn footprint(&self) -> (PhysicalAddr, PhysicalAddr) {
-        (self.base.align_down(PAGE_SIZE), self.end().align_up(PAGE_SIZE))
+        self.base.footprint(self.end(), PAGE_SIZE)
     }
 }
 
@@ -51,28 +51,36 @@ impl PhysRange {
 ///
 /// Page-rounded overlaps are merged; adjacent windows remain separate.
 pub fn coalesce(windows: &[PhysRange]) -> Vec<PhysRange> {
-    let mut sorted: Vec<&PhysRange> = windows.iter().filter(|window| window.size > 0).collect();
+    struct Run<'a> {
+        name: &'a str,
+        start: PhysicalAddr,
+        end: PhysicalAddr,
+        joined: usize,
+    }
+
+    let mut sorted: Vec<&PhysRange> = Vec::with_capacity(windows.len());
+    sorted.extend(windows.iter().filter(|window| window.size > 0));
     sorted.sort_unstable_by_key(|window| window.base);
 
-    let mut runs: Vec<(&str, PhysicalAddr, PhysicalAddr, usize)> = Vec::new();
+    let mut runs: Vec<Run<'_>> = Vec::with_capacity(sorted.len());
     for window in sorted {
         let (start, end) = window.footprint();
         match runs.last_mut() {
-            Some(run) if start < run.2 => {
-                run.2 = run.2.max(end);
-                run.3 += 1;
+            Some(run) if start < run.end => {
+                run.end = run.end.max(end);
+                run.joined += 1;
             }
-            _ => runs.push((window.name(), start, end, 0)),
+            _ => runs.push(Run { name: window.name(), start, end, joined: 0 }),
         }
     }
 
     runs.into_iter()
-        .map(|(name, start, end, joined)| {
-            let mut label: String<NAME_LEN> = truncated(name);
-            if joined > 0 {
-                let _ = core::fmt::Write::write_fmt(&mut label, format_args!(" +{joined}"));
+        .map(|run| {
+            let mut label: String<NAME_LEN> = truncated(run.name);
+            if run.joined > 0 {
+                let _ = core::fmt::Write::write_fmt(&mut label, format_args!(" +{}", run.joined));
             }
-            PhysRange { name: label, base: start, size: end.sub_addr(start) }
+            PhysRange { name: label, base: run.start, size: run.end.sub_addr(run.start) }
         })
         .collect()
 }

@@ -19,7 +19,7 @@ pub mod scheme;
 pub mod table;
 pub(crate) mod utils;
 
-pub use access::{Identity, LinearOffset, PhysAccess};
+pub use access::{LinearOffset, PhysAccess};
 pub use addr::{MemoryAddr, PhysicalAddr, VirtualAddr};
 pub use frames::FrameSource;
 pub use geometry::{
