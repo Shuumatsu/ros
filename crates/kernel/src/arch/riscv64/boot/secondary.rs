@@ -1,11 +1,4 @@
-//! Secondary-hart startup: the whole protocol for bringing another hart up, and the
-//! prologue that receives it.
-//!
-//! Together because they are two halves of one handshake — the prologue's loads are
-//! `offset_of!` of the `#[repr(C)]` struct, so there is one definition and the offsets are
-//! derived from it — and because [`start_cpu`] is entirely SBI HSM. Which harts to start
-//! and what to give them is [`crate::cpu`]'s; *how* a hart is started is firmware's, and
-//! this is where firmware is named.
+//! Secondary-hart startup.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -16,11 +9,7 @@ use crate::memory::direct_map::virt_to_phys;
 
 const PUBLISHED: usize = 1;
 
-/// Data published by the boot hart before an SBI HSM start.
-///
-/// Storage belongs to the caller — one per cpu slot, so [`crate::cpu`] keeps it beside the
-/// hart it describes — but every field is this module's, written by [`start_cpu`] and read
-/// by the prologue below. Opaque to the owner.
+/// Release-published startup data consumed by the secondary prologue.
 #[repr(C)]
 pub(crate) struct SecondaryHandoff {
     ready: AtomicUsize,
@@ -52,18 +41,10 @@ impl SecondaryHandoff {
     }
 }
 
-/// Why a hart did not start.
-///
-/// Three cases rather than one, because they call for different reactions and
-/// `hart_start`'s error code does not tell them apart: a hart the firmware reserves is a
-/// machine fact, and a rejected start is a bug.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum StartError {
-    /// Firmware reports the hart is not stopped, so there is nothing to start.
     NotStopped(HartState),
-    /// Firmware would not say what state the hart is in.
     StatusUnavailable(sbi::Error),
-    /// Firmware refused the start request.
     Rejected(sbi::Error),
 }
 
@@ -79,16 +60,8 @@ impl core::fmt::Display for StartError {
 
 /// Start `hartid` on `satp` with `stack_top`, handing it `cpu` to adopt as its own.
 ///
-/// The whole of the SBI HSM sequence: ask what state the hart is in, publish the handoff,
-/// then request the start. Asking first because "already started" and "no such hart" are
-/// different problems that `hart_start`'s error code does not distinguish.
-///
-/// Returning `Ok` means firmware *accepted* the request, not that the hart arrived. The
-/// caller confirms arrival; nothing here can, since the hart reports in through Rust.
-///
-/// `handoff` must be the storage reserved for this hart and must not already have been
-/// published to — it is read by the prologue with an acquire that pairs with the release
-/// inside.
+/// `Ok` means firmware accepted the request; the caller must confirm arrival. `handoff`
+/// must be reserved for this hart and unpublished.
 pub(crate) fn start_cpu(
     hartid: usize,
     handoff: &SecondaryHandoff,
@@ -102,8 +75,7 @@ pub(crate) fn start_cpu(
         Err(error) => return Err(StartError::StatusUnavailable(error)),
     }
 
-    // The RISC-V calling convention requires a 16-byte-aligned `sp`, and the prologue
-    // loads this into one without adjusting it.
+    // The RISC-V ABI requires 16-byte stack alignment.
     assert!(
         stack_top.is_aligned(16),
         "hart {hartid}'s stack top {stack_top:#x} is not 16-byte aligned"
@@ -115,12 +87,7 @@ pub(crate) fn start_cpu(
     sbi::hart_start(hartid, entry_address(), opaque).map_err(StartError::Rejected)
 }
 
-/// The address firmware is given to start a hart at, and the one the boot log reports.
-///
-/// Physical, and converted here rather than by the caller: firmware starts a hart with
-/// `satp = 0`, so the entry it is handed has to be an address that exists before any
-/// translation does. That is a fact about how this ISA's harts start, so the crossing
-/// happens on this side of the boundary, and [`start_cpu`] and the log share one answer.
+/// Physical secondary entry address used while firmware has `satp = 0`.
 pub(crate) fn entry_address() -> PhysicalAddr {
     virt_to_phys(super::entry::secondary_entry_address())
 }
@@ -131,34 +98,20 @@ const STACK_TOP_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, stack_to
 const CPU_OFFSET: usize = core::mem::offset_of!(SecondaryHandoff, cpu);
 
 boot_fn!(
-    /// Adopt the kernel page table, the stack the boot hart reserved and the [`Cpu`]
-    /// it chose, then enter Rust.
-    ///
-    /// Still assembly, because the stack is only mapped by the kernel table: `sp` cannot be
-    /// set before the switch, and no Rust runs before `sp`.
-    ///
-    /// Reached from `super::entry::enter_high` with `a0` the hart id and `a1` the `opaque`
-    /// from `hart_start` — this hart's handoff, as a kernel VA, already reachable because
-    /// the boot table maps the high half too.
-    ///
-    /// [`Cpu`]: crate::cpu::Cpu
+    /// Installs the published page table, stack, and CPU pointer before entering Rust.
     pub(super) fn prologue in entry {
-        // Does not spin in practice — `publish` finishes before `hart_start` — but it is
-        // the acquire half of that release store: SBI does not promise the start request
-        // orders the boot hart's writes, and every field below is garbage if nothing does.
+        // This acquire pairs with `publish` because SBI does not order the boot hart's writes.
         "1:",
         "ld    t0, {ready}(a1)",
         "beqz  t0, 1b",
         "fence r, rw",
-        // Read out while `a1` is still the handoff: it is about to become the argument.
         "ld    t0, {satp}(a1)",
         "ld    t1, {stack_top}(a1)",
         "ld    a1, {cpu}(a1)",
         "csrw  satp, t0",
         "sfence.vma",
-        // Before the `tail`, which expands through `t1`.
         "mv    sp, t1",
-        // The outermost frame on this stack, so zero is what stops a gdb unwind.
+        // Terminate stack unwinding at this outermost frame.
         "mv    ra, zero",
         "tail  {secondary}",
     }

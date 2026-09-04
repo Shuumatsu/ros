@@ -1,16 +1,4 @@
-//! `mkfs` — build, inspect, and read back an rfs image on the host.
-//!
-//! A standalone host tool that depends on the `rfs` library (which stays
-//! `#![no_std]`); this crate is where all the `std` file I/O lives.
-//!
-//! Subcommands:
-//! ```text
-//!   mkfs create <image> <size-MiB> [source-dir]  format; optionally pack a dir
-//!   mkfs ls     <image> [path]                   list the tree under path (default /)
-//!   mkfs cat    <image> <path>                   write a file's bytes to stdout
-//! ```
-//!
-//! Run with `cargo run -p mkfs -- <args>`.
+//! Host utility for creating and inspecting rfs images.
 
 use std::io::Write;
 use std::path::Path;
@@ -69,7 +57,6 @@ fn create(args: &[String]) {
     );
 }
 
-/// Recursively copy the host directory `host_dir` into the image under `prefix`.
 fn pack(fs: &Fs, host_dir: &Path, prefix: &str, dirs: &mut usize, files: &mut usize) {
     let entries = std::fs::read_dir(host_dir)
         .unwrap_or_else(|e| die(format!("read_dir {}: {e}", host_dir.display())));
@@ -102,7 +89,6 @@ fn pack(fs: &Fs, host_dir: &Path, prefix: &str, dirs: &mut usize, files: &mut us
     }
 }
 
-/// Load an existing image file into a mounted filesystem.
 fn mount(image: &str) -> Fs {
     let bytes = std::fs::read(image).unwrap_or_else(|e| die(format!("reading {image}: {e}")));
     let ram = Arc::new(RamDisk::from_image(bytes));

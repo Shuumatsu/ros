@@ -1,16 +1,4 @@
-//! The kernel's virtual address space above the direct map.
-//!
-//! Everything the kernel maps at an address of its own choosing takes it from here. One
-//! watermark in one module, so two subsystems cannot independently claim the same range —
-//! a bug no page-table audit can catch, since both mappings are individually valid.
-//!
-//! [`START`] is where the direct map stops, which is a constant rather than a function of
-//! how much RAM the machine has: these addresses must not alias a physical address, and
-//! `phys_to_virt` is total over the direct map's window. [`super::direct_map`] owns that
-//! boundary and explains the division.
-//!
-//! Bump-only: every consumer so far is permanent, and a watermark cannot fragment or
-//! double-vend. Something temporary would grow a free list here, and here only.
+//! Bump allocation for kernel virtual addresses above the direct map.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -19,47 +7,31 @@ use mmu::{MemoryAddr, PAGE_SIZE, SUPERPAGE, VirtualAddr};
 use super::direct_map;
 use crate::utils::{ByteSize, GIB};
 
-/// First virtual address this module hands out: one past the direct map's window.
-///
-/// Derived here rather than named by `direct_map` as well: "where the direct map's window
-/// ends" and "where chosen addresses begin" are one address, and a second `const` for it
-/// would be a second thing to keep in step.
+/// First chosen kernel virtual address.
 pub const START: VirtualAddr = direct_map::phys_to_virt(direct_map::END);
 
-// Finer mappings go here, so the region must begin on a boundary that gives them page-table
-// slots of their own rather than sharing one with the direct map's superpages.
+// The region begins in page-table slots distinct from the direct map's superpages.
 const _: () = assert!(
     START.bits().is_multiple_of(SUPERPAGE),
     "the kernel VA region must start superpage-aligned"
 );
 
-/// Watermark, as raw bits: everything from [`START`] up to here has been handed out.
 static NEXT: AtomicUsize = AtomicUsize::new(START.bits());
 
-/// Everything from [`START`] up to here has been handed out.
 pub fn watermark() -> VirtualAddr { VirtualAddr::new(NEXT.load(Ordering::Relaxed)) }
 
-/// Exclusive end of what this module hands out: the top of the address space, less one
-/// [`SUPERPAGE`].
-///
-/// That superpage is withheld because walking off the end of a mapping there wraps to
-/// zero — a *user* address in this kernel. One unmapped superpage turns a kernel pointer
-/// silently becoming a user pointer into a fault.
+/// Exclusive allocation limit, leaving an unmapped superpage before address wraparound.
 pub const END: VirtualAddr = VirtualAddr::new(usize::MAX - (SUPERPAGE - 1));
 
-/// Bytes of kernel virtual address space still available.
 fn remaining() -> usize { END.sub_addr(watermark()) }
 
-/// Take `len` bytes of kernel virtual address space, based at a multiple of `align`.
+/// Reserve `len` page-granular bytes at a multiple of `align`.
 ///
-/// Whole pages only, in both arguments: an address from here exists to be mapped at, and
-/// a mapping is made of pages. A caller wanting a guard page asks for it as part of
-/// `len`; the hole is its business.
+/// Callers include guard pages in `len`.
 ///
 /// # Panics
 ///
-/// If the request is not page-shaped, or the space is exhausted — a panic rather than an
-/// `Option`, since no smaller request would help an allocator that only moves up.
+/// Panics for invalid page geometry or exhaustion.
 pub fn reserve(len: usize, align: usize) -> VirtualAddr {
     assert!(align.is_power_of_two(), "kernel VA alignment {align:#x} is not a power of two");
     assert!(align >= PAGE_SIZE, "kernel VA alignment {align:#x} is finer than a page");
@@ -69,9 +41,7 @@ pub fn reserve(len: usize, align: usize) -> VirtualAddr {
         "kernel VA reservation of {len:#x} bytes is not a whole number of pages"
     );
 
-    // Compare-exchange, though today's only caller is the boot hart: this is the single
-    // answer to which addresses are free, and a load/store pair would let a second caller
-    // observe the same watermark twice.
+    // Compare-exchange prevents concurrent callers from receiving the same range.
     loop {
         let from = watermark();
 
@@ -85,8 +55,7 @@ pub fn reserve(len: usize, align: usize) -> VirtualAddr {
             )
         });
 
-        // Relaxed: what is published is address space, not data. Nothing is read through
-        // one of these addresses until its owner maps it, under the page table's lock.
+        // Relaxed is sufficient because only address ownership is published.
         let claimed =
             NEXT.compare_exchange(from.bits(), top.bits(), Ordering::Relaxed, Ordering::Relaxed);
         if claimed.is_ok() {
@@ -95,21 +64,13 @@ pub fn reserve(len: usize, align: usize) -> VirtualAddr {
     }
 }
 
-/// Whether `[va, va + len)` was handed out by this module.
-///
-/// [`super::kernel_table`] audits every region against this, which is what makes "one
-/// owner for kernel VA space" a checked property rather than a convention.
 pub fn is_reserved(va: VirtualAddr, len: usize) -> bool {
     va >= START && va.checked_add(len).is_some_and(|end| end <= watermark())
 }
 
-/// Free space below which [`report`] warns.
 const LOW_WATER: usize = GIB;
 
-/// Print what is taken and what is left.
 pub fn report() {
-    // An interval, not a byte count: the remainder is hundreds of gigabytes and
-    // page-granular, which `ByteSize` renders exactly and unreadably.
     println!(
         "[memory] kernel VA: {:#x}..{:#x} taken ({}), free through {END:#x}",
         START,

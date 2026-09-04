@@ -1,9 +1,4 @@
-//! An executable, as this kernel loads it.
-//!
-//! ELF, because that is what the toolchain already emits and what carries the two facts a flat
-//! image cannot: where each piece belongs, and what rights it wants. Reading the format is the
-//! `elf` crate's; what this module owns is which files this kernel agrees to run, and how their
-//! program headers become the segments [`crate::memory::user_table`] maps.
+//! Static RV64 ELF loading.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -15,25 +10,17 @@ use mmu::{PteFlags, VirtualAddr};
 
 use crate::memory::user_table::Segment;
 
-/// A file this kernel is willing to run: where to start, and what to map.
 pub struct Image<'a> {
     pub entry: VirtualAddr,
     pub segments: Vec<Segment<'a>>,
 }
 
-/// Why a file will not run.
 #[derive(Debug)]
 pub enum Error {
-    /// Not an ELF this crate can read at all.
     Unreadable,
-    /// Readable, but not a static RV64 executable: a shared object would need relocating, and
-    /// another machine's code would not run.
     NotStaticRiscv64 { kind: u16, machine: u16 },
-    /// No program headers, so nothing says what to load.
     NoProgramHeaders,
-    /// A program header names bytes outside the file.
     SegmentOutOfFile { offset: u64, size: u64 },
-    /// A program header claims more file bytes than it occupies in memory.
     SegmentOverfull { file_size: u64, mem_size: u64 },
 }
 
@@ -55,10 +42,7 @@ impl fmt::Display for Error {
     }
 }
 
-/// Read `bytes` as an executable, or say why it is not one.
-///
-/// Every `PT_LOAD` becomes a segment and everything else is ignored: a note, a stack annotation or
-/// a section table says nothing about what to put in an address space.
+/// Parses each `PT_LOAD` segment and ignores other program headers.
 pub fn parse(bytes: &[u8]) -> Result<Image<'_>, Error> {
     let image = ElfBytes::<LittleEndian>::minimal_parse(bytes).map_err(|_| Error::Unreadable)?;
 
@@ -95,7 +79,6 @@ pub fn parse(bytes: &[u8]) -> Result<Image<'_>, Error> {
     Ok(Image { entry: VirtualAddr::new(image.ehdr.e_entry as usize), segments })
 }
 
-/// `p_flags` as page-table rights. The status and `USER` bits belong to whoever maps them.
 fn rights_of(flags: u32) -> PteFlags {
     let mut rights = PteFlags::empty();
     if flags & PF_R != 0 {

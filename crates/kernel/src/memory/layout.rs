@@ -1,19 +1,9 @@
-//! The symbols `kernel.ld` defines, and the kernel's view of the layout they describe.
-//!
-//! Every name the linker script chooses lives here, `__global_pointer$` included.
+//! Typed access to symbols defined by `kernel.ld`.
 
 use mmu::PAGE_SIZE;
 use mmu::{MemoryAddr, VirtualAddr};
 
-/// Declares every symbol `kernel.ld` defines, in one place.
-///
-/// One `extern` block, because a second would be a second place for the linker script's
-/// spelling to be wrong. The raw statics are declared at all because the boot entry needs
-/// some as `sym` operands.
-///
-/// `addresses` get an accessor as well: the kernel is linked high, so each is a *virtual*
-/// address and is typed as one at the source. `raw` is for the rest — a symbol the kernel
-/// only ever names, which stays untyped because arithmetic on it would mean nothing.
+/// Declare linker symbols and typed virtual-address accessors.
 macro_rules! linker_symbol {
     (
         addresses { $($fn_name:ident => $sym_name:ident),* $(,)? }
@@ -56,34 +46,23 @@ linker_symbol!(
         kernel_top         => _kernel_top,
     }
     raw {
-        /// The anchor `gp` holds, so that global access can be relaxed to `gp`-relative.
-        /// A register value; the boot entry names it only to load `gp` from it.
+        /// Linker-provided value loaded into `gp`.
         GLOBAL_POINTER as "__global_pointer$",
     }
 );
 
-// Symbols only, never *values*. A small absolute linker symbol (a size like 4096) fails to
-// link this way — the reference is PC-relative — so sizes live in Rust and are derived from
-// the addresses above. The two `kernel.ld` does define, `_text_offset` and `_image_size`,
-// are named in assembly instead; the Image header is their only reader.
+// These declarations are PC-relative symbol addresses, not absolute linker values.
 
-/// Zero `.bss`, putting the statics into the state Rust compiled against.
-///
-/// The loader copies only sections with bytes in the image, and `.bss` has none, so until
-/// this runs every static holds whatever the previous occupant left. Boot hart only: a
-/// secondary arrives into statics the boot hart is already using.
+/// Zero `.bss` on the boot hart.
 ///
 /// # Safety
 ///
-/// Call exactly once, before anything reads or writes a static.
+/// Call exactly once before any static is accessed.
 pub unsafe fn clear_bss() {
     let start = bss_start().bits();
     let end = bss_end().bits();
 
-    // Volatile, not `write_bytes`: to the compiler `_bss_start` is a lone one-byte object
-    // and the statics zeroed here are globals it can see are never read beforehand, so a
-    // plain store is one it may narrow, sink or drop. `kernel.ld` aligns both ends to a
-    // `usize`, so the last store lands inside.
+    // Volatile stores prevent optimization through the one-byte linker symbol declarations.
     let mut addr = start;
     while addr < end {
         unsafe { (addr as *mut usize).write_volatile(0) };
@@ -91,12 +70,11 @@ pub unsafe fn clear_bss() {
     }
 }
 
-/// Assert the linker script's view of the layout matches Rust's. Call once, before
-/// anything derives an address from these symbols.
+/// Verify page size and section-alignment invariants before deriving mappings.
 ///
-/// `kernel.ld` carries its own `_page_size`, so the duplicate is verified by measuring
-/// what the linker built: the gap above the boot stack is one page exactly when the two
-/// agree. A mismatch otherwise surfaces as guard pages drifted out of position.
+/// # Panics
+///
+/// Panics if the linker layout disagrees with Rust's page geometry.
 pub fn check() {
     let guard = kernel_top().sub_addr(boot_stack_end());
     assert_eq!(
@@ -105,8 +83,7 @@ pub fn check() {
          {PAGE_SIZE:#x}; the linker's _page_size and PAGE_SIZE disagree"
     );
 
-    // Every separately mapped section must start on a page, or its region overlaps its
-    // neighbour or needs rounding that swallows a guard.
+    // Separately protected sections must begin on distinct page boundaries.
     for (name, addr) in [
         ("_memory_start", memory_start()),
         ("_rodata_start", rodata_start()),
@@ -119,8 +96,6 @@ pub fn check() {
     }
 }
 
-/// Print the kernel's static memory layout. The geometry *inside* the boot stack area is
-/// [`super::stack`]'s to report.
 pub fn report() {
     println!("kernel image layout:");
     println!("    load base:    {:#x}", memory_start());
@@ -129,7 +104,5 @@ pub fn report() {
     println!("    data:         {:#x}..{:#x}", data_start(), data_end());
     println!("    bss:          {:#x}..{:#x}", bss_start(), bss_end());
     println!("    boot stack:   {:#x}..{:#x}", boot_stack_start(), boot_stack_end());
-    // The top of the span withheld from the frame allocator, one guard page above the
-    // boot stack. RAM on both sides of the image is the allocator's.
     println!("    kernel top:   {:#x}", kernel_top());
 }

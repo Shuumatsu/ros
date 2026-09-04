@@ -1,27 +1,19 @@
-//! The ISA entry points, and the low-to-high transition they share.
+//! ISA entry points and the low-to-high address transition.
 //!
-//! What firmware hands over: `a0` is this hart's id, `a1` is the device tree (boot hart)
-//! or `sbi_hart_start`'s `opaque` (a secondary), `satp` is zero and `sstatus.SIE` clear.
-//! **Every other register is undefined**, `sp`, `gp` and `tp` included.
-//!
-//! None of this is Rust because there is no stack to call one with, and no compiled
-//! function can be trusted before [`enter_high`] finishes: `medany` makes most references
-//! PC-relative, but a jump table, a vtable or a `&'static str` is an *absolute* link-time
-//! address, and those are unmapped until translation is on.
+//! Firmware provides the hart ID in `a0`, boot data in `a1`, `satp = 0`, and interrupts
+//! disabled. All other registers, including `sp`, `gp`, and `tp`, are undefined. Compiled
+//! Rust cannot run until translation and these ABI registers are initialized.
 
 use mmu::VirtualAddr;
 
 use crate::memory::{boot_table, direct_map, layout};
 
-/// Define an ISA entry point: pick the prologue this kind of hart continues into, then go
-/// high. Which prologue is the whole of the difference between them.
 macro_rules! isa_entry {
     ($(#[$doc:meta])* $vis:vis fn $name:ident => $prologue:path) => {
         boot_fn!(
             $(#[$doc])*
             $vis fn $name in entry {
-                // `lla` is unconditionally PC-relative, the only kind of address with a
-                // meaning before translation is on.
+                // `lla` remains PC-relative before translation is enabled.
                 "lla  t2, {prologue}",
                 "tail {enter_high}",
             }
@@ -32,38 +24,24 @@ macro_rules! isa_entry {
 }
 
 isa_entry!(
-    /// Where the boot hart lands, from `_start`'s branch in the Image header.
     pub(super) fn primary_entry => super::primary::prologue
 );
 
 isa_entry!(
-    /// Where a hart started by [`super::start_cpu`] lands.
-    ///
-    /// SBI is given the *physical* address of this, because a starting hart has no
-    /// translation yet — see [`secondary_entry_address`].
     fn secondary_entry => super::secondary::prologue
 );
 
 boot_fn!(
     /// Install the boot page table and continue at the kernel's link-time addresses.
     ///
-    /// Knows nothing about which kind of hart this is: `t2` carries the prologue to
-    /// continue into, chosen by the entry point above, so the two paths are named where
-    /// they differ rather than multiplexed on a flag here.
-    ///
-    /// Leaves `a0` and `a1` untouched, `gp` and `tp` as Rust expects, and `stvec` on the
-    /// high alias of the park vector. Does *not* set `sp` — which stack this hart gets is
-    /// the prologue's business.
+    /// Preserves `a0` and `a1`, initializes `gp` and `tp`, and leaves stack setup to the
+    /// selected prologue.
     fn enter_high in entry {
-        // `stvec` holds whatever firmware left until this line, so a fault before it lands
-        // somewhere undefined. Physical, because that is the only address space that
-        // exists yet.
+        // Only the physical park-vector address is valid before translation.
         "lla  t0, {park}",
         "csrw stvec, t0",
 
-        // satp = the boot table, at the physical address a PC-relative load recovers. The
-        // mode bits arrive as a const template and the root is folded in here;
-        // `boot_table` owns both halves and pins them to `Satp` at compile time.
+        // Build `satp` from the physical root and mode template.
         "lla  t0, {table}",
         "srli t0, t0, {root_shift}",
         "li   t1, {satp_template}",
@@ -71,17 +49,8 @@ boot_fn!(
         "csrw satp, t0",
         "sfence.vma",
 
-        // Translation is live and the next fetch still resolves through the identity half,
-        // which is the entire reason that half exists. Label `1:` is named twice: read out
-        // of the image, where the linker wrote its absolute high address, and
-        // PC-relatively, which yields the physical one.
-        //
-        // The two must differ by the offset the boot table was built with, or the high half
-        // aliases some other page and the jump leaves the kernel. `kernel.ld` and
-        // `direct_map` state that offset separately, and the loader chooses where the image
-        // landed, so this is where the three are reconciled — before the jump, while the
-        // identity half still makes parking possible. A hart stopped at the *physical* park
-        // vector failed here; one at the high alias took a real trap.
+        // Verify that the loaded physical image and linked high alias differ by `VA_OFFSET`
+        // before leaving the identity mapping.
         "lla  t0, 2f",
         "ld   t1, 0(t0)",
         "lla  t0, 1f",
@@ -89,20 +58,18 @@ boot_fn!(
         "add  t0, t0, t3",
         "bne  t0, t1, {park}",
         "jr   t1",
-        // Aligned for the `ld` above.
+        // The preceding `ld` requires this word to be aligned.
         ".balign 8",
         "2:   .dword 1f",
         "1:",
 
-        // High. Establish what the Rust ABI assumes: `gp` for relaxed global access, and
-        // `tp` zeroed, since `cpu::current` reads a non-zero `tp` as a live control block.
+        // Establish ABI state; zero `tp` means no control block has been adopted.
         "la   gp, {global_pointer}",
         "mv   tp, zero",
-        // Re-point the park vector high; the identity half goes with the boot table.
+        // The identity mapping is temporary, so retain the park vector through its high alias.
         "la   t0, {park}",
         "csrw stvec, t0",
 
-        // Into this hart's prologue, at its own high alias. `t3` still holds the offset.
         "add  t2, t2, t3",
         "jr   t2",
     }
@@ -115,18 +82,9 @@ boot_fn!(
 );
 
 boot_fn!(
-    /// Where a hart stops when it cannot go on: a fault before there is a trap subsystem to
-    /// take it, or a failed comparison in [`enter_high`].
-    ///
-    /// Parks rather than resumes: `sepc`, `scause` and `stval` stay put for a debugger, and
-    /// a wedged hart is visible as one. Touches no stack, because until a prologue runs
-    /// there is none.
+    /// Stackless park vector used before trap dispatch is available.
     fn trap_park in trap {
-        // `stvec` reads the low two bits as its mode, so this address must be a multiple
-        // of four or the write means "vectored" — or, `stvec` being WARL, nothing at all.
-        // `.balign` puts the label on that boundary and gives the section the same
-        // alignment, so it survives placement; `_trap_vector` names the address
-        // `enter_high` actually loads, which is what `kernel.ld` asserts on.
+        // `stvec` uses the low two address bits as its mode.
         ".balign 4",
         ".globl _trap_vector",
         "_trap_vector:",
@@ -136,12 +94,6 @@ boot_fn!(
     }
 );
 
-/// [`secondary_entry`] as the virtual address it is linked at.
-///
-/// Virtual, because that is what a linked symbol is. SBI needs the physical one, and
-/// [`super::start_cpu`] converts through `memory` on its way to the call — crossing
-/// between the address spaces is spelled out where it happens rather than done quietly by
-/// whoever holds the address.
 pub(super) fn secondary_entry_address() -> VirtualAddr {
     VirtualAddr::new(secondary_entry as *const () as usize)
 }

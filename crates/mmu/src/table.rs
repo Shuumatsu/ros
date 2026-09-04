@@ -1,16 +1,4 @@
-//! The page-table type: one page of hardware-defined entries.
-//!
-//! `Table` is pure data, plus only those operations that touch **this table's
-//! own entries** — no frame allocation, no way to reach another frame. That is
-//! what keeps the type usable in a `const` initializer and in code running
-//! before any allocator exists.
-//!
-//! The type is scheme-independent — every RV64 scheme fills one page with 512 entries —
-//! but the two builders below install *root* leaves, and what a root leaf covers is a
-//! scheme's business. So they take one as a parameter while the type does not.
-//!
-//! Anything that descends into child tables needs the caller's frame source and
-//! addressing policy, so it lives in [`crate::mapper`] instead.
+//! A scheme-independent hardware page-table page and root-level builders.
 
 use core::mem::{align_of, size_of};
 
@@ -19,11 +7,10 @@ use crate::geometry::{ENTRIES_PER_PAGE, PAGE_SIZE, ROOT_ENTRIES_PER_HALF};
 use crate::pte::{Entry, PteFlags};
 use crate::scheme::{Scheme, vpn};
 
-/// A single page table: 512 entries filling exactly one 4 KiB frame.
+/// A 512-entry, 4 KiB page table.
 ///
-/// The `align(4096)` is load-bearing: an entry stores `addr >> 12`, so a table
-/// that is not page-aligned would have the low bits of its address silently
-/// dropped and the walk would follow a different frame than was allocated.
+/// Page alignment is required because entries store frame addresses without
+/// their low 12 bits.
 #[derive(Debug)]
 #[repr(C, align(4096))]
 pub struct Table {
@@ -32,53 +19,30 @@ pub struct Table {
 
 const_assert_eq!(size_of::<Table>(), PAGE_SIZE);
 const_assert_eq!(align_of::<Table>(), PAGE_SIZE);
-// The `align(4096)` attribute above needs a literal; keep it honest.
 const_assert_eq!(PAGE_SIZE, 4096);
 
 impl Table {
-    /// An empty table: every entry invalid.
     pub const fn new() -> Self { Self { entries: [Entry::empty(); ENTRIES_PER_PAGE] } }
 
-    /// Point this root table's upper canonical half at the same subtrees as `from`'s.
+    /// Share `from`'s upper-half root subtrees.
     ///
-    /// The two tables *share* those subtrees rather than copying them, so a mapping installed
-    /// through either is visible through both. That is what lets a user address space carry the
-    /// kernel's half at the cost of one memcpy of [`ROOT_ENTRIES_PER_HALF`] entries, and what
-    /// makes a trap taken in user mode land on code the running table already maps.
-    ///
-    /// Sharing is by root slot, so a mapping the source adds *later* is visible only if its root
-    /// slot was already present here. A source that grows a new root slot after this call leaves
-    /// every table built before it blind to everything under that slot.
-    ///
-    /// Root tables only: below the root, half the entries are not a canonical half of anything.
+    /// Later mappings are shared only through root slots copied by this call.
+    /// Both tables must be roots.
     pub fn share_upper_half(&mut self, from: &Table) {
         let upper = ENTRIES_PER_PAGE - ROOT_ENTRIES_PER_HALF;
         self.entries[upper..].copy_from_slice(&from.entries[upper..]);
     }
 
-    /// The root-level entry a walk of `vaddr` starts from.
-    ///
-    /// For asking whether a root slot exists yet, which is the question
-    /// [`share_upper_half`](Self::share_upper_half) leaves a caller holding.
+    /// Return the root entry selected by `vaddr`.
     pub fn root_slot<S: Scheme>(&self, vaddr: VirtualAddr) -> Entry {
         self.entries[vpn::<S>(vaddr, S::ROOT_LEVEL)]
     }
 
-    /// Install a leaf covering one whole root slot directly in this root table:
-    /// `S::ROOT_PAGE` bytes, which is 1 GiB under Sv39.
-    ///
-    /// A root-level leaf has no intermediate tables beneath it, so this
-    /// allocates nothing and needs no way to reach other frames. That makes it
-    /// the one mapping operation usable in a `const` initializer and in early
-    /// boot code — which is exactly what the boot page table is built from.
-    ///
-    /// For anything smaller, or for a tree that already exists, use
-    /// [`Mapper`](crate::Mapper).
+    /// Install an allocation-free root leaf covering `S::ROOT_PAGE` bytes.
     ///
     /// # Panics
     ///
-    /// If `vaddr` or `paddr` is not aligned to a root page, or `flags` is not a
-    /// legal leaf. In a `const` context these are compile-time errors.
+    /// If either address is not root-page aligned or `flags` is not a legal leaf.
     pub const fn map_root_page<S: Scheme>(
         &mut self,
         vaddr: VirtualAddr,
@@ -98,32 +62,16 @@ impl Table {
         self.entries[vpn::<S>(vaddr, S::ROOT_LEVEL)] = Entry::leaf(paddr, flags);
     }
 
-    /// The table a higher-half kernel enters paging on: the low canonical half
-    /// identity mapped (`VA == PA`) with a root page in every slot, and the first
-    /// `offset_span` bytes of physical memory mirrored at `va_offset`
-    /// (`VA == PA + va_offset`).
+    /// Build an early root table with an identity-mapped low half and a direct
+    /// map of `[0, offset_span)` at `va_offset`.
     ///
-    /// Both halves are needed, and for different instructions. The low one keeps
-    /// the fetch after the `satp` write working, because the program counter is
-    /// still a physical address at that point; the high one is where the very next
-    /// jump goes. Filling every low slot rather than just the kernel's own costs
-    /// nothing — a root table is one page either way — and it means the device
-    /// tree, wherever the loader put it, is reachable before translation is on.
-    ///
-    /// The high half is **not** filled the same way. `offset_span` is the caller's
-    /// direct-map window, and the slots above it are left invalid on purpose: a
-    /// kernel that hands out high addresses of its own above that window must not
-    /// find them already mapped here, to physical memory that need not exist.
-    ///
-    /// `flags` applies verbatim to all of it, so this grants one blanket
-    /// permission over all of memory and is meant to be replaced by a table with
-    /// per-section rights as soon as there is an allocator to build one.
+    /// Root slots above the direct-map window remain invalid. `flags` applies to
+    /// every installed leaf.
     ///
     /// # Panics
     ///
-    /// If `va_offset` is not the base of the high canonical half, or `offset_span`
-    /// is not a non-zero number of whole root pages that fits in that half. In a
-    /// `const` context these are compile-time errors.
+    /// If `va_offset` is not the high-half base or `offset_span` is not a
+    /// non-zero, root-page-aligned span that fits in that half.
     pub const fn identity_and_offset<S: Scheme>(
         va_offset: usize,
         offset_span: usize,
@@ -177,19 +125,11 @@ mod tests {
     use crate::geometry::{ENTRY_SIZE, GIGAPAGE};
     use crate::scheme::{Sv39, Sv48, vpn};
 
-    /// Bottom of the Sv39 high half, where a higher-half kernel lives.
     const HIGH_BASE: usize = 0xffff_ffc0_0000_0000;
-    /// A direct-map window narrower than the half holding it, as a real kernel's is:
-    /// half of it, leaving the other half for addresses the kernel chooses.
     const SPAN: usize = (ROOT_ENTRIES_PER_HALF / 2) * GIGAPAGE;
-    /// The permissions an early boot mapping needs: all access, and A/D
-    /// pre-set so the hardware walker never has to write to the table.
     const BOOT: PteFlags =
         PteFlags::READ_WRITE_EXECUTE.union(PteFlags::ACCESS).union(PteFlags::DIRTY);
 
-    /// The kernel's boot table, forced through const evaluation: if
-    /// [`Table::identity_and_offset`] were not truly const-usable, this would not
-    /// compile, and the kernel could not hold it as a `static`.
     static EARLY: Table = Table::identity_and_offset::<Sv39>(HIGH_BASE, SPAN, BOOT);
 
     #[test]
@@ -207,7 +147,6 @@ mod tests {
 
     #[test]
     fn const_built_boot_table_has_the_expected_entries() {
-        // The high half starts at root index 256 — derived, not assumed.
         let high_index = vpn::<Sv39>(VirtualAddr::new(HIGH_BASE), Sv39::ROOT_LEVEL);
         assert_eq!(high_index, ROOT_ENTRIES_PER_HALF, "high half begins at root entry 256");
         let window_slots = SPAN / GIGAPAGE;
@@ -221,8 +160,6 @@ mod tests {
 
             let high = EARLY.entries[high_index + i];
             if i >= window_slots {
-                // Above the direct-map window: this is where the kernel hands out
-                // addresses of its own, and a mapping here would collide with them.
                 assert!(!high.is_valid(), "high-half entry {i} is outside the window and mapped");
                 continue;
             }
@@ -239,8 +176,6 @@ mod tests {
         );
     }
 
-    /// A full-width window is still legal — the split is the caller's policy, not this
-    /// function's — and it is the boundary case of the slot arithmetic.
     #[test]
     fn a_full_width_offset_half_fills_the_table() {
         let table =
@@ -251,9 +186,6 @@ mod tests {
         );
     }
 
-    /// The same builder under a deeper scheme: a root table is 512 entries in every
-    /// scheme, but each Sv48 slot spans 512 GiB rather than 1 GiB, so the window and the
-    /// high-half base are measured in those.
     #[test]
     fn the_builder_follows_the_scheme_it_is_given() {
         const SV48_HIGH_BASE: usize = 0xffff_8000_0000_0000;
@@ -285,8 +217,6 @@ mod tests {
     #[should_panic(expected = "must map something")]
     fn rejects_an_empty_window() { let _ = Table::identity_and_offset::<Sv39>(HIGH_BASE, 0, BOOT); }
 
-    /// Slots past the end of the half belong to the *low* half, so an over-wide window
-    /// would silently overwrite the identity map the `satp` write depends on.
     #[test]
     #[should_panic(expected = "cannot be wider")]
     fn rejects_a_window_wider_than_the_half() {
@@ -316,8 +246,6 @@ mod tests {
         table.map_root_page::<Sv39>(VirtualAddr::new(0x1000), PhysicalAddr::new(0), BOOT);
     }
 
-    /// An address a gigapage apart is aligned under Sv39 and misaligned under Sv48, so the
-    /// same call is accepted or rejected according to the scheme.
     #[test]
     #[should_panic(expected = "aligned to a whole root slot")]
     fn root_page_alignment_is_the_schemes_to_decide() {
@@ -325,9 +253,6 @@ mod tests {
         table.map_root_page::<Sv48>(VirtualAddr::new(GIGAPAGE), PhysicalAddr::new(0), BOOT);
     }
 
-    /// An offset that is not the base of the high half would put the kernel's own
-    /// mappings at root slots the low half already owns, silently overwriting the
-    /// identity map the `satp` write depends on.
     #[test]
     #[should_panic(expected = "high canonical half")]
     fn rejects_an_offset_outside_the_high_half() {

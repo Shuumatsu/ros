@@ -1,14 +1,9 @@
-//! The growth policy, exercised on host memory: when the heap asks for more, how much it
-//! asks for, and when it refuses to ask.
-
 use core::alloc::Layout;
 
 use pretty_assertions::assert_eq;
 
 use buddy_heap::{GrowableHeap, Limits, Outcome};
 
-/// Blocks up to 2^15 = 32 KiB, which is plenty for these sizes and keeps the free-list
-/// array small.
 const ORDER: usize = 16;
 
 const KIB: usize = 1024;
@@ -21,9 +16,6 @@ macro_rules! check {
     };
 }
 
-/// Page-aligned host memory to hand the heap, in power-of-two runs aligned to their own
-/// size — the same shape a buddy frame allocator vends, which is what the growth
-/// arithmetic is written against.
 struct Arena {
     regions: Vec<Vec<u8>>,
 }
@@ -31,11 +23,8 @@ struct Arena {
 impl Arena {
     fn new() -> Self { Self { regions: Vec::new() } }
 
-    /// Reserve `len` bytes (rounded up to a power of two) and return where they start.
     fn supply(&mut self, len: usize) -> (usize, usize) {
         let len = len.next_power_of_two();
-        // Over-allocate so a base aligned to `len` is available inside the block, which a
-        // plain `Vec<u8>` does not promise on its own.
         let mut region = vec![0u8; len * 2];
         let base = region.as_mut_ptr() as usize;
         let aligned = (base + len - 1) & !(len - 1);
@@ -50,7 +39,6 @@ fn layout(size: usize) -> Layout {
     Layout::from_size_align(size, align_of::<usize>()).expect("test layout must be valid")
 }
 
-/// Give a configured heap its initial memory, as the kernel's `heap::init` does.
 fn started(limits: Limits, arena: &mut Arena) -> GrowableHeap<ORDER> {
     let mut heap = GrowableHeap::<ORDER>::new();
     heap.configure(limits);
@@ -83,7 +71,6 @@ fn asks_for_the_step_when_a_small_request_finds_it_dry() {
     let step = 8 * KIB;
     let mut heap = started(limits(4 * KIB, step, 64 * KIB), &mut arena);
 
-    // Drain it: one 4 KiB block is the whole heap.
     let Outcome::Served(_) = heap.allocate(layout(4 * KIB)) else {
         panic!("the initial region must serve one block of its own size");
     };
@@ -94,8 +81,6 @@ fn asks_for_the_step_when_a_small_request_finds_it_dry() {
     assert_eq!(at_least, step, "a request smaller than the step must still ask for the step");
 }
 
-/// A request larger than the step must widen the heap by enough to serve it, or the retry
-/// after growing comes up dry a second time and the allocation fails with memory to spare.
 #[test]
 fn asks_for_the_whole_request_when_it_exceeds_the_step() {
     let mut arena = Arena::new();
@@ -111,9 +96,8 @@ fn asks_for_the_whole_request_when_it_exceeds_the_step() {
         "the ask must cover the buddy block a {big}-byte request is served from, not just its size"
     );
 
-    // And growing by exactly that much is enough: one retry, then served.
     let (start, len) = arena.supply(at_least);
-    // SAFETY: fresh arena memory, handed to this heap once.
+    // SAFETY: the arena owns this fresh region and supplies it once.
     unsafe { heap.add_region(start, len) };
     let Outcome::Served(_) = heap.allocate(layout(big)) else {
         panic!("one growth of the amount asked for must satisfy the request");
@@ -143,25 +127,22 @@ fn refuses_to_ask_past_its_ceiling() {
     let max = 2 * block;
     let mut heap = started(limits(block, block, max), &mut arena);
 
-    // The initial region is one block, so this empties the heap without growing it.
     let Outcome::Served(_) = heap.allocate(layout(block)) else {
         panic!("the initial region must serve one block of its own size");
     };
 
-    // Growing once lands exactly on the ceiling, which must still be allowed.
     let Outcome::Grow { at_least } = heap.allocate(layout(block)) else {
         panic!("growth that reaches the ceiling exactly must be allowed");
     };
     assert_eq!(at_least, block, "the ask must be one block");
     let (start, len) = arena.supply(at_least);
-    // SAFETY: fresh arena memory, handed to this heap once.
+    // SAFETY: the arena owns this fresh region and supplies it once.
     unsafe { heap.add_region(start, len) };
     let Outcome::Served(_) = heap.allocate(layout(block)) else {
         panic!("the grown heap must serve the request that caused the growth");
     };
     assert_eq!(heap.stats().total, max, "the heap must now be exactly at its ceiling");
 
-    // Anything that needs more memory is now refused, with what it would have taken.
     match heap.allocate(layout(block)) {
         Outcome::AtCeiling { wanted } => {
             assert_eq!(wanted, block, "the refusal must report what the request needed")

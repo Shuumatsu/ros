@@ -1,21 +1,12 @@
-//! Printing the resolved device map.
-//!
-//! Reads only the stored table — no re-parse — so printing is fully decoupled from
-//! discovery, and runs after the walk on the UART the walk itself found.
-
 use super::table;
 use crate::utils::ByteSize;
 
-/// Print the resolved device map. Call after [`super::init`], which is what backs the
-/// console with the real UART.
 pub fn summary() {
     let Some(table) = table::get() else {
         println!("[dtb] not parsed");
         return;
     };
 
-    // Size included so the frame reservation in `memory::frame` can be checked
-    // against it straight from the boot log.
     println!("[dtb] blob at {:#x} (size {:#x})", table.blob.base, table.blob.size);
     println!(
         "[dtb] ram:   {:#x}..{:#x} ({})",
@@ -30,8 +21,6 @@ pub fn summary() {
         None => println!("[dtb] uart:  {:#x} (size {:#x})", uart.base, uart.size),
     }
 
-    // Unconditional: these counts say how much of the tree we understood, which is what you
-    // want on an unfamiliar platform — exactly when some other device is likely to be missing.
     println!(
         "[dtb] mmio:  {} windows, {} foreign RAM ranges",
         table.mmio.len(),

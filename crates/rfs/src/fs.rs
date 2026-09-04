@@ -1,16 +1,8 @@
-//! The filesystem core: on-disk layout math, allocation, and the inode
-//! block-map that turns a file byte offset into a data block.
-//!
-//! [`Fs`] owns the block cache, a cached copy of the [`SuperBlock`], and the two
-//! allocation [`Bitmap`]s. Everything here is the machinery behind `DESIGN.md`
-//! §4 (block map), §7 (allocation) and §8 (read/write/truncate). Directories and
-//! path resolution are built on top of this, in a later layer.
+//! Filesystem mounting, allocation, and inode block mapping.
 //!
 //! ## Concurrency
-//! Each block touched is individually locked through the cache, so single block
-//! accesses are safe. Compound operations (a `write_at` that grows a file across
-//! several blocks and indirect blocks) are **not** atomic; serializing those is the
-//! caller's, and the kernel does it with one outer lock.
+//! Individual blocks are locked, but compound filesystem operations are not
+//! atomic and require external serialization.
 
 use alloc::sync::Arc;
 
@@ -24,21 +16,12 @@ use crate::layout::{
 };
 use blockdev::BLOCK_SIZE;
 
-/// Where logical block `inner` of a file lives in the block-map hierarchy.
-///
-/// The single place that encodes the direct / single-indirect / double-indirect
-/// layout (`DESIGN.md` §4): both the read path ([`Fs::block_map`]) and the write
-/// path ([`Fs::ensure_block`]) dispatch on it, so the mapping is decided once.
 enum BlockSlot {
-    /// Inline direct pointer `direct[i]`.
     Direct(usize),
-    /// Entry `i` of the single-indirect block.
     SingleIndirect(usize),
-    /// Entry `l2` of the `l1`-th block reached through the double-indirect block.
     DoubleIndirect { l1: usize, l2: usize },
 }
 
-/// Classify a file-logical block index into its [`BlockSlot`].
 fn locate_block(inner: usize) -> BlockSlot {
     if inner < DIRECT_COUNT {
         return BlockSlot::Direct(inner);
@@ -60,19 +43,12 @@ pub struct Fs {
 }
 
 impl Fs {
-    // ------------------------------------------------------------------ mount
-
-    /// Format `cache`'s device as a fresh rfs image of `total_blocks` blocks
-    /// with room for `ninodes` inodes, then mount it. Region sizes are derived
-    /// and recorded in the superblock (see `DESIGN.md` §2); the root directory
-    /// is created as inode 0.
+    /// Formats and mounts a filesystem with inode 0 as its root directory.
     pub fn format(cache: Arc<BlockCacheManager>, total_blocks: usize, ninodes: usize) -> Fs {
         let inode_bitmap_len = ninodes.div_ceil(BITS_PER_BLOCK);
         let inode_table_len = ninodes.div_ceil(INODES_PER_BLOCK);
 
-        // What is left after the superblock and inode region is split between the
-        // data bitmap and the data blocks it tracks. Each data-bitmap block
-        // covers BITS_PER_BLOCK data blocks plus itself, hence the `+ 1`.
+        // Each data-bitmap block tracks BITS_PER_BLOCK blocks and occupies one.
         let remaining = total_blocks
             .checked_sub(1 + inode_bitmap_len + inode_table_len)
             .expect("rfs: disk too small for the inode region");
@@ -101,8 +77,7 @@ impl Fs {
             root_inode: ROOT_INODE,
         };
 
-        // Zero the metadata regions so reformatting a used disk is clean. Block 0
-        // (superblock) is written next; data blocks are zeroed lazily on alloc.
+        // Metadata is zeroed eagerly; data blocks are zeroed on allocation.
         for block in inode_bitmap_start..data_start {
             cache.get(block).lock().modify(0, |blk: &mut [u8; BLOCK_SIZE]| blk.fill(0));
         }
@@ -115,15 +90,13 @@ impl Fs {
             data_bitmap: Bitmap::new(data_bitmap_start, data_bitmap_len),
         };
 
-        // Root directory: inode 0, empty.
         let root = fs.alloc_inode(InodeType::Dir).expect("rfs: cannot allocate root inode");
         assert_eq!(root, ROOT_INODE, "rfs: root must be inode 0");
         fs.sync();
         fs
     }
 
-    /// Mount an already-formatted device. Panics on a bad magic — an unformatted
-    /// or foreign disk is a caller error, not something to limp along with.
+    /// Mounts a formatted device, panicking if its magic is invalid.
     pub fn mount(cache: Arc<BlockCacheManager>) -> Fs {
         let sb = cache.get(0).lock().read(0, |sb: &SuperBlock| *sb);
         assert_eq!(sb.magic, FS_MAGIC, "rfs: bad superblock magic {:#x}", sb.magic);
@@ -133,33 +106,23 @@ impl Fs {
         Fs { cache, sb, inode_bitmap, data_bitmap }
     }
 
-    // --------------------------------------------------------------- accessors
-
-    /// The root directory's inode number.
     pub fn root_inode(&self) -> u32 { self.sb.root_inode }
 
-    /// The mounted superblock.
     pub fn superblock(&self) -> &SuperBlock { &self.sb }
 
-    /// Flush all dirty blocks to disk. Nothing is durable until this runs.
+    /// Flushes dirty cached blocks to the device.
     pub fn sync(&self) { self.cache.sync_all(); }
 
-    /// Byte length of inode `id`.
     pub fn inode_size(&self, id: u32) -> usize { self.read_disk_inode(id, |di| di.size as usize) }
 
-    /// Kind of inode `id`, or `None` if its `type_` is not a known value.
     pub fn inode_type(&self, id: u32) -> Option<InodeType> {
         self.read_disk_inode(id, |di| InodeType::from_raw(di.type_))
     }
 
-    // -------------------------------------------------------- inode allocation
-
-    /// Allocate and initialize a fresh inode of `kind` (size 0, one link), or
-    /// `None` if the inode table is full.
+    /// Allocates an empty inode with one link, or returns `None` if full.
     pub fn alloc_inode(&self, kind: InodeType) -> Option<u32> {
         let bit = self.inode_bitmap.alloc(&self.cache)?;
-        // The bitmap rounds up to whole blocks, so it may cover more bits than
-        // there are inodes; refuse anything past the real count.
+        // The final bitmap block may contain bits beyond the inode table.
         if bit >= self.sb.ninodes as usize {
             self.inode_bitmap.dealloc(&self.cache, bit);
             return None;
@@ -173,37 +136,30 @@ impl Fs {
         Some(id)
     }
 
-    /// Free inode `id`: release its data, wipe the record, clear the bitmap bit.
+    /// Releases an inode and all of its data.
     pub fn free_inode(&self, id: u32) {
         self.set_len(id, 0);
         self.modify_disk_inode(id, |di| *di = DiskInode::zeroed());
         self.inode_bitmap.dealloc(&self.cache, id as usize);
     }
 
-    /// Read inode `id` through `f`.
     pub fn read_disk_inode<V>(&self, id: u32, f: impl FnOnce(&DiskInode) -> V) -> V {
         let (block, offset) = self.inode_pos(id);
         self.cache.get(block).lock().read(offset, f)
     }
 
-    /// Modify inode `id` through `f`.
     pub fn modify_disk_inode<V>(&self, id: u32, f: impl FnOnce(&mut DiskInode) -> V) -> V {
         let (block, offset) = self.inode_pos(id);
         self.cache.get(block).lock().modify(offset, f)
     }
 
-    /// The (block, byte offset) where inode `id` lives in the inode table.
     fn inode_pos(&self, id: u32) -> (usize, usize) {
         let block = self.sb.inode_table_start as usize + id as usize / INODES_PER_BLOCK;
         let offset = (id as usize % INODES_PER_BLOCK) * core::mem::size_of::<DiskInode>();
         (block, offset)
     }
 
-    // --------------------------------------------------------- data allocation
-
-    /// Allocate a zeroed data block, returning its absolute block id, or `None`
-    /// if the data region is full. Zeroing matters: indirect blocks rely on
-    /// unset pointers reading as 0, and file data must not leak old bytes.
+    /// Allocates a zeroed block; zero is the unallocated pointer representation.
     fn alloc_data_block(&self) -> Option<usize> {
         let bit = self.data_bitmap.alloc(&self.cache)?;
         if bit >= self.sb.data_len as usize {
@@ -215,17 +171,13 @@ impl Fs {
         Some(block)
     }
 
-    /// Return data block `block` to the pool.
     fn free_data_block(&self, block: usize) {
         let bit = block - self.sb.data_start as usize;
         self.data_bitmap.dealloc(&self.cache, bit);
     }
 
-    // ------------------------------------------------------------- read/write
-
-    /// Read up to `buf.len()` bytes of inode `id` starting at `offset`, returning
-    /// how many were read (0 at or past EOF). Unallocated blocks inside the file
-    /// (holes) read as zeros.
+    /// Reads up to `buf.len()` bytes, returning 0 at or beyond EOF.
+    /// Unallocated ranges read as zeros.
     pub fn read_at(&self, id: u32, offset: usize, buf: &mut [u8]) -> usize {
         let di = self.read_disk_inode(id, |di| *di);
         let size = di.size as usize;
@@ -250,8 +202,10 @@ impl Fs {
         done
     }
 
-    /// Write `buf` into inode `id` at `offset`, allocating data (and indirect)
-    /// blocks as needed and growing the file. Returns bytes written (== buf.len).
+    /// Writes and grows as needed, returning `buf.len()` on success.
+    ///
+    /// The size limit is checked before writing. Allocation failure may panic
+    /// after partially modifying blocks; those modifications are not rolled back.
     pub fn write_at(&self, id: u32, offset: usize, buf: &[u8]) -> usize {
         if buf.is_empty() {
             return 0;
@@ -278,17 +232,10 @@ impl Fs {
         done
     }
 
-    /// Resize inode `id` to `new_len` bytes.
+    /// Resizes an inode without reallocating on growth.
     ///
-    /// Shrinking returns every data block that falls entirely past the new end —
-    /// including the indirect blocks that become empty — so a shorter file costs
-    /// less disk, and `set_len(id, 0)` releases everything (the inode itself
-    /// stays allocated; see [`free_inode`](Self::free_inode)). Growing only moves
-    /// the end marker: the new bytes are a hole and read as zeros, allocated on
-    /// first write like any other.
-    ///
-    /// This is the inverse of the implicit growth in [`write_at`](Self::write_at)
-    /// and the one place a file or directory ever gets shorter.
+    /// Shrinking frees blocks beyond EOF and zeros the truncated tail of a
+    /// retained block. Grown ranges remain holes and read as zeros.
     pub fn set_len(&self, id: u32, new_len: usize) {
         assert!(new_len <= MAX_FILE_SIZE, "rfs: length {new_len} exceeds {MAX_FILE_SIZE}");
         if new_len < self.inode_size(id) {
@@ -297,10 +244,6 @@ impl Fs {
         self.modify_disk_inode(id, |di| di.size = new_len as u32);
     }
 
-    // ------------------------------------------------------ block-map internals
-
-    /// Map logical block `inner` of `di` to a physical block, or `None` if it is
-    /// not allocated (a hole). Read path — never allocates.
     fn block_map(&self, di: &DiskInode, inner: usize) -> Option<usize> {
         match locate_block(inner) {
             BlockSlot::Direct(i) => (di.direct[i] != 0).then_some(di.direct[i] as usize),
@@ -318,8 +261,6 @@ impl Fs {
         }
     }
 
-    /// Ensure logical block `inner` of inode `id` is backed by a physical block,
-    /// allocating it (and any missing indirect blocks) on the way. Write path.
     fn ensure_block(&self, id: u32, inner: usize) -> usize {
         match locate_block(inner) {
             BlockSlot::Direct(i) => {
@@ -343,8 +284,6 @@ impl Fs {
         }
     }
 
-    /// Ensure the inode-level pointer selected by `field` names an allocated
-    /// block, allocating a (zeroed) one if it is currently 0. Returns the block.
     fn ensure_inode_pointer(&self, id: u32, field: impl Fn(&mut DiskInode) -> &mut u32) -> usize {
         let existing = self.modify_disk_inode(id, |di| *field(di));
         if existing != 0 {
@@ -355,8 +294,6 @@ impl Fs {
         block
     }
 
-    /// Ensure entry `idx` of the indirect block `indirect` names an allocated
-    /// block, allocating a (zeroed) one if needed. Returns the pointed-to block.
     fn ensure_pointer(&self, indirect: usize, idx: usize) -> usize {
         let offset = idx * core::mem::size_of::<u32>();
         let existing = self.cache.get(indirect).lock().read(offset, |p: &u32| *p);
@@ -368,30 +305,18 @@ impl Fs {
         block
     }
 
-    /// Read entry `idx` of indirect block `indirect`, or `None` if it is 0.
     fn read_pointer(&self, indirect: usize, idx: usize) -> Option<usize> {
         let offset = idx * core::mem::size_of::<u32>();
         let p = self.cache.get(indirect).lock().read(offset, |p: &u32| *p);
         (p != 0).then_some(p as usize)
     }
 
-    /// The inode-level pointer read by `field`, or `None` if it is 0.
     fn inode_pointer(&self, id: u32, field: impl Fn(&DiskInode) -> u32) -> Option<usize> {
         let block = self.read_disk_inode(id, |di| field(di));
         (block != 0).then_some(block as usize)
     }
 
-    // -------------------------------------------------------------- shrink path
-    // The mirror image of `ensure_block`: where that walks the hierarchy
-    // allocating, these walk it releasing. `locate_block` classifies the first
-    // block to drop, so the shrink path reads the layout from the same single
-    // source of truth as the read and write paths — it never re-derives it.
-
-    /// Free every data block from logical block `new_len / BLOCK_SIZE` (rounded
-    /// up) onward, and zero whatever of the last surviving block falls past
-    /// `new_len`. That zeroing upholds the invariant the whole file layer leans
-    /// on — **bytes past `size` in an allocated block are always zero** — so a
-    /// later grow reads zeros instead of resurrecting truncated content.
+    /// Frees blocks beyond `new_len` and zeroes bytes after EOF in the retained block.
     fn free_from(&self, id: u32, new_len: usize) {
         let keep = new_len.div_ceil(BLOCK_SIZE);
         let tail = new_len % BLOCK_SIZE;
@@ -404,7 +329,6 @@ impl Fs {
             }
         }
         match locate_block(keep) {
-            // Truncating into the direct pointers: both indirect trees go whole.
             BlockSlot::Direct(i) => {
                 let direct = self.read_disk_inode(id, |di| di.direct);
                 for &block in &direct[i..] {
@@ -416,8 +340,6 @@ impl Fs {
                 self.free_inode_tree(id, |di| &mut di.indirect, Self::free_indirect);
                 self.free_inode_tree(id, |di| &mut di.double_indirect, Self::free_double_indirect);
             }
-            // Truncating inside the single-indirect block: it survives unless the
-            // cut lands on its first entry, in which case nothing in it is left.
             BlockSlot::SingleIndirect(i) => {
                 if i == 0 {
                     self.free_inode_tree(id, |di| &mut di.indirect, Self::free_indirect);
@@ -426,8 +348,6 @@ impl Fs {
                 }
                 self.free_inode_tree(id, |di| &mut di.double_indirect, Self::free_double_indirect);
             }
-            // Truncating inside the double-indirect tree: at most one second-level
-            // block is partially freed; everything after it goes whole.
             BlockSlot::DoubleIndirect { l1, l2 } => {
                 if (l1, l2) == (0, 0) {
                     self.free_inode_tree(
@@ -441,15 +361,12 @@ impl Fs {
                     {
                         self.free_indirect_from(mid, l2);
                     }
-                    // `l1` itself survives only when it kept entries (l2 != 0).
                     self.free_double_from(double, if l2 == 0 { l1 } else { l1 + 1 });
                 }
             }
         }
     }
 
-    /// Release the whole tree hanging off the inode-level pointer `field` (via
-    /// `free`, which frees the tree root too) and clear the pointer.
     fn free_inode_tree(
         &self,
         id: u32,
@@ -462,16 +379,7 @@ impl Fs {
         }
     }
 
-    /// Release what entries `from..` of index block `index` name, by handing each
-    /// non-zero pointer to `free` — which is what distinguishes the two levels: a
-    /// single-indirect block names data blocks, a double-indirect block names more
-    /// index blocks. Both levels share this one traversal, and therefore one
-    /// definition of the survival rule below.
-    ///
-    /// A non-zero `from` means `index` itself survives the truncation, so the
-    /// entries just released are cleared — leaving them would dangle. `from == 0`
-    /// is used only by callers about to free `index` outright, where zeroing it
-    /// would be a pointless write to a block that is on its way back to the pool.
+    /// Clears released pointers when the index block survives.
     fn free_entries_from(&self, index: usize, from: usize, free: impl Fn(&Self, usize)) {
         let pointers = self.cache.get(index).lock().read(0, |p: &[u32; POINTERS_PER_BLOCK]| *p);
         for &p in &pointers[from..] {
@@ -487,32 +395,24 @@ impl Fs {
         }
     }
 
-    /// Free the data blocks named by entries `from..` of single-indirect block
-    /// `indirect`, which survives.
     fn free_indirect_from(&self, indirect: usize, from: usize) {
         self.free_entries_from(indirect, from, Self::free_data_block);
     }
 
-    /// Free the second-level trees named by entries `from..` of double-indirect
-    /// block `double`, which survives.
     fn free_double_from(&self, double: usize, from: usize) {
         self.free_entries_from(double, from, Self::free_indirect);
     }
 
-    /// Free every data block an indirect block points to, then the block itself.
     fn free_indirect(&self, block: usize) {
         self.free_entries_from(block, 0, Self::free_data_block);
         self.free_data_block(block);
     }
 
-    /// Free a double-indirect block: every second-level indirect block it names
-    /// (and their data), then itself.
     fn free_double_indirect(&self, block: usize) {
         self.free_entries_from(block, 0, Self::free_indirect);
         self.free_data_block(block);
     }
 
-    /// Data blocks currently allocated. Test/consistency helper.
     #[cfg(test)]
     fn used_data_blocks(&self) -> usize {
         (0..self.sb.data_len as usize)
@@ -567,7 +467,7 @@ mod tests {
     fn write_read_across_direct_blocks() {
         let fs = fresh();
         let id = fs.alloc_inode(InodeType::File).unwrap();
-        let data = pattern(5000); // > 9 blocks, all direct
+        let data = pattern(5000);
         fs.write_at(id, 0, &data);
 
         let mut buf = vec![0u8; data.len()];
@@ -579,7 +479,7 @@ mod tests {
     fn write_read_into_single_indirect() {
         let fs = fresh();
         let id = fs.alloc_inode(InodeType::File).unwrap();
-        let data = pattern(20_000); // > 26*512 = 13312, spills into single indirect
+        let data = pattern(20_000);
         fs.write_at(id, 0, &data);
         assert_ne!(fs.read_disk_inode(id, |di| di.indirect), 0, "single-indirect block used");
 
@@ -592,7 +492,7 @@ mod tests {
     fn write_read_into_double_indirect() {
         let fs = fresh();
         let id = fs.alloc_inode(InodeType::File).unwrap();
-        let data = pattern(100_000); // > 77 KiB, reaches double indirect
+        let data = pattern(100_000);
         fs.write_at(id, 0, &data);
         assert_ne!(fs.read_disk_inode(id, |di| di.double_indirect), 0, "double-indirect used");
 
@@ -633,7 +533,6 @@ mod tests {
     fn sparse_write_reads_hole_as_zeros() {
         let fs = fresh();
         let id = fs.alloc_inode(InodeType::File).unwrap();
-        // Write only at a high offset, leaving a gap at the start.
         fs.write_at(id, 5000, b"tail");
         assert_eq!(fs.inode_size(id), 5004);
 
@@ -647,7 +546,7 @@ mod tests {
     fn set_len_zero_frees_every_block() {
         let fs = fresh();
         let id = fs.alloc_inode(InodeType::File).unwrap();
-        fs.write_at(id, 0, &pattern(100_000)); // direct + single + double indirect
+        fs.write_at(id, 0, &pattern(100_000));
         assert!(fs.used_data_blocks() > 0);
 
         fs.set_len(id, 0);
@@ -655,21 +554,17 @@ mod tests {
         assert_eq!(fs.used_data_blocks(), 0, "truncate returns all data and indirect blocks");
     }
 
-    /// Shrinking must give back exactly the blocks past the new end. Every tier
-    /// of the block map takes a different arm of `free_from`, and inside the
-    /// double-indirect tree it matters whether the cut lands on a second-level
-    /// block boundary — so walk all of them.
     #[test]
     fn shrink_frees_exactly_the_blocks_past_the_end() {
-        const D: usize = DIRECT_COUNT * BLOCK_SIZE; // end of the direct pointers
-        const S: usize = D + POINTERS_PER_BLOCK * BLOCK_SIZE; // end of single indirect
+        const D: usize = DIRECT_COUNT * BLOCK_SIZE;
+        const S: usize = D + POINTERS_PER_BLOCK * BLOCK_SIZE;
         for &(orig, len) in &[
-            (160_000usize, S + POINTERS_PER_BLOCK * BLOCK_SIZE), // exactly on an l1 boundary
-            (160_000, 90_000),                                   // mid second-level block
-            (100_000, S),                                        // whole double tree goes
-            (100_000, 40_000),                                   // inside single indirect
-            (100_000, D),                                        // whole indirect tree goes
-            (100_000, 5_000),                                    // inside the direct pointers
+            (160_000usize, S + POINTERS_PER_BLOCK * BLOCK_SIZE),
+            (160_000, 90_000),
+            (100_000, S),
+            (100_000, 40_000),
+            (100_000, D),
+            (100_000, 5_000),
             (100_000, 600),
             (100_000, 1),
             (100_000, 0),
@@ -679,8 +574,6 @@ mod tests {
             let data = pattern(orig);
             fs.write_at(id, 0, &data);
 
-            // What that length costs when written from scratch is what it must
-            // cost after shrinking to it — data blocks and indirect blocks alike.
             let reference = fresh();
             let ref_id = reference.alloc_inode(InodeType::File).unwrap();
             reference.write_at(ref_id, 0, &data[..len]);
@@ -699,26 +592,18 @@ mod tests {
         }
     }
 
-    /// A surviving index block must not keep pointers to blocks the shrink gave
-    /// back. If it did, regrowing the file would silently re-adopt a block the
-    /// allocator has since handed to someone else — two files aliasing one block,
-    /// which no read of the shrunk file alone would reveal.
     #[test]
     fn shrink_does_not_leave_dangling_pointers() {
         let fs = fresh();
         let victim = fs.alloc_inode(InodeType::File).unwrap();
         let big = pattern(100_000);
         fs.write_at(victim, 0, &big);
-        // Cut inside the single-indirect block, so that block survives with 53 of
-        // its 128 entries live — the other 75 must come back as zeros.
         fs.set_len(victim, 40_000);
 
-        // Someone else takes the freed blocks.
         let other = fs.alloc_inode(InodeType::File).unwrap();
         let theirs = pattern(60_000).iter().map(|b| !b).collect::<alloc::vec::Vec<u8>>();
         fs.write_at(other, 0, &theirs);
 
-        // Now regrow the first file over the range it gave up.
         fs.write_at(victim, 40_000, &big[40_000..]);
 
         let mut buf = vec![0u8; theirs.len()];
@@ -735,8 +620,6 @@ mod tests {
         let id = fs.alloc_inode(InodeType::File).unwrap();
         fs.write_at(id, 0, &[0xAA; 400]);
 
-        // Cut mid-block, then grow back over the bytes just dropped: the file
-        // layer's invariant is that anything past `size` reads as zero.
         fs.set_len(id, 100);
         fs.set_len(id, 400);
         let mut buf = [0xFFu8; 400];
@@ -765,7 +648,6 @@ mod tests {
         fs.write_at(id, 0, &pattern(30_000));
         fs.free_inode(id);
         assert_eq!(fs.used_data_blocks(), 0, "freeing an inode frees its data");
-        // The inode number is available again.
         assert_eq!(fs.alloc_inode(InodeType::File), Some(id), "freed inode is reused");
     }
 
@@ -780,7 +662,6 @@ mod tests {
             fs.sync();
             (id, data)
         };
-        // Remount over the same disk.
         let fs = mount_on(&ram);
         let mut buf = vec![0u8; data.len()];
         assert_eq!(fs.read_at(id, 0, &mut buf), data.len());

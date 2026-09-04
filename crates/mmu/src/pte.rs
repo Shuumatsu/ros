@@ -1,10 +1,7 @@
-//! Page-table entry type and permission flags.
+//! Scheme-independent RV64 page-table entries.
 //!
-//! One format, every scheme: Sv39, Sv48 and Sv57 all reserve bits 53:10 for the physical
-//! page number and 7:0 for permissions and status. A deeper walk indexes more tables; it
-//! does not change what an entry says. So this type carries no
-//! [`Scheme`](crate::Scheme) — only [`Mapper`](crate::Mapper), which decides how many
-//! levels of these to descend, does.
+//! Bits 53:10 hold the physical page number; bits 7:0 hold status and
+//! permissions.
 
 use bitflags::bitflags;
 use core::fmt;
@@ -14,13 +11,11 @@ use crate::addr::PhysicalAddr;
 use crate::geometry::{ENTRY_SIZE, PPN_BITS};
 use crate::utils::{field, with_field};
 
-/// Bit position at which the PPN begins inside a PTE.
 const PTE_PPN_SHIFT: usize = 10;
-/// Number of permission/status flag bits at the bottom of a PTE.
 const FLAG_BITS: usize = 8;
 
 bitflags! {
-    /// The low-8 permission and status bits of a page-table entry.
+    /// PTE permission and status bits.
     ///
     /// A *leaf* entry sets at least one of R/W/X; a *branch* (pointer to the
     /// next level) sets none of them. `W` without `R` is a reserved encoding.
@@ -39,7 +34,6 @@ bitflags! {
 }
 
 impl PteFlags {
-    /// The R/W/X permission bits. Their presence distinguishes leaf from branch.
     pub const PERMS: Self = Self::READ.union(Self::WRITE).union(Self::EXECUTE);
 
     pub const READ_WRITE: Self = Self::READ.union(Self::WRITE);
@@ -50,20 +44,15 @@ impl PteFlags {
     pub const USER_READ_EXECUTE: Self = Self::READ_EXECUTE.union(Self::USER);
     pub const USER_READ_WRITE_EXECUTE: Self = Self::PERMS.union(Self::USER);
 
-    /// True if these flags describe a leaf mapping (any of R/W/X set).
     #[inline]
     pub const fn is_leaf(self) -> bool { self.bits() & Self::PERMS.bits() != 0 }
 
-    /// True if the R/W/X combination is architecturally legal (W implies R).
     #[inline]
     pub const fn is_legal_leaf(self) -> bool {
         self.bits() & Self::WRITE.bits() == 0 || self.bits() & Self::READ.bits() != 0
     }
 
-    /// The permission bits as a conventional `rwx` triple, `-` for absent.
-    ///
-    /// Lives here because this type owns what R/W/X *mean*; anything printing a
-    /// memory map should not be re-deriving the spelling for itself.
+    /// Format permissions as an `rwx` triple.
     pub const fn rwx(self) -> &'static str {
         match (
             self.bits() & Self::READ.bits() != 0,
@@ -82,7 +71,6 @@ impl PteFlags {
     }
 }
 
-/// A single page-table entry.
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Entry(usize);
@@ -95,17 +83,11 @@ impl fmt::Debug for Entry {
 }
 
 impl Entry {
-    /// An empty (invalid, all-zero) entry.
     pub const fn empty() -> Self { Self(0) }
 
-    /// Wrap a raw entry word.
     pub const fn new(bits: usize) -> Self { Self(bits) }
 
-    /// A leaf entry mapping the frame `paddr` lies in, with `flags`; `VALID` is
-    /// applied automatically and `paddr`'s offset bits are ignored.
-    ///
-    /// `const`, so a whole page table can be built at compile time — which is
-    /// how the early boot table is made, before any allocator exists.
+    /// Build a leaf, adding `VALID` and ignoring `paddr`'s page offset.
     pub const fn leaf(paddr: PhysicalAddr, flags: PteFlags) -> Self {
         Self(
             with_field(0, PTE_PPN_SHIFT, PPN_BITS, paddr.ppn())
@@ -114,10 +96,7 @@ impl Entry {
         )
     }
 
-    /// A branch entry pointing at the next-level table in `paddr`.
-    ///
-    /// Carries no R/W/X, so a stale permission bit can never turn an
-    /// intermediate table into an accidental leaf.
+    /// Build a branch with `VALID` set and no R/W/X bits.
     pub const fn branch(paddr: PhysicalAddr) -> Self {
         Self(with_field(0, PTE_PPN_SHIFT, PPN_BITS, paddr.ppn()) | PteFlags::VALID.bits())
     }
@@ -132,25 +111,21 @@ impl Entry {
         self.0 = with_field(self.0, 0, FLAG_BITS, flags.bits());
     }
 
-    /// The full 44-bit physical page number this entry carries.
     pub const fn ppn(self) -> usize { field(self.0, PTE_PPN_SHIFT, PPN_BITS) }
 
-    /// Store the physical frame `paddr` points into (its offset is ignored).
+    /// Replace the PPN, ignoring `paddr`'s page offset.
     pub fn set_ppn(&mut self, paddr: PhysicalAddr) {
         self.0 = with_field(self.0, PTE_PPN_SHIFT, PPN_BITS, paddr.ppn());
     }
 
-    /// The page-aligned physical address this entry targets.
     pub const fn target(self) -> PhysicalAddr { PhysicalAddr::from_ppn(self.ppn()) }
 
     pub const fn is_valid(self) -> bool {
         field(self.0, 0, FLAG_BITS) & PteFlags::VALID.bits() != 0
     }
 
-    /// A valid entry that maps a page (has R/W/X).
     pub const fn is_leaf(self) -> bool { self.is_valid() && self.flags().is_leaf() }
 
-    /// A valid entry that points to a next-level table (no R/W/X).
     pub const fn is_branch(self) -> bool { self.is_valid() && !self.flags().is_leaf() }
 }
 
@@ -184,7 +159,6 @@ mod tests {
         assert_eq!(PteFlags::READ.rwx(), "r--", "kernel rodata");
         assert_eq!(PteFlags::READ_WRITE_EXECUTE.rwx(), "rwx", "the boot table's blanket rights");
         assert_eq!(PteFlags::VALID.rwx(), "---", "a branch carries no permissions");
-        // Status and USER bits must not leak into the triple.
         assert_eq!(
             (PteFlags::READ_EXECUTE | PteFlags::ACCESS | PteFlags::DIRTY | PteFlags::USER).rwx(),
             "r-x",
@@ -206,7 +180,6 @@ mod tests {
         assert!(leaf.is_leaf(), "valid + R = leaf");
         assert!(!leaf.is_branch());
 
-        // R/W/X set but not valid → neither leaf nor branch (e.g. after unmap).
         let stale = Entry::new(PteFlags::READ.bits());
         assert!(!stale.is_leaf(), "invalid entry is never a leaf");
         assert!(!stale.is_branch(), "invalid entry is never a branch");
@@ -223,8 +196,6 @@ mod tests {
         assert_eq!(entry.flags(), PteFlags::VALID | PteFlags::READ | PteFlags::WRITE, "flags kept");
     }
 
-    /// The PPN field is the same 44 bits under every scheme, so a frame high enough to
-    /// need all of them round-trips without a scheme being named.
     #[test]
     fn the_ppn_field_spans_all_forty_four_bits() {
         let mut entry = Entry::empty();

@@ -1,28 +1,15 @@
 //! The RISC-V Image header, and `_start`.
 //!
-//! Byte-for-byte Linux's `struct riscv_image_header`: 64 bytes opening with the branch the
-//! loader enters at, then the fields it reads to decide where and how much to load. An ABI
-//! somebody else owns, so each field carries its offset below and the reserved ones are
-//! zero.
-//!
-//! This is what makes the flat binary `scripts/run.sh` boots bootable.
+//! This 64-byte structure must match Linux's `riscv_image_header` ABI exactly.
 
-/// Header revision this image declares, `major << 16 | minor`. A loader compares the two
-/// halves separately.
 const VERSION_MAJOR: u32 = 0;
 const VERSION_MINOR: u32 = 2;
 const VERSION: u32 = (VERSION_MAJOR << 16) | VERSION_MINOR;
 
-/// `magic2`, the field a loader matches to recognise an Image.
 const MAGIC2: u32 = u32::from_le_bytes(*b"RSC\x05");
 
 boot_fn!(
-    /// Offset zero of the image, and the ELF entry point: a branch past the header, then
-    /// the fields the loader reads.
-    ///
-    /// `_text_offset` and `_image_size` come from `kernel.ld` by name. Both are small
-    /// absolute linker symbols, out of reach of a Rust `extern static` (see
-    /// [`crate::memory::layout`]).
+    /// Image offset zero and the ELF entry point.
     #[unsafe(no_mangle)]
     pub(super) fn _start in header {
         "j {boot}",                     // 0x00 code0:       the only instruction here
@@ -33,12 +20,10 @@ boot_fn!(
         ".4byte {version}",             // 0x20 version
         ".4byte 0",                     // 0x24 res1
         ".8byte 0",                     // 0x28 res2
-        ".8byte 0",                     // 0x30 magic:       "RISCV\0\0\0", deprecated at
-                                        //                   the version declared above
+        ".8byte 0",                     // 0x30 magic:       deprecated for this version
         ".4byte {magic2}",              // 0x38 magic2
         ".4byte 0",                     // 0x3c res3:        PE/COFF offset, unused
-        // 0x40. `kernel.ld` asserts the header is exactly this long, and that `_start` is
-        // the image's first byte.
+        // `kernel.ld` asserts this offset is 0x40 and `_start` is the image's first byte.
         ".globl _image_header_end",
         "_image_header_end:",
     }

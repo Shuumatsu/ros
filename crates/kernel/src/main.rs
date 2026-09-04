@@ -1,8 +1,4 @@
-//! A RISC-V kernel, linked and run in the high half.
-//!
-//! The crate root holds only what has no other home: the language items every `no_std`
-//! binary must define. Where execution begins is [`start`]; what each subsystem owns is
-//! its own module doc.
+//! RISC-V kernel entry crate.
 
 #![no_std]
 #![no_main]
@@ -36,15 +32,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     abort();
 }
 
-/// Last stop on the fatal path. `no_mangle` because the symbol must be exactly
-/// `abort` — compiler-generated code refers to it by that name.
-///
-/// Nothing unwinds: both profiles set `panic = "abort"` and the target spec for
-/// `riscv64imac-unknown-none-elf` says `"panic-strategy": "abort"`, which is why the
-/// crate defines no `eh_personality`.
+/// Compiler-referenced fatal-path symbol; the kernel does not unwind.
 #[unsafe(no_mangle)]
 extern "C" fn abort() -> ! {
-    // No hart id in the message: `_emergency_print` already prefixes every line.
     emergency_println!("enter abort()");
     arch::wait_forever()
 }

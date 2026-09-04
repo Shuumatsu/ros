@@ -1,24 +1,16 @@
-//! Bit-field and alignment primitives shared across the structures in this crate.
-//!
-//! Every structure here is a packed bit-field over a `usize` (addresses and page-table
-//! entries alike). These helpers are the single place that knows how to read and write such
-//! a field, so no module hard-codes shift/mask arithmetic of its own.
-//!
-//! Crate-private: what this crate offers is the types built out of them. Callers reach the
-//! alignment helpers through [`MemoryAddr`](crate::MemoryAddr).
+//! Internal bit-field and alignment primitives.
 
 const USIZE_BITS: usize = usize::BITS as usize;
 
 /// A bitmask with the low `width` bits set.
 ///
-/// `width == USIZE_BITS` yields all-ones (guards against a `1 << 64` overflow).
+/// A full-width mask is supported.
 #[inline]
 pub const fn mask(width: usize) -> usize {
     debug_assert!(width <= USIZE_BITS, "mask width exceeds usize");
     if width == USIZE_BITS { usize::MAX } else { (1 << width) - 1 }
 }
 
-/// Extract the `width`-bit field of `word` that begins at bit `shift`.
 #[inline]
 pub const fn field(word: usize, shift: usize, width: usize) -> usize {
     debug_assert!(width > 0 && shift + width <= USIZE_BITS, "field out of range");
@@ -68,8 +60,6 @@ mod tests {
 
     #[test]
     fn field_roundtrip() {
-        // Write 0x1AB into bits [10..19) of an otherwise-set word, read it back,
-        // and confirm no neighbouring bits were disturbed.
         let base = 0xFFFF_FFFF_FFFF_FFFF;
         let w = with_field(base, 10, 9, 0x1AB);
         assert_eq!(field(w, 10, 9), 0x1AB & 0x1FF, "field reads back what was written");
@@ -79,7 +69,6 @@ mod tests {
 
     #[test]
     fn with_field_truncates_value() {
-        // Value wider than the field must be masked, not spill into neighbours.
         let w = with_field(0, 4, 4, 0xFF);
         assert_eq!(w, 0xF0, "only the low 4 bits of 0xFF land in the field");
     }

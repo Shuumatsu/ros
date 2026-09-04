@@ -1,12 +1,4 @@
-//! A mapped region, and the mechanics of installing, auditing and reporting a set of
-//! them.
-//!
-//! The mechanism, free of any particular layout — that is [`super::kernel_table`]'s, and
-//! a user address space will want the same treatment over a different list. Generic over
-//! the mapper's three choices, scheme included, so it never depends on the kernel's.
-//!
-//! [`Region::install`] validates before writing any PTE, rather than in a separate pass,
-//! so no caller can forget: there is one way to turn a `Region` into mappings.
+//! Installing, auditing, and reporting mapped regions.
 
 use mmu::{
     FrameSource, MapError, Mapper, MemoryAddr, PhysAccess, PhysicalAddr, PteFlags, Scheme,
@@ -15,67 +7,39 @@ use mmu::{
 
 use crate::utils::ByteSize;
 
-/// One contiguous mapping: a virtual range, the physical range behind it, the
-/// page size to build it from, and the rights it carries.
-///
-/// `va` and `pa` are independent, so this describes an identity mapping
-/// (`va == pa`), a direct map (`va == pa + offset`) or anything else, without a
-/// mode flag to branch on — [`install`](Self::install) just carries the constant
-/// difference across the range.
+/// A contiguous virtual-to-physical mapping with a constant offset.
 #[derive(Clone, Copy)]
 pub struct Region<'a> {
-    /// What this region is, for diagnostics and the boot log. Borrowed, because a device
-    /// window's name comes off the node that described it and lives in the device table
-    /// rather than in the binary.
     pub name: &'a str,
-    /// First virtual address.
     pub va: VirtualAddr,
-    /// Physical address `va` maps to.
     pub pa: PhysicalAddr,
-    /// Length in bytes. Zero means "nothing to do"; see [`is_empty`](Self::is_empty).
+    /// Length in bytes; zero is a no-op.
     pub len: usize,
     /// Page-table level to build the region from: 0 = 4 KiB, 1 = 2 MiB, 2 = 1 GiB.
     pub level: usize,
-    /// Rights, minus `VALID`, which the mapper applies.
+    /// Rights excluding `VALID`, which the mapper adds.
     pub flags: PteFlags,
 }
 
 impl Region<'_> {
-    /// Bytes mapped by one leaf of this region.
     fn page_size(&self) -> usize { page_size_at(self.level) }
 
-    /// The virtual range this region really occupies once installed: `[va, va + len)`
-    /// rounded outward to whole pages.
-    ///
-    /// The single answer to "what address space does this take", because the rounding is
-    /// [`install`](Self::install)'s — [`Mapper::map_range_at_level`] aligns both ends. An
-    /// unrounded extent calls two sub-page regions sharing one page disjoint, and sharing
-    /// a page means sharing a PTE, so whichever installed second would own it.
+    /// The page-rounded virtual range installed by this region.
     pub fn footprint(&self) -> (VirtualAddr, VirtualAddr) {
         let page = self.page_size();
         (self.va.align_down(page), self.end_va().align_up(page))
     }
 
-    /// Pages installed, counting a partial page at either end as a whole one.
-    ///
-    /// Derived from [`footprint`](Self::footprint), so the count and the extent cannot
-    /// disagree about how far the region reaches.
     pub fn pages(&self) -> usize {
         let (start, end) = self.footprint();
         end.sub_addr(start) / self.page_size()
     }
 
-    /// True when there is nothing to map: a region a platform's geometry collapses to
-    /// zero, rather than one the layout has to leave out.
     pub fn is_empty(&self) -> bool { self.len == 0 }
 
-    /// Exclusive end of the virtual range, before page rounding.
     fn end_va(&self) -> VirtualAddr { self.va.add(self.len) }
 
-    /// Reject a region the kernel must never install.
-    ///
-    /// [`Mapper::map_range_at_level`] rounds outward, so a misaligned superpage region
-    /// pulls in its neighbourhood — here, OpenSBI's memory, which PMP denies to S-mode.
+    /// Enforce W^X and leaf alignment before outward page rounding.
     fn validate(&self) {
         let writable = self.flags.contains(PteFlags::WRITE);
         let executable = self.flags.contains(PteFlags::EXECUTE);
@@ -100,7 +64,11 @@ impl Region<'_> {
         );
     }
 
-    /// Install every page of this region into `mapper`.
+    /// Validate and install the region.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mapping is writable and executable or either base is leaf-misaligned.
     pub fn install<S: Scheme, F: FrameSource, A: PhysAccess>(
         &self,
         mapper: &mut Mapper<'_, S, F, A>,
@@ -110,9 +78,7 @@ impl Region<'_> {
         }
         self.validate();
 
-        // One difference for the whole region, so the walk needs no per-page bookkeeping.
-        // The types come off because a VA minus a PA is an address of neither kind; they
-        // go back on in the closure. Wrapping, since a direct-map VA exceeds its PA.
+        // Wrapping preserves the constant offset for high-half mappings.
         let delta = self.pa.bits().wrapping_sub(self.va.bits());
         mapper.map_range_at_level(
             self.va,
@@ -123,10 +89,11 @@ impl Region<'_> {
         )
     }
 
-    /// Walk every page of this region and require the right level, rights and frame.
+    /// Verify every leaf's level, rights, and physical translation.
     ///
-    /// Every page, not a sample: this runs once, and a wrong leaf anywhere is either a
-    /// fault or a silent protection hole.
+    /// # Panics
+    ///
+    /// Panics on any missing or mismatched leaf.
     pub fn audit<S: Scheme, F: FrameSource, A: PhysAccess>(&self, mapper: &Mapper<'_, S, F, A>) {
         if self.is_empty() {
             return;
@@ -160,16 +127,11 @@ impl Region<'_> {
     }
 }
 
-/// Require a region list to tile the address space rather than overlap it.
+/// Require page-rounded region footprints to be disjoint.
 ///
-/// Overlap is not an error the hardware reports: the second [`Region::install`] wins and
-/// the loser's rights vanish. Compared as [`footprint`](Region::footprint)s, since that is
-/// what gets written — two device windows a few hundred bytes apart are disjoint ranges
-/// and the same page.
+/// # Panics
 ///
-/// Mechanism, so it lives beside `install` rather than beside any one layout: a user
-/// address space needs the same check over a different list. `O(n²)`, once, over tens of
-/// entries.
+/// Panics if any nonempty footprints overlap.
 pub fn audit_disjoint(regions: &[Region<'_>]) {
     for (index, a) in regions.iter().enumerate() {
         if a.is_empty() {
@@ -190,14 +152,7 @@ pub fn audit_disjoint(regions: &[Region<'_>]) {
     }
 }
 
-/// Print a region list as a memory map.
-///
-/// Puts the protection policy in the boot log, where it can be read off a failing run.
-/// The rights come from [`PteFlags::rwx`].
-///
-/// Adjacent regions sharing a name, page size and rights collapse into one `xN` line —
-/// stacks are one region each, so a big machine would otherwise bury everything else.
-/// All three must match or the printed total is a lie.
+/// Print a memory map, collapsing contiguous equivalent regions.
 pub fn report(regions: &[Region<'_>]) {
     let mut index = 0;
     while index < regions.len() {
@@ -207,14 +162,10 @@ pub fn report(regions: &[Region<'_>]) {
             continue;
         }
 
-        // Every field below is load-bearing: without the address checks, scattered MMIO
-        // windows sharing a name would print as one contiguous mapping.
         let page_size = region.page_size();
         let mut run = 1;
         let mut pages = region.pages();
         while let Some(next) = regions.get(index + run) {
-            // Against the accumulated [`Region::footprint`], not the requested extents:
-            // a run is contiguous when each region starts where the last one's pages stop.
             let span = pages * page_size;
             if next.name != region.name
                 || next.level != region.level
@@ -243,7 +194,6 @@ pub fn report(regions: &[Region<'_>]) {
     }
 }
 
-/// Renders ` (xN)` for a collapsed run, and nothing for a single region.
 struct Run(usize);
 
 impl core::fmt::Display for Run {

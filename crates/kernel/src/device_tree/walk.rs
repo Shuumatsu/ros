@@ -1,12 +1,4 @@
-//! The single traversal: RAM extent, well-known devices, MMIO windows, carve-outs, hart ids
-//! and the timebase, all from one `all_nodes()` pass.
-//!
-//! One pass for correctness, not cost: two searches for one device can settle on different
-//! nodes, and nothing downstream can tell.
-//!
-//! The pass carries two pieces of state a flat iterator does not: the stack of parent buses
-//! ([`super::bus`]), so a `reg` is read in the address space the CPU sees rather than the one
-//! its bus publishes, and the path of a disabled node, so its whole subtree goes with it.
+//! Single-pass discovery with bus ancestry and disabled-subtree tracking.
 
 use fdt_raw::{Fdt, RegInfo};
 use heapless::String;
@@ -21,16 +13,9 @@ use crate::memory::machine::{MAX_FOREIGN, MAX_MMIO};
 use crate::memory::phys_range::{NAME_LEN, PhysRange};
 use crate::utils::{ByteSize, truncated};
 
-/// What a bounded range list holds, and what is lost when one does not fit.
-///
-/// Data rather than a call site per list, so [`push_bounded`] carries the diagnostic for every
-/// bound and no source of a range can be admitted a different way.
 struct Bound {
-    /// What the list holds, plural.
     what: &'static str,
-    /// What becomes of a range that does not fit.
     lost: &'static str,
-    /// The constant to raise.
     limit: &'static str,
 }
 
@@ -43,10 +28,6 @@ const FOREIGN_BOUND: Bound = Bound {
     limit: "memory::machine::MAX_FOREIGN",
 };
 
-/// Record a range, or refuse the machine.
-///
-/// Fatal rather than reported: a range that does not fit is one the kernel then acts as if it
-/// never saw, and a warning is no defence against that.
 fn push_bounded<const N: usize>(
     list: &mut heapless::Vec<PhysRange, N>,
     entry: PhysRange,
@@ -64,11 +45,6 @@ fn push_bounded<const N: usize>(
     });
 }
 
-/// Record what the kernel can afford to lose, noting the first one it drops.
-///
-/// A hart beyond the kernel's cpu slots cannot be started and a UART beyond the console
-/// candidates cannot become the console, so neither is a reason to refuse the machine. `noted`
-/// keeps a machine with many of them to one line.
 fn push_lossy<T, const N: usize>(
     list: &mut heapless::Vec<T, N>,
     entry: T,
@@ -80,10 +56,6 @@ fn push_lossy<T, const N: usize>(
     }
 }
 
-/// A `reg` entry as a range in the address space the CPU issues, or `None` with a diagnostic.
-///
-/// The one path from a `reg` to a range, so a window and a carve-out are admitted on the same
-/// terms: a usable length, and an address every bus above it maps.
 fn resolve_range(name: &str, reg: &RegInfo, ancestors: &[Bridge<'_>]) -> Option<PhysRange> {
     let size = props::usable_size(name, reg)?;
     let Some(address) = bus::to_cpu_address(ancestors, reg.address) else {
@@ -96,10 +68,7 @@ fn resolve_range(name: &str, reg: &RegInfo, ancestors: &[Bridge<'_>]) -> Option<
     Some(PhysRange::new(name, props::phys(address), size))
 }
 
-/// Walk the tree once and build the device table.
-///
-/// `kernel_pa` selects which `/memory` bank is ours: the one containing the kernel's own
-/// physical load address, derived rather than hardcoded.
+/// Build a device table, selecting the RAM bank that contains `kernel_pa`.
 pub fn discover<'a>(
     fdt: &Fdt<'a>,
     blob: PhysicalAddr,
@@ -118,16 +87,13 @@ pub fn discover<'a>(
     let mut uarts_dropped = false;
 
     let mut stack = BusStack::new();
-    // The disabled node whose subtree is being skipped, if any.
     let mut skipping: Option<String<PATH_LEN>> = None;
 
-    // The blob is foreign RAM like any other: it sits in the pool and the allocator would
-    // vend it.
+    // Reserve the blob itself from the frame allocator.
     let blob_region = PhysRange::new("device tree blob", blob, blob_size);
     push_bounded(&mut foreign, blob_region.clone(), &FOREIGN_BOUND);
 
-    // The FDT header's reservation block: the spec's *other* mechanism, in the header rather
-    // than the node tree, so reading it is not a second traversal.
+    // Header reservation entries are independent of `/reserved-memory`.
     for (index, entry) in fdt.memory_reservations().enumerate() {
         if entry.size == 0 {
             continue;
@@ -140,12 +106,10 @@ pub fn discover<'a>(
 
     for node in fdt.all_nodes() {
         let name = node.name();
-        // Before the path is read, since that is what stops being trustworthy.
+        // Paths are unreliable beyond the parser's bounded depth.
         bus::require_depth(&node);
         let path = node.path();
 
-        // Everything below a disabled node is disabled with it: a bus the firmware says is not
-        // ours does not become ours one child at a time.
         if let Some(prefix) = &skipping {
             if bus::is_below(prefix, &path) {
                 disabled += 1;
@@ -159,16 +123,12 @@ pub fn discover<'a>(
             continue;
         }
 
-        // Parent buses first, so this is exactly the chain this node's `reg` has to climb.
         let ancestors = stack.enter(&node, &path);
 
-        // `/chosen` and `/cpus` carry properties rather than a `reg`, so they are read here
-        // rather than by a targeted lookup of their own.
         if &*path == "/chosen" {
             if let Some((base, size)) = props::initrd_range(&node) {
                 push_bounded(&mut foreign, PhysRange::new("initrd", base, size), &FOREIGN_BOUND);
             }
-            // Kept, not resolved: the node it names may not have been walked yet.
             chosen_console = node.find_property_str("stdout-path").map(console::console_path);
             continue;
         }
@@ -181,8 +141,7 @@ pub fn discover<'a>(
         let Some(regs) = props::decoded_regs(&node, name) else { continue };
 
         match kind {
-            // A hart id is not an address: no bus translates it and it has no size, so it
-            // never reaches `resolve_range`.
+            // A hart `reg` is an identifier, not a bus address.
             RegKind::HartId => {
                 timebase_hz = timebase_hz.or_else(|| props::timebase_of(&node));
                 for reg in regs {
@@ -195,9 +154,7 @@ pub fn discover<'a>(
                 }
             }
 
-            // Only the bank backing the kernel is ours to describe; others are reported rather
-            // than dropped, since "one bank" and "the only bank" differ by however much RAM
-            // the allocator never hears about.
+            // This kernel manages only the bank containing its image.
             RegKind::Ram => {
                 for reg in regs {
                     let Some(bank) = resolve_range(name, &reg, ancestors) else { continue };
@@ -222,7 +179,6 @@ pub fn discover<'a>(
                 }
             }
 
-            // A node may describe several ranges — QEMU virt's `flash` has two.
             RegKind::Mmio => {
                 let irq = props::irq_of(&node);
                 let mut window = None;
@@ -230,12 +186,9 @@ pub fn discover<'a>(
                     let Some(entry) = resolve_range(name, &reg, ancestors) else { continue };
                     let resolved = Device { base: entry.base, size: entry.size, irq };
                     push_bounded(&mut mmio, entry, &MMIO_BOUND);
-                    // The first window this node contributes, kept only once the list has it,
-                    // so a device cannot name an address `kernel_table` never maps.
                     window = window.or(Some(resolved));
                 }
 
-                // A driver's device resolves from the node we are already standing on.
                 if let Some(device) = window
                     && node.compatibles().any(|c| uart16550::COMPATIBLE.contains(&c))
                 {

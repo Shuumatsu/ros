@@ -26,9 +26,7 @@ fn count(value: usize) -> NonZeroUsize {
 }
 
 fn allocator<'a>(frame_range: FrameRange, metadata: &'a mut [usize]) -> FrameAllocator<'a> {
-    // SAFETY: each allocator in these tests is an isolated numeric simulation.
-    // Its metadata is separate from the simulated frames, and simultaneously
-    // live allocators within a test always manage disjoint ranges.
+    // SAFETY: each simulation owns its range and separate metadata.
     unsafe { FrameAllocator::new(frame_range, metadata).expect("allocator initialization failed") }
 }
 
@@ -62,8 +60,6 @@ fn error_messages_and_source_chain_are_stable() {
         "metadata error message changed"
     );
 
-    // `InitError::Metadata` must forward Display to the inner error *and* expose it
-    // as the source, which is the contract its attributes carry.
     let wrapped = InitError::from(metadata_error);
     assert_eq!(
         wrapped.to_string(),
@@ -114,8 +110,6 @@ fn error_messages_and_source_chain_are_stable() {
 
 #[test]
 fn reports_exact_metadata_for_unaligned_range() {
-    // 3..13 decomposes into aligned roots of 1, 4, 4, and 1 frames.
-    // Their buddy trees contain 1 + 7 + 7 + 1 = 16 nodes.
     let layout = metadata_layout(range(3, 13)).expect("metadata layout must fit");
     assert_eq!(layout.roots(), 4, "unexpected buddy-root decomposition");
     assert_eq!(layout.bits(), 16, "metadata must use one bit per buddy-tree node");
@@ -131,8 +125,7 @@ fn rejects_an_undersized_metadata_buffer() {
     let frame_range = range(0, 64);
     let required = metadata_layout(frame_range).expect("metadata layout must fit").words();
     let mut metadata = [0usize; 1];
-    // SAFETY: this isolated simulation owns the numeric range; construction
-    // fails before the range can issue any ownership tokens.
+    // SAFETY: the simulation owns the range; construction fails before allocation.
     let error = unsafe {
         FrameAllocator::new(frame_range, &mut metadata).err().expect("buffer must be rejected")
     };
@@ -172,8 +165,7 @@ fn allocates_every_frame_in_an_unaligned_range_once() {
     check!(allocator.allocate(count(1)).is_none(), "exhausted allocator returned another frame");
 
     for block in blocks {
-        // SAFETY: every block is unique, came from this allocator, and is not
-        // represented by any live mapping in this host-only test.
+        // SAFETY: each unique block has no live users and is returned once.
         unsafe {
             allocator
                 .deallocate(block.expect("test lost an allocated block"))
@@ -201,7 +193,7 @@ fn scans_and_coalesces_across_bitmap_word_boundaries() {
     assert_eq!(seen, [true; 65], "word-boundary scan skipped managed frames");
 
     for index in (0..blocks.len()).step_by(2) {
-        // SAFETY: every selected block is unique and has no users.
+        // SAFETY: each selected block is unique and has no users.
         unsafe {
             allocator
                 .deallocate(blocks[index].take().expect("missing even-index block"))
@@ -209,7 +201,7 @@ fn scans_and_coalesces_across_bitmap_word_boundaries() {
         }
     }
     for index in (1..blocks.len()).step_by(2) {
-        // SAFETY: every selected block is unique and has no users.
+        // SAFETY: each selected block is unique and has no users.
         unsafe {
             allocator
                 .deallocate(blocks[index].take().expect("missing odd-index block"))
@@ -260,7 +252,7 @@ fn coalesces_buddies_back_into_their_root() {
     assert_eq!(right.start_frame(), 12, "unexpected right buddy");
     check!(allocator.allocate(count(1)).is_none(), "fully allocated root reported free space");
 
-    // SAFETY: these distinct blocks came from this allocator and have no users.
+    // SAFETY: both allocator-owned blocks are distinct and have no users.
     unsafe {
         allocator.deallocate(left).expect("left buddy deallocation failed");
         allocator.deallocate(right).expect("right buddy deallocation failed");
@@ -276,16 +268,15 @@ fn detects_a_duplicate_deallocation() {
     let mut metadata = [0usize; TEST_METADATA_WORDS];
     let mut allocator = allocator(range(0, 8), &mut metadata);
     let block = allocator.allocate(count(1)).expect("allocation failed");
-    // SAFETY: FrameBlock has no destructor. This deliberately duplicates an
-    // ownership token to exercise the allocator's unsafe-contract diagnostics.
+    // SAFETY: `FrameBlock` has no destructor; the duplicate is used only for this check.
     let duplicate = unsafe { core::ptr::read(&block) };
 
-    // SAFETY: the first call returns the one live allocation.
+    // SAFETY: the block is live, unused, and returned once.
     unsafe {
         allocator.deallocate(block).expect("initial deallocation failed");
     }
-    // SAFETY: deliberately violating the no-double-free precondition must be
-    // diagnosed rather than corrupting the bitmap.
+    // SAFETY: this intentionally violates the no-double-free contract to verify
+    // rejection before allocator state changes.
     let error = unsafe {
         allocator.deallocate(duplicate).expect_err("duplicate deallocation was accepted")
     };
@@ -300,8 +291,8 @@ fn rejects_a_block_from_another_range_layout() {
     let mut second = allocator(range(8, 16), &mut second_metadata);
     let block = first.allocate(count(1)).expect("first allocator allocation failed");
 
-    // SAFETY: this intentionally violates allocator provenance to verify that
-    // the structural validation rejects the block before changing metadata.
+    // SAFETY: this intentionally violates allocator provenance to verify structural
+    // rejection before metadata changes.
     let error =
         unsafe { second.deallocate(block).expect_err("foreign block was unexpectedly accepted") };
     assert_eq!(error, DeallocationError::ForeignBlock, "wrong foreign-block diagnostic");
@@ -321,7 +312,7 @@ fn restores_fragmented_allocations_for_a_larger_request() {
 
     assert_eq!(allocator.allocated_frames(), 15, "rounded allocation accounting is wrong");
     for block in blocks.into_iter().rev() {
-        // SAFETY: each unique test block has no users and is returned once.
+        // SAFETY: each unique block has no users and is returned once.
         unsafe {
             allocator.deallocate(block).expect("fragment deallocation failed");
         }
@@ -332,21 +323,14 @@ fn restores_fragmented_allocations_for_a_larger_request() {
     assert_eq!(whole.start_frame(), 0, "full-range allocation has the wrong base");
 }
 
-// ---------------------------------------------------------------------------
-// reserve: withholding interior memory that is not the allocator's to give.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn reserved_frames_are_never_vended_even_under_exhaustion() {
-    // An interior range, deliberately not aligned to anything: a device-tree blob
-    // lands where the previous boot stage put it.
     let mut metadata = [0usize; TEST_METADATA_WORDS];
     let mut allocator = allocator(range(0, 64), &mut metadata);
     allocator.reserve(range(21, 26)).expect("interior reservation must succeed");
 
     assert_eq!(allocator.free_frames(), 59, "reserving five frames must cost five frames");
 
-    // Drain the pool completely and prove no reserved frame ever comes back.
     let mut seen = [false; 64];
     while let Some(block) = allocator.allocate(count(1)) {
         let frame = block.start_frame();
@@ -367,14 +351,11 @@ fn reserved_frames_are_never_vended_even_under_exhaustion() {
 
 #[test]
 fn reserving_splits_only_what_it_must() {
-    // One reserved frame in the middle of a 64-frame root must not cost more than
-    // one frame: the surrounding buddies have to survive as larger free blocks.
     let mut metadata = [0usize; TEST_METADATA_WORDS];
     let mut allocator = allocator(range(0, 64), &mut metadata);
     allocator.reserve(range(32, 33)).expect("single-frame reservation must succeed");
 
     assert_eq!(allocator.free_frames(), 63, "one reserved frame must cost exactly one");
-    // The untouched half is still a whole 32-frame block.
     let half = allocator.allocate(count(32)).expect("the intact half must still be allocatable");
     assert_eq!(half.start_frame(), 0, "the intact half is the low one");
     assert_eq!(half.frame_count(), 32, "reserving must not have fragmented the other half");
@@ -382,14 +363,12 @@ fn reserving_splits_only_what_it_must() {
 
 #[test]
 fn a_reserved_frame_can_be_reclaimed() {
-    // The initrd case: withheld during boot, handed back once it is finished with.
     let mut metadata = [0usize; TEST_METADATA_WORDS];
     let mut allocator = allocator(range(0, 8), &mut metadata);
     allocator.reserve(range(3, 4)).expect("reservation must succeed");
     assert_eq!(allocator.free_frames(), 7, "reservation must be accounted");
 
-    // SAFETY: nothing else refers to the reserved frame in this numeric test, and
-    // it was withheld at order 0, which is what `deallocate_at` is told here.
+    // SAFETY: frame 3 was reserved at order zero and has no users.
     unsafe {
         allocator.deallocate_at(3, 0).expect("a reserved frame must be reclaimable");
     }
@@ -416,7 +395,6 @@ fn reserve_rejects_ranges_it_cannot_honour() {
     }
     assert_eq!(allocator.free_frames(), 8, "rejected reservations must not change state");
 
-    // Reserving memory that has already been handed out is a real conflict.
     let block = allocator.allocate(count(1)).expect("allocation failed");
     let taken = block.start_frame();
     let error = allocator
@@ -431,8 +409,6 @@ fn reserve_rejects_ranges_it_cannot_honour() {
 
 #[test]
 fn reserve_spans_multiple_buddy_roots() {
-    // 3..13 decomposes into roots of 1, 4, 4, 1 at 3, 4, 8 and 12, so a
-    // reservation crossing 4..12 has to descend three different trees.
     let mut metadata = [usize::MAX; TEST_METADATA_WORDS];
     let mut allocator = allocator(range(3, 13), &mut metadata);
     allocator.reserve(range(6, 11)).expect("cross-root reservation must succeed");
@@ -453,11 +429,6 @@ fn reserve_spans_multiple_buddy_roots() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// deallocate_at: freeing by address, for callers whose only surviving handle is
-// a page-table entry.
-// ---------------------------------------------------------------------------
-
 #[test]
 fn deallocate_at_round_trips_a_single_frame() {
     let mut metadata = [0usize; TEST_METADATA_WORDS];
@@ -466,12 +437,10 @@ fn deallocate_at_round_trips_a_single_frame() {
     let (start, order) = (block.start_frame(), block.order());
     assert_eq!(order, 0, "a one-frame request must be order 0");
 
-    // Drop the token unused — the whole point is that the address is enough.
     drop(block);
     assert_eq!(allocator.free_frames(), 7, "allocation accounting is wrong before the free");
 
-    // SAFETY: the frame was just allocated at this exact order, has no users in
-    // this host-only numeric test, and is freed once.
+    // SAFETY: the frame has its allocation order, no users, and is freed once.
     unsafe {
         allocator.deallocate_at(start, order).expect("address-based deallocation failed");
     }
@@ -483,16 +452,11 @@ fn deallocate_at_round_trips_a_single_frame() {
 
 #[test]
 fn deallocate_at_is_indistinguishable_from_token_deallocation() {
-    // The load-bearing test: run one allocation sequence on two allocators, free
-    // one by token and the other by address, and require the observable state to
-    // agree at every step. `deallocate_at` reconstructs a node index, so this is
-    // what pins that arithmetic to `allocate`'s.
     let mut token_metadata = [0usize; TEST_METADATA_WORDS];
     let mut address_metadata = [0usize; TEST_METADATA_WORDS];
     let mut by_token = allocator(range(0, 64), &mut token_metadata);
     let mut by_address = allocator(range(0, 64), &mut address_metadata);
 
-    // Deliberately mixed orders, including requests that round up.
     let requests = [1usize, 2, 3, 5];
     let mut tokens: [Option<FrameBlock>; 4] = core::array::from_fn(|_| None);
     let mut addresses = [(0usize, 0usize); 4];
@@ -509,16 +473,15 @@ fn deallocate_at_is_indistinguishable_from_token_deallocation() {
         tokens[index] = Some(token);
     }
 
-    // Free in reverse, one step at a time, comparing after each.
     for index in (0..requests.len()).rev() {
-        // SAFETY: a unique block from this allocator, freed once, with no users.
+        // SAFETY: the unique block has no users and is freed once.
         unsafe {
             by_token
                 .deallocate(tokens[index].take().expect("test lost a token"))
                 .expect("token deallocation failed");
         }
         let (start, order) = addresses[index];
-        // SAFETY: same block, same order it was allocated with, freed once.
+        // SAFETY: the block has its allocation order, no users, and is freed once.
         unsafe {
             by_address.deallocate_at(start, order).expect("address deallocation failed");
         }
@@ -532,8 +495,6 @@ fn deallocate_at_is_indistinguishable_from_token_deallocation() {
     assert_eq!(by_token.free_frames(), 64, "token path lost capacity");
     assert_eq!(by_address.free_frames(), 64, "address path lost capacity");
 
-    // Equal counters are not enough — the *shape* of the bitmap must match too,
-    // which only a full-range allocation proves.
     let token_whole = by_token.allocate(count(64)).expect("token path failed to fully coalesce");
     let address_whole =
         by_address.allocate(count(64)).expect("address path failed to fully coalesce");
@@ -546,9 +507,6 @@ fn deallocate_at_is_indistinguishable_from_token_deallocation() {
 
 #[test]
 fn deallocate_at_addresses_every_root_of_an_unaligned_range() {
-    // 3..13 decomposes into roots of 1, 4, 4, 1 frames at 3, 4, 8 and 12, so this
-    // exercises node reconstruction against four different root orders and bit
-    // offsets rather than one.
     let frame_range = range(3, 13);
     let mut metadata = [usize::MAX; TEST_METADATA_WORDS];
     let mut allocator = allocator(frame_range, &mut metadata);
@@ -561,7 +519,7 @@ fn deallocate_at_addresses_every_root_of_an_unaligned_range() {
     assert_eq!(allocator.free_frames(), 0, "all managed frames should be reserved");
 
     for &start in &starts {
-        // SAFETY: each frame was allocated at order 0 exactly once and has no users.
+        // SAFETY: each frame was allocated at order zero, has no users, and is freed once.
         unsafe {
             allocator
                 .deallocate_at(start, 0)
@@ -570,7 +528,6 @@ fn deallocate_at_addresses_every_root_of_an_unaligned_range() {
     }
     assert_eq!(allocator.free_frames(), 10, "address frees did not restore every root");
 
-    // Proves the order-2 roots actually coalesced, not merely that a counter moved.
     let merged = allocator.allocate(count(4)).expect("an order-2 root did not coalesce");
     assert_eq!(merged.frame_count(), 4, "coalesced block has the wrong extent");
 }
@@ -583,14 +540,12 @@ fn deallocate_at_detects_a_double_free() {
     let (start, order) = (block.start_frame(), block.order());
     drop(block);
 
-    // SAFETY: the one live allocation, freed once.
+    // SAFETY: the allocation has no users and is freed once.
     unsafe {
         allocator.deallocate_at(start, order).expect("initial deallocation failed");
     }
-    // SAFETY: deliberately violating the no-double-free precondition. Freeing by
-    // address forfeits the move-only token's compile-time protection, so this must
-    // still be caught at run time — by the ancestor that swallowed the block when
-    // it coalesced, not by its own bit.
+    // SAFETY: this intentionally violates the no-double-free contract to verify
+    // rejection before allocator state changes.
     let error = unsafe {
         allocator.deallocate_at(start, order).expect_err("duplicate address free was accepted")
     };
@@ -606,8 +561,8 @@ fn deallocate_at_rejects_frames_it_does_not_manage() {
     drop(block);
 
     for &outsider in &[0usize, 7, 16, 100] {
-        // SAFETY: no frame is actually released; this checks the structural
-        // rejection happens before any metadata is touched.
+        // SAFETY: these intentionally invalid frame addresses test rejection before
+        // allocator state changes.
         let error = unsafe {
             allocator
                 .deallocate_at(outsider, 0)
@@ -630,9 +585,8 @@ fn deallocate_at_rejects_a_start_that_cannot_begin_that_order() {
     assert_eq!((block.start_frame(), block.order()), (0, 1), "unexpected two-frame allocation");
     drop(block);
 
-    // Frame 1 is inside the block but cannot *begin* an order-1 block. Accepting
-    // this would free frames 1..3, straddling two buddies and corrupting the tree.
-    // SAFETY: the misuse is the point; it must be rejected, not performed.
+    // SAFETY: this intentionally invalid block start tests alignment rejection before
+    // allocator state changes.
     let error =
         unsafe { allocator.deallocate_at(1, 1).expect_err("misaligned address free was accepted") };
     assert_eq!(
@@ -645,17 +599,17 @@ fn deallocate_at_rejects_a_start_that_cannot_begin_that_order() {
 
 #[test]
 fn deallocate_at_rejects_an_order_larger_than_its_root() {
-    // Frame 3 is a root of its own, of order 0: no larger block can start there.
     let mut metadata = [usize::MAX; TEST_METADATA_WORDS];
     let mut allocator = allocator(range(3, 13), &mut metadata);
 
-    // SAFETY: rejected before any metadata is touched; nothing is released.
+    // SAFETY: this intentionally invalid order tests root-bound rejection before
+    // allocator state changes.
     let error =
         unsafe { allocator.deallocate_at(3, 1).expect_err("order beyond the root was accepted") };
     assert_eq!(error, DeallocationError::ForeignBlock, "wrong over-order diagnostic");
 
-    // An order that would overflow `1 << order` must be rejected, not shifted.
-    // SAFETY: as above.
+    // SAFETY: this intentionally invalid order tests rejection before shifting or
+    // allocator state changes.
     let error = unsafe {
         allocator.deallocate_at(4, usize::BITS as usize).expect_err("absurd order was accepted")
     };

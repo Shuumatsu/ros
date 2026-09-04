@@ -1,38 +1,18 @@
-//! The firmware interface, in the kernel's own types.
-//!
-//! `sbi-rt` owns the ABI and `sbi-spec` the numbering. What this module adds is a
-//! boundary: **SBI is named here and nowhere else**, so what the kernel asks of its
-//! firmware is one file rather than a grep. Every call is forwarded, including the ones
-//! that need no translation — a boundary that covers all of them is one a reader can rely
-//! on and a grep can check.
-//!
-//! `sbi-rt`'s `legacy` feature stays off: v0.1 passes a hart mask by pointer and never
-//! says which address space it is in.
+//! Supervisor Binary Interface wrappers.
 
 use mmu::PhysicalAddr;
 use sbi_spec::hsm::hart_state;
 
-/// What firmware returns when it refuses a call. Re-exported so a caller can name a
-/// failure without naming `sbi-spec`.
 pub use sbi_spec::binary::Error;
 
-/// Put one byte on the firmware's console.
-///
-/// The debug console, which takes the byte in a register: no buffer, so no physical
-/// address to produce, which is what lets [`crate::console`] fall back to it when
-/// producing one is the problem. Errors go nowhere, because the caller has nowhere left.
+/// Writes one byte to the debug console and ignores firmware errors.
 pub fn console_write_byte(byte: u8) { let _ = sbi_rt::console_write_byte(byte); }
 
-/// Ask for a supervisor timer interrupt when the `time` counter reaches `deadline`.
-///
-/// The TIME extension, which is how a supervisor arms a timer at all: `mtimecmp` is the
-/// M-mode CLINT's. Setting a deadline also clears any timer interrupt already pending, so
-/// this is both the arm and the acknowledgement. [`super::timer`] is the only caller.
+/// Arms the supervisor timer and clears any pending timer interrupt.
 pub fn set_timer(deadline: u64) -> Result<(), Error> {
     sbi_rt::set_timer(deadline).into_result().map(|_| ())
 }
 
-/// A hart's state, as [`hart_get_status`] reports it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HartState {
     Started,
@@ -62,19 +42,11 @@ impl HartState {
 
 /// Bring `hartid` up in S-mode at `entry`, with `opaque` handed to it in `a1`.
 ///
-/// `entry` is a [`PhysicalAddr`] because the firmware starts the hart with
-/// `satp = 0`: a kernel virtual address would fault on the first instruction
-/// fetch. That leaves the stackless secondary entry, which installs the page
-/// table and a stack before reaching Rust.
+/// Firmware starts the hart with `satp = 0`, so `entry` must be physical.
 pub fn hart_start(hartid: usize, entry: PhysicalAddr, opaque: usize) -> Result<(), Error> {
     sbi_rt::hart_start(hartid, entry.bits(), opaque).into_result().map(|_| ())
 }
 
-/// Ask the firmware what state `hartid` is in.
-///
-/// Worth calling before [`hart_start`]: a hart may be absent, already running, or
-/// reserved to the firmware, and "already started" is not the same failure as
-/// "no such hart".
 pub fn hart_get_status(hartid: usize) -> Result<HartState, Error> {
     sbi_rt::hart_get_status(hartid).into_result().map(HartState::from_raw)
 }

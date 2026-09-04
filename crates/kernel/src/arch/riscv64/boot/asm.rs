@@ -1,26 +1,9 @@
-//! What a boot-stage function is: the ABI it uses, the section it lands in, and the
-//! assembler options it is built under.
+//! Boot-stage assembly support.
 
 /// Define a boot-stage naked function: instructions in braces, `asm!` operands after.
 ///
-/// `in header` / `in entry` / `in trap` picks the section, and this is the only place a
-/// boot-stage function names one. `kernel.ld` names the same three to order the stage; its
-/// `ASSERT(_start == _memory_start)` is what fails if the two ever disagree about the
-/// header, which is the one whose placement the Image protocol fixes.
-///
-/// Two assembler options apply to every block.
-///
-/// `norvc` fixes every instruction at four bytes. The Image header's `code0` field is one
-/// instruction wide and a compressed `j` would slide every field after it; the kernel is
-/// built with the C extension (see `.cargo/config.toml`), so the assembler takes the short
-/// form unless told not to.
-///
-/// `norelax` keeps the linker from rewriting those instructions afterwards. Relaxation
-/// shortens them, which the header's byte count cannot absorb, and it turns
-/// `la gp, __global_pointer$` into a `gp`-relative load of `gp` itself — the one access
-/// that resolves while `gp` still holds whatever firmware left in it. This target emits no
-/// `R_RISCV_RELAX`, so the option is what keeps that a property of the build rather than
-/// something the stage rests on.
+/// `norvc` preserves the Image header's fixed-width `code0` field. `norelax` also prevents
+/// `gp` initialization from becoming a `gp`-relative access before `gp` is valid.
 macro_rules! boot_fn {
     (@define $section:literal, $(#[$attr:meta])* $vis:vis fn $name:ident
         { $($insn:literal),* $(,)? } $($operands:tt)*

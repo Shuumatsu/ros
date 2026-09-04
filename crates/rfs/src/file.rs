@@ -1,9 +1,4 @@
-//! Ergonomic, path- and cursor-based access on top of the inode primitives.
-//!
-//! [`Fs`]'s core methods work in terms of `(inode, offset)`. This layer adds what a
-//! caller wants instead: create / open / remove by path, and a [`File`] handle that
-//! carries a cursor, so `read` / `write` / `seek` work as they do on
-//! `std::fs::File` and no caller threads offsets by hand.
+//! Path-based operations and cursor-based file access.
 
 use alloc::vec::Vec;
 
@@ -32,7 +27,6 @@ impl Fs {
         self.create(parent, name, kind)
     }
 
-    /// Remove whatever `path` names (see [`Fs::remove`] for the rules).
     pub fn remove_path(&self, path: &str) -> bool {
         match self.split_parent(path) {
             Some((parent, name)) => self.remove(parent, name),
@@ -40,8 +34,7 @@ impl Fs {
         }
     }
 
-    /// Hard-link `new_path` to the existing file at `existing` — argument order as
-    /// in `ln existing new_path`. See [`Fs::link`] for the rules.
+    /// Hard-links `new_path` to the file at `existing`.
     pub fn link_path(&self, existing: &str, new_path: &str) -> bool {
         let Some(target) = self.resolve(existing) else {
             return false;
@@ -52,8 +45,6 @@ impl Fs {
         }
     }
 
-    /// Split a path into (parent-directory inode, final component). `None` if
-    /// there is no final component (e.g. `"/"`) or the parent does not resolve.
     fn split_parent<'p>(&self, path: &'p str) -> Option<(u32, &'p str)> {
         let trimmed = path.trim_end_matches('/');
         let (parent_path, name) = match trimmed.rfind('/') {
@@ -69,8 +60,7 @@ impl Fs {
     }
 }
 
-/// A cursor into an open file. Borrows its [`Fs`], so many files may be open at
-/// once; each keeps its own position.
+/// An open file with an independent cursor.
 pub struct File<'a> {
     fs: &'a Fs,
     inode: u32,
@@ -78,46 +68,36 @@ pub struct File<'a> {
 }
 
 impl<'a> File<'a> {
-    /// Wrap `inode` as an open file positioned at the start.
     pub fn new(fs: &'a Fs, inode: u32) -> Self { Self { fs, inode, pos: 0 } }
 
-    /// Current file length in bytes.
     pub fn len(&self) -> usize { self.fs.inode_size(self.inode) }
 
-    /// Whether the file is empty.
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 
-    /// Current cursor position.
     pub fn pos(&self) -> usize { self.pos }
 
-    /// Resize the file to `len` bytes, freeing the blocks a shrink gives up. The
-    /// cursor does not move — a read past the new end simply returns nothing.
+    /// Resizes the file without moving the cursor.
     pub fn set_len(&mut self, len: usize) { self.fs.set_len(self.inode, len); }
 
-    /// Move the cursor to an absolute byte offset.
     pub fn seek(&mut self, pos: usize) { self.pos = pos; }
 
-    /// Move the cursor back to the start.
     pub fn rewind(&mut self) { self.pos = 0; }
 
-    /// Read from the cursor into `buf`, advancing it. Returns bytes read (0 at
-    /// EOF).
+    /// Reads from the cursor and advances it by the returned byte count.
     pub fn read(&mut self, buf: &mut [u8]) -> usize {
         let n = self.fs.read_at(self.inode, self.pos, buf);
         self.pos += n;
         n
     }
 
-    /// Write `buf` at the cursor, advancing it and growing the file as needed.
-    /// Returns bytes written (always `buf.len()`).
+    /// Writes at the cursor and advances it by the returned byte count.
     pub fn write(&mut self, buf: &[u8]) -> usize {
         let n = self.fs.write_at(self.inode, self.pos, buf);
         self.pos += n;
         n
     }
 
-    /// Append the file's bytes from the cursor to EOF onto `out`, advancing the
-    /// cursor. Returns bytes read.
+    /// Appends bytes from the cursor through EOF to `out` and advances the cursor.
     pub fn read_to_end(&mut self, out: &mut Vec<u8>) -> usize {
         let remaining = self.len().saturating_sub(self.pos);
         let start = out.len();

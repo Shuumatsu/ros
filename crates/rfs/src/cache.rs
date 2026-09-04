@@ -1,17 +1,7 @@
-//! A small write-back block cache.
+//! A bounded write-back block cache.
 //!
-//! Everything above this file reads and writes whole blocks *through* the cache,
-//! never straight to the device (see `DESIGN.md` §9). The rules the rest of the
-//! filesystem relies on:
-//!
-//!  * A block is read from the device at most once, then served from RAM.
-//!  * A modification marks the block **dirty** but does **not** touch the disk.
-//!  * A dirty block reaches the disk only when it is evicted, when
-//!    [`BlockCacheManager::sync_all`] is called, or when the block is dropped.
-//!
-//! So until a sync, the copy in RAM is the truth and the disk is stale. That is what
-//! write-back trades for coalescing repeated writes to the same block: a caller that
-//! never syncs loses data.
+//! Dirty blocks reach the device on eviction, explicit synchronization, or
+//! cache drop. Until then, the device may contain stale data.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -21,20 +11,12 @@ use spin::Mutex;
 
 use blockdev::{BLOCK_SIZE, BlockDevice};
 
-/// Upper bound on blocks kept resident at once. Loading one more evicts the
-/// oldest block no one is currently holding (flushing it first if dirty). Big
-/// enough that ordinary bitmap/inode/directory work never pins them all.
 const CACHE_CAPACITY: usize = 32;
 
-/// A block's worth of bytes, aligned so typed views taken through bytemuck
-/// (`&DiskInode`, `&[u64; 64]`, …) are correctly aligned. Every on-disk record
-/// sits at a natural, size-aligned offset within its block, so an 8-aligned base
-/// makes every such view aligned.
+/// Eight-byte alignment permits the typed views used by the on-disk format.
 #[repr(C, align(8))]
 struct AlignedBlock([u8; BLOCK_SIZE]);
 
-/// One cached block: its bytes in RAM, whether they differ from disk, and the
-/// device to flush back to.
 pub struct BlockCache {
     data: AlignedBlock,
     block_id: usize,
@@ -43,25 +25,20 @@ pub struct BlockCache {
 }
 
 impl BlockCache {
-    /// Read `block_id` off the device into a fresh, clean cache entry.
     fn load(block_id: usize, device: Arc<dyn BlockDevice>) -> Self {
         let mut data = AlignedBlock([0u8; BLOCK_SIZE]);
         device.read_block(block_id, &mut data.0);
         Self { data, block_id, device, dirty: false }
     }
 
-    /// View the `T` stored at `offset` and pass it to `f`. `T: Pod` guarantees
-    /// every bit pattern is a valid `T`, so reinterpreting on-disk bytes is
-    /// sound; it is also what every on-disk record is shaped to satisfy (see
-    /// [`crate::layout`]).
+    /// Views the `T: Pod` at `offset`.
     pub fn read<T: Pod, V>(&self, offset: usize, f: impl FnOnce(&T) -> V) -> V {
         let end = offset + core::mem::size_of::<T>();
         assert!(end <= BLOCK_SIZE, "typed read at offset {offset} overflows block");
         f(bytemuck::from_bytes::<T>(&self.data.0[offset..end]))
     }
 
-    /// Mutate the `T` stored at `offset` in place through `f`, marking the block
-    /// dirty. The change stays in RAM until the block is synced or evicted.
+    /// Mutates the `T: Pod` at `offset` and marks the block dirty.
     pub fn modify<T: Pod, V>(&mut self, offset: usize, f: impl FnOnce(&mut T) -> V) -> V {
         let end = offset + core::mem::size_of::<T>();
         assert!(end <= BLOCK_SIZE, "typed write at offset {offset} overflows block");
@@ -69,7 +46,7 @@ impl BlockCache {
         f(bytemuck::from_bytes_mut::<T>(&mut self.data.0[offset..end]))
     }
 
-    /// Flush to disk if dirty; a no-op otherwise. Idempotent.
+    /// Flushes this block if dirty.
     pub fn sync(&mut self) {
         if self.dirty {
             self.device.write_block(self.block_id, &self.data.0);
@@ -79,40 +56,27 @@ impl BlockCache {
 }
 
 impl Drop for BlockCache {
-    /// A block flushes itself when dropped, so eviction and teardown never lose
-    /// dirty data even without an explicit sync.
     fn drop(&mut self) { self.sync(); }
 }
 
 /// A bounded, write-back cache over one block device.
-///
-/// Shared as `Arc<BlockCacheManager>`: methods take `&self` and lock internally,
-/// so bitmaps, inodes and directories all reach blocks through one handle.
-/// Blocks are keyed by id within one manager, so two managers over different
-/// devices share no entries, which keeps host tests isolated.
 pub struct BlockCacheManager {
     device: Arc<dyn BlockDevice>,
     resident: Mutex<VecDeque<(usize, Arc<Mutex<BlockCache>>)>>,
 }
 
 impl BlockCacheManager {
-    /// Wrap `device` in an empty cache.
     pub fn new(device: Arc<dyn BlockDevice>) -> Self {
         Self { device, resident: Mutex::new(VecDeque::new()) }
     }
 
-    /// Get block `block_id`, loading it from disk if not resident. Lock the
-    /// returned handle to [`read`](BlockCache::read) or
-    /// [`modify`](BlockCache::modify) it.
+    /// Returns a cached block, loading it if necessary.
     pub fn get(&self, block_id: usize) -> Arc<Mutex<BlockCache>> {
         let mut resident = self.resident.lock();
         if let Some((_, cache)) = resident.iter().find(|(id, _)| *id == block_id) {
             return cache.clone();
         }
         if resident.len() >= CACHE_CAPACITY {
-            // Evict the oldest block nobody else is holding; its `Drop` flushes
-            // it if dirty. If every resident block is pinned we cannot make
-            // room — that means a caller is holding too many blocks at once.
             let victim = resident
                 .iter()
                 .position(|(_, cache)| Arc::strong_count(cache) == 1)
@@ -124,9 +88,7 @@ impl BlockCacheManager {
         cache
     }
 
-    /// Flush every dirty resident block to disk. Write-back means nothing is
-    /// durable until this (or eviction, or drop) runs — call it before handing
-    /// the disk to anyone else.
+    /// Flushes every dirty resident block to the device.
     pub fn sync_all(&self) {
         let resident = self.resident.lock();
         for (_, cache) in resident.iter() {
@@ -154,7 +116,6 @@ mod tests {
         let mgr = BlockCacheManager::new(ram.clone());
 
         mgr.get(5).lock().modify(0, |v: &mut u32| *v = 0xDEAD_BEEF);
-        // Still in RAM only — the disk is untouched.
         assert_eq!(u32_at(ram.as_ref(), 5), 0, "dirty block must not hit disk before sync");
 
         mgr.sync_all();
@@ -169,7 +130,6 @@ mod tests {
             mgr.get(3).lock().modify(0, |v: &mut u32| *v = 42);
             mgr.sync_all();
         }
-        // A fresh cache over the same device sees the persisted value.
         let mgr = BlockCacheManager::new(ram.clone());
         let got = mgr.get(3).lock().read(0, |v: &u32| *v);
         assert_eq!(got, 42, "value survives cache teardown via the device");
@@ -199,15 +159,11 @@ mod tests {
         let ram = Arc::new(RamDisk::new(128));
         let mgr = BlockCacheManager::new(ram.clone());
 
-        // Touch far more blocks than the cache holds, keeping no handles, so the
-        // oldest are evicted — and must be flushed on the way out.
         for id in 0..100usize {
             mgr.get(id).lock().modify(0, |v: &mut u32| *v = id as u32 + 1);
         }
 
-        // Block 0 is long evicted, hence already on disk...
         assert_eq!(u32_at(ram.as_ref(), 0), 1, "evicted block was flushed");
-        // ...while the most recent block is still resident and unflushed.
         assert_eq!(u32_at(ram.as_ref(), 99), 0, "resident block not yet flushed");
 
         mgr.sync_all();

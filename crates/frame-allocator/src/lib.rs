@@ -1,9 +1,6 @@
 //! Allocation-free buddy management for numeric physical frames.
 //!
-//! The allocator uses a bitmap supplied by its caller and depends only on
-//! `core`. It neither dereferences nor zeroes managed frames, so it makes no
-//! assumptions about physical-memory mappings. Synchronization, zeroing, and
-//! exclusion of the metadata storage from the managed range are caller policy.
+//! The caller supplies bitmap storage and handles synchronization and zeroing.
 
 #![no_std]
 

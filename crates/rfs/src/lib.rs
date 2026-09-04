@@ -1,23 +1,6 @@
-//! rfs — a small, self-contained Unix-style filesystem.
+//! A `no_std` filesystem over the [`BlockDevice`](blockdev::BlockDevice) interface.
 //!
-//! rfs is deliberately independent of the kernel: it speaks only to the
-//! [`BlockDevice`](blockdev::BlockDevice) trait, carries no architecture- or
-//! hardware-specific code, and is fully exercised by host unit tests
-//! (`cargo test -p rfs`). The kernel consumes it as a plain dependency and hands
-//! it a device backed by the virtio-blk driver; the host `mkfs` tool hands it a
-//! [`RamDisk`](blockdev::RamDisk) it later dumps to a file. The on-disk format
-//! is written exactly once — here — and every backend agrees by construction.
-//!
-//! The layers, bottom to top:
-//!
-//!  * [`blockdev`] (separate crate) — the `BlockDevice` storage contract plus a
-//!    RAM-backed reference device.
-//!  * [`cache`] — a write-back block cache; everything above talks to this.
-//!  * [`bitmap`] — allocation bitmaps for inodes and data blocks.
-//!  * [`layout`] — the on-disk data structures.
-//!
-//! See `DESIGN.md` for the mental model. rfs is `#![no_std]` (+ `alloc`)
-//! throughout and carries no `std`-only surface.
+//! [`layout`] defines the persistent format; [`cache`] provides write-back storage.
 
 #![no_std]
 

@@ -1,7 +1,4 @@
-//! An in-RAM block device: the whole disk held as one byte vector. Pure
-//! `alloc`, no `std` — used by unit tests and the `mkfs` host tool, and
-//! available to the kernel too (a RAM-backed filesystem, or an in-memory image
-//! during bring-up before a real block driver exists).
+//! An in-memory block device.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -11,32 +8,29 @@ use spin::Mutex;
 
 use crate::{BLOCK_SIZE, BlockDevice};
 
-/// A whole disk held in memory as one contiguous byte vector.
 pub struct RamDisk {
     data: Mutex<Vec<u8>>,
     writes: AtomicUsize,
 }
 
 impl RamDisk {
-    /// A zeroed disk of `blocks` blocks.
+    /// Creates a zeroed disk.
     pub fn new(blocks: usize) -> Self {
         Self { data: Mutex::new(vec![0u8; blocks * BLOCK_SIZE]), writes: AtomicUsize::new(0) }
     }
 
-    /// Adopt an existing image; its length must be a whole number of blocks.
+    /// Adopts an image, panicking unless its length is block-aligned.
     pub fn from_image(image: Vec<u8>) -> Self {
         assert!(image.len().is_multiple_of(BLOCK_SIZE), "image is not a whole number of blocks");
         Self { data: Mutex::new(image), writes: AtomicUsize::new(0) }
     }
 
-    /// Number of blocks.
     pub fn blocks(&self) -> usize { self.data.lock().len() / BLOCK_SIZE }
 
-    /// A copy of the whole disk, e.g. to write out to a file.
+    /// Returns a copy of the disk image.
     pub fn snapshot(&self) -> Vec<u8> { self.data.lock().clone() }
 
-    /// How many `write_block` calls have hit the device — lets tests prove a
-    /// cache does not write back clean blocks.
+    /// Returns the number of block writes.
     pub fn writes(&self) -> usize { self.writes.load(Ordering::Relaxed) }
 }
 
