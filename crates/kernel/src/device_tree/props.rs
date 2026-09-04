@@ -1,4 +1,6 @@
-use fdt_raw::{Node, RegInfo, RegIter};
+//! Typed reads of individual node properties, warning for values this kernel cannot use.
+
+use fdt_raw::{Node, RegInfo, RegIter, Status};
 use mmu::PhysicalAddr;
 
 pub enum RegKind {
@@ -8,7 +10,7 @@ pub enum RegKind {
     Ram,
 }
 
-/// Classify `reg` as reserved RAM by path, RAM or hart ID by `device_type`, and MMIO
+/// Classify a node as reserved RAM by path, RAM or hart ID by `device_type`, and MMIO
 /// otherwise. Other children below `/cpus` are ignored.
 pub fn classify(node: &Node<'_>, path: &str) -> Option<RegKind> {
     if path.starts_with("/reserved-memory/") {
@@ -22,18 +24,19 @@ pub fn classify(node: &Node<'_>, path: &str) -> Option<RegKind> {
     }
 }
 
-/// Treat a node as enabled only when `status` is absent, `"okay"`, or `"ok"`.
+/// Treat a node as enabled only when `status` is absent or reports an operational device.
 pub fn is_disabled(node: &Node<'_>) -> bool {
-    !matches!(node.find_property_str("status"), None | Some("okay") | Some("ok"))
+    node.find_property("status").is_some_and(|status| status.as_status() != Some(Status::Okay))
 }
 
 /// Return decoded `reg` entries, warning when the decoder produces no entries.
-pub fn decoded_regs<'a>(node: &Node<'a>, name: &str) -> Option<RegIter<'a>> {
+pub fn decoded_regs<'a>(node: &Node<'a>) -> Option<RegIter<'a>> {
     let regs = node.reg()?;
     if regs.clone().next().is_none() {
         println!(
-            "[dtb] WARNING: cannot decode {name}'s reg; check its parent's #address-cells \
-             and #size-cells"
+            "[dtb] WARNING: cannot decode {}'s reg; check its parent's #address-cells \
+             and #size-cells",
+            node.name()
         );
         return None;
     }
@@ -58,28 +61,20 @@ pub fn usable_size(name: &str, reg: &RegInfo) -> Option<usize> {
 /// Accept only a single-cell `interrupts` value; ignore controller-specific multi-cell
 /// encodings and `interrupts-extended`.
 pub fn irq_of(node: &Node<'_>) -> Option<usize> {
-    let property = node.find_property("interrupts")?;
-    let mut cells = property.as_u32_iter();
-    let first = cells.next()?;
-    cells.next().is_none().then_some(first as usize)
+    Some(node.find_property("interrupts")?.as_u32()? as usize)
 }
 
-pub fn timebase_of(node: &Node<'_>) -> Option<usize> {
-    node.find_property("timebase-frequency")
-        .and_then(|property| property.as_u32().map(u64::from).or_else(|| property.as_u64()))
-        .map(|hz| hz as usize)
+/// Read a scalar the specification allows in either a 32- or a 64-bit encoding.
+fn scalar(node: &Node<'_>, name: &str) -> Option<u64> {
+    let property = node.find_property(name)?;
+    property.as_u32().map(u64::from).or_else(|| property.as_u64())
 }
 
-/// Parse 32- or 64-bit initrd bounds, returning only nonempty ranges.
+pub fn timebase_of(node: &Node<'_>) -> Option<u64> { scalar(node, "timebase-frequency") }
+
+/// Parse initrd bounds, returning only nonempty ranges.
 pub fn initrd_range(chosen: &Node<'_>) -> Option<(PhysicalAddr, usize)> {
-    let cell = |key: &str| {
-        chosen
-            .find_property(key)
-            .and_then(|prop| prop.as_u64().or_else(|| prop.as_u32().map(u64::from)))
-    };
-    let start = cell("linux,initrd-start")?;
-    let end = cell("linux,initrd-end")?;
-    (end > start).then(|| (phys(start), (end - start) as usize))
+    let start = scalar(chosen, "linux,initrd-start")?;
+    let end = scalar(chosen, "linux,initrd-end")?;
+    (end > start).then(|| (PhysicalAddr::new(start as usize), (end - start) as usize))
 }
-
-pub fn phys(address: u64) -> PhysicalAddr { PhysicalAddr::new(address as usize) }

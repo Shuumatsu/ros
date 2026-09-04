@@ -1,6 +1,7 @@
 //! Named physical ranges and page-rounded geometry.
 
 use alloc::vec::Vec;
+use core::fmt;
 
 use heapless::String;
 
@@ -24,6 +25,13 @@ impl PhysRange {
     /// Build a range, truncating an overlong label.
     pub fn new(name: &str, base: PhysicalAddr, size: usize) -> Self {
         Self { name: truncated(name), base, size }
+    }
+
+    /// Build a range whose label is formatted, keeping as much of it as fits.
+    pub fn labeled(name: fmt::Arguments<'_>, base: PhysicalAddr, size: usize) -> Self {
+        let mut label = String::new();
+        let _ = fmt::Write::write_fmt(&mut label, name);
+        Self { name: label, base, size }
     }
 
     pub fn name(&self) -> &str { &self.name }
@@ -76,11 +84,13 @@ pub fn coalesce(windows: &[PhysRange]) -> Vec<PhysRange> {
 
     runs.into_iter()
         .map(|run| {
-            let mut label: String<NAME_LEN> = truncated(run.name);
-            if run.joined > 0 {
-                let _ = core::fmt::Write::write_fmt(&mut label, format_args!(" +{}", run.joined));
+            let size = run.end.sub_addr(run.start);
+            match run.joined {
+                0 => PhysRange::new(run.name, run.start, size),
+                joined => {
+                    PhysRange::labeled(format_args!("{} +{joined}", run.name), run.start, size)
+                }
             }
-            PhysRange { name: label, base: run.start, size: run.end.sub_addr(run.start) }
         })
         .collect()
 }

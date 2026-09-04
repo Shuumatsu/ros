@@ -5,7 +5,7 @@ pub mod timer;
 use crate::arch::timebase;
 use crate::device_tree;
 
-pub fn hz() -> Option<u64> { device_tree::timebase_hz().map(|hz| hz as u64) }
+pub fn hz() -> Option<u64> { device_tree::timebase_hz() }
 
 #[derive(Clone, Copy, Debug)]
 pub struct Deadline(u64);

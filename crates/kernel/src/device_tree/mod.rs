@@ -15,9 +15,14 @@ use mmu::PhysicalAddr;
 use crate::memory::machine::MachineMemory;
 use crate::memory::{direct_map, layout};
 
+/// Capacity of a retained node path, matching what the parser produces so none is truncated.
+const PATH_LEN: usize = 256;
+
 /// Parse the device tree and publish the discovered hardware table.
 ///
-/// Invalid or unreachable blobs, missing kernel RAM, and missing supported UARTs are fatal.
+/// A fact the kernel cannot boot without is fatal: an unreadable or unreachable blob, a machine
+/// too large for this kernel's fixed tables, RAM that does not hold the kernel image, and the
+/// absence of a UART this kernel can drive. Whatever it can boot without is reported and skipped.
 ///
 /// # Safety
 /// `base` must address a valid, readable FDT blob that remains mapped and unmodified for this
@@ -27,11 +32,10 @@ pub unsafe fn init(base: PhysicalAddr) {
         table::get().is_none(),
         "device_tree::init called twice; the table is already published"
     );
-    if base.bits() == 0 {
-        panic!(
-            "[dtb] no device tree pointer in a1 — previous boot stage violated the boot contract"
-        );
-    }
+    assert!(
+        base.bits() != 0,
+        "[dtb] no device tree pointer in a1 — previous boot stage violated the boot contract"
+    );
 
     // `Fdt::from_ptr` forms a slice over `totalsize`, so validate the header and full extent
     // before constructing it.
@@ -50,10 +54,8 @@ pub unsafe fn init(base: PhysicalAddr) {
 
     let kernel_pa = direct_map::virt_to_phys(layout::text_start());
 
-    table::TABLE.call_once(|| walk::discover(&fdt, base, size, kernel_pa));
-
-    let uart = table::get().expect("the table was published above").uart;
-    direct_map::require_reach("the console UART window", uart.base, uart.size);
+    let table = table::publish(|| walk::discover(&fdt, base, size, kernel_pa));
+    direct_map::require_reach("the console UART window", table.uart.base, table.uart.size);
 }
 
 /// Return the discovered RAM, reserved ranges, and MMIO windows.
@@ -71,7 +73,7 @@ pub fn machine_memory() -> MachineMemory<'static> {
 
 pub fn uart_base() -> Option<PhysicalAddr> { table::get().map(|t| t.uart.base) }
 
-pub fn timebase_hz() -> Option<usize> { table::get().and_then(|t| t.timebase_hz) }
+pub fn timebase_hz() -> Option<u64> { table::get().and_then(|t| t.timebase_hz) }
 
 /// Enabled firmware-reported hart IDs, which need not be contiguous or zero-based.
 pub fn hart_ids() -> &'static [usize] { table::get().map(|t| t.hart_ids.as_slice()).unwrap_or(&[]) }

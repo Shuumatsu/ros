@@ -3,27 +3,23 @@
 use fdt_raw::{Node, Property};
 use heapless::String;
 
-use crate::utils::truncated;
+use super::PATH_LEN;
 
-pub const PATH_LEN: usize = 128;
-
-// `fdt_raw` silently corrupts paths and inherited cell counts beyond its 16-entry stack.
+// `fdt_raw` keeps its path and cell context on 16-entry stacks and discards pushes past them
+// while still counting the level, so its later pops retire real ancestors. Every node after the
+// first one this deep carries a wrong path and wrong inherited cell counts.
 const MAX_DEPTH: usize = 16;
 
-pub fn require_depth(node: &Node<'_>) {
+/// Return `node`'s absolute path, rejecting depths the parser cannot track.
+pub fn path_of(node: &Node<'_>) -> String<PATH_LEN> {
     assert!(
         node.level() < MAX_DEPTH,
-        "[dtb] node '{}' sits at depth {}, and a path is only tracked {MAX_DEPTH} deep",
+        "[dtb] node '{}' sits at depth {}, past the {MAX_DEPTH} the parser tracks; every node \
+         after it would report a wrong path and wrong inherited cell counts",
         node.name(),
         node.level()
     );
-}
-
-/// Test strict ancestry on path-component boundaries; root returns false.
-pub fn is_below(ancestor: &str, path: &str) -> bool {
-    path.len() > ancestor.len()
-        && path.starts_with(ancestor)
-        && path.as_bytes()[ancestor.len()] == b'/'
+    node.path()
 }
 
 /// Decode one or two big-endian 32-bit cells; reject other widths and truncated values.
@@ -36,7 +32,6 @@ fn take_cells(cells: &mut impl Iterator<Item = u32>, count: usize) -> Option<u64
 
 /// A parent bus and its child-to-parent address mapping.
 pub struct Bridge<'a> {
-    path: String<PATH_LEN>,
     /// An absent property provides no mapping; an empty property is an identity mapping.
     ranges: Option<Property<'a>>,
     child_cells: usize,
@@ -55,7 +50,6 @@ impl Bridge<'_> {
                 take_cells(&mut cells, self.parent_cells),
                 take_cells(&mut cells, self.size_cells),
             ) else {
-                // An incomplete entry cannot establish a mapping.
                 return None;
             };
             entries += 1;
@@ -66,8 +60,6 @@ impl Bridge<'_> {
             }
         }
 
-        // Only an actually empty property is an identity mapping. Invalid or unmatched
-        // non-empty properties provide no mapping.
         (entries == 0 && ranges.is_empty()).then_some(address)
     }
 }
@@ -78,26 +70,32 @@ pub fn to_cpu_address(ancestors: &[Bridge<'_>], address: u64) -> Option<u64> {
 }
 
 /// Ancestor buses for a depth-first traversal, nearest last.
+///
+/// The root is not a bridge: the addresses its children publish are already CPU addresses.
 pub struct BusStack<'a> {
+    /// The bridge for the entered node at level `index + 1`.
     bridges: heapless::Vec<Bridge<'a>, MAX_DEPTH>,
-    /// Root cell count, retained because the root is excluded from the bridge stack.
+    /// The root's `#address-cells`, which every level-1 bridge takes as its parent width.
     root_address_cells: usize,
 }
 
 impl<'a> BusStack<'a> {
     pub fn new() -> Self { Self { bridges: heapless::Vec::new(), root_address_cells: 2 } }
 
-    /// Enter `node` and return its ancestor bridges, excluding the node itself. The caller
-    /// must enforce [`require_depth`] before reading `path`.
-    pub fn enter(&mut self, node: &Node<'a>, path: &str) -> &[Bridge<'a>] {
-        while self.bridges.last().is_some_and(|bridge| !is_below(&bridge.path, path)) {
-            self.bridges.pop();
-        }
-        if path == "/" {
+    /// Enter `node` and return its ancestor bridges, excluding the node itself.
+    ///
+    /// Depth-first order makes the node's level the height of its own ancestry, so entering it
+    /// retires every bridge the previous branch left behind.
+    pub fn enter(&mut self, node: &Node<'a>) -> &[Bridge<'a>] {
+        let Some(depth) = node.level().checked_sub(1) else {
             self.root_address_cells = node.address_cells as usize;
-        }
+            self.bridges.clear();
+            return &[];
+        };
+
+        self.bridges.truncate(depth);
+        let ancestors = self.bridges.len();
         let bridge = Bridge {
-            path: truncated(path),
             ranges: node.find_property("ranges"),
             child_cells: node.address_cells as usize,
             parent_cells: self
@@ -107,8 +105,8 @@ impl<'a> BusStack<'a> {
             size_cells: node.size_cells as usize,
         };
         let Ok(()) = self.bridges.push(bridge) else {
-            unreachable!("require_depth bounds a node and its ancestors to MAX_DEPTH")
+            unreachable!("path_of bounds a node's level, and its ancestry, to MAX_DEPTH")
         };
-        &self.bridges[..self.bridges.len() - 1]
+        &self.bridges[..ancestors]
     }
 }

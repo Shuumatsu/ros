@@ -1,3 +1,5 @@
+//! Human-readable summary of the published table.
+
 use super::table;
 use crate::utils::ByteSize;
 

@@ -100,7 +100,7 @@ pub fn init(ram: &PhysRange, image: PhysRange, foreign: &[PhysRange]) {
     carveouts.push(image).expect("MAX_CARVEOUTS leaves a slot for the kernel image");
     carveouts
         .extend_from_slice(foreign)
-        .expect("MachineMemory::check bounds the machine's list at MAX_FOREIGN");
+        .expect("the machine description holds at most MAX_FOREIGN ranges");
 
     let layout = metadata_layout(pool).expect("frame metadata size exceeds usize");
     let bitmap_words = layout.words();
